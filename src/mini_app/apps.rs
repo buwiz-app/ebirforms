@@ -15,7 +15,7 @@ pub(crate) const MIME_TYPE: &str = "text/x-nsh-tsx";
 pub(crate) const DIR_ENV: &str = "BIR_MINI_APPS_DIR";
 
 /// The apps `bir_app_open` may name.
-pub(crate) const OPENABLE: [&str; 3] = ["forms", "tax-profile", "register"];
+pub(crate) const OPENABLE: [&str; 4] = ["forms", "tax-profile", "register", "calendar"];
 
 static EMBEDDED: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/mini_apps.rs"));
 static EMBEDDED_MANIFEST: &str = include_str!("../../mini-apps/apps.json");

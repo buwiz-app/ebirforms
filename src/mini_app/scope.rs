@@ -45,6 +45,12 @@ pub(crate) static RULES: &[(&str, Rule)] = &[
     ("list_rdos", Rule::Free),
     ("list_zip_codes", Rule::Free),
     ("list_deadlines", Rule::Free),
+    // Deadline overrides: a moved deadline is a rule for every taxpayer
+    // (maintainer decision, 2026-10-26), no one taxpayer's data, so the
+    // Calendar app opened for one taxpayer can move and restore one.
+    ("deadline_overrides", Rule::Free),
+    ("deadline_override_set", Rule::Free),
+    ("deadline_override_remove", Rule::Free),
     ("auth_state", Rule::Free),
     ("generate_totp_secret", Rule::Free),
     ("record_screen_log", Rule::Free),

@@ -106,7 +106,8 @@ async function openRoxLink(url: string): Promise<boolean> {
 /** The BIR Tax Profile mini app for a taxpayer. */
 function profileLink(root: string): string {
   const server = ((globalThis as any).roxProps || {}).server || "bir";
-  return `rox://app/${server}/tax-profile?props=${encodeURIComponent(JSON.stringify({ tin: `${root}00000`, scope: root }))}`;
+  const token = encodeURIComponent(`@bir:taxprofile:${root}`);
+  return `rox://app/${server}/tax-profile?props=${encodeURIComponent(JSON.stringify({ tin: `${root}00000`, scope: root }))}&token=${token}`;
 }
 
 // ============================================================ helpers

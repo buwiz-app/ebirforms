@@ -10,8 +10,13 @@
     "description": "View and edit a taxpayer's registration: name, TIN and branches, RDO and address, and the forms they file each year."
   },
   {
+    "id": "calendar",
+    "title": "BIR Calendar",
+    "description": "See when each taxpayer's BIR returns are due and where each one stands, month by month, and move a deadline (or put it back) for every taxpayer."
+  },
+  {
     "id": "register",
-    "title": "BIR Register",
+    "title": "Buwiz Sign-in",
     "description": "Sign in to Buwiz (or create an account) on this computer so BIR can open the taxpayer database."
   }
 ]

@@ -3,8 +3,10 @@
 // Port of bir-shell's taxpayer page (app/shell/taxpayer.js: header, Profile /
 // Forms / Templates tabs, New branch) plus that taxpayer's dues and returns
 // from Home and Filings (app/shell/home.js, filings.js). It is focused on the
-// one taxpayer Rox opened it for (props.tin / props.scope); there is no
-// taxpayer switcher. Opening a return hands off to the BIR Forms mini app.
+// one taxpayer Rox opened it for (props.tin / props.scope), on the branch
+// props.branch names (Rox's `@bir:branchcode:`), else the TIN's own branch;
+// there is no taxpayer switcher. Opening a return hands off to the BIR Forms
+// mini app.
 //
 // Desktop-only pieces left out: profile export (host save dialog), the
 // right-panel quick edit (the section editors cover it), Recent, and "Use as
@@ -18,7 +20,8 @@ import { Clipboard } from "nsh/clipboard";
 // ============================================================ host calls
 // Every bir.* call this app makes goes through `bir` and is listed in `api`.
 
-type Props = { server?: string; tin?: string; scope?: string };
+/** `branch`: a branch code (`00001`) to open on; `year`: the tax year to show (Rox's App Details versions). */
+type Props = { server?: string; tin?: string; scope?: string; branch?: string; year?: number | string };
 const PROPS: Props = ((globalThis as any).roxProps || {}) as Props;
 /** The taxpayer scope sent with every call; follows a TIN move. */
 let SCOPE: string | undefined = PROPS.scope || (PROPS.tin ? String(PROPS.tin).slice(0, 9) : undefined);
@@ -65,25 +68,6 @@ interface StarterPackInfo { id: string; label: string; forms: string[] }
 interface FormTemplateSummary { form_code: string; updated_at: string; answers_kept: number; marked: number; source: string }
 interface RdoOption { code: string; description: string }
 interface ScreenFormIndexEntry { c: string; t: string; rev: string; freq: string; pages: number; n: number; q: number }
-interface InboxState {
-  tin: string;
-  inbox_email: string;
-  auth_method: "AppPassword" | "GoogleOAuth";
-  tracking_enabled: boolean;
-  imap_login: string;
-  imap_host: string;
-  has_app_password: boolean;
-  oauth_connected: boolean;
-  oauth_inbox_email: string | null;
-  oauth_updated_at: string | null;
-  still_pending: boolean;
-  matching_tins: string[];
-  last_check_at: string | null;
-  last_check_status: string | null;
-  last_check_log: string | null;
-}
-interface InboxVerifyResult { ok: boolean; message: string; state: InboxState }
-interface InboxCheckResult { ok: boolean; still_pending: boolean; error: string | null; state: InboxState }
 interface SendGrant { tin: string; form: string; granted_at: string }
 interface AuthState {
   mode: "solo" | "helpdesk" | null;
@@ -166,14 +150,6 @@ const api = {
   listFormTemplates: (tin: string) => bir<FormTemplateSummary[]>("list_form_templates", tin),
   createTemplateFromLatest: (tin: string, code: string) => bir<FormTemplateSummary>("create_template_from_latest", tin, code),
   deleteFormTemplate: (tin: string, code: string) => bir<boolean>("delete_form_template", tin, code),
-  inboxState: (tin: string) => bir<InboxState>("inbox_state", tin),
-  setInboxAppPassword: (tin: string, input: { imap_email: string; imap_host?: string | null; app_password?: string | null }) =>
-    bir<InboxState>("set_inbox_app_password", tin, input),
-  setInboxTracking: (tin: string, enabled: boolean) => bir<InboxState>("set_inbox_tracking", tin, enabled),
-  disconnectInboxOauth: (tin: string) => bir<InboxState>("disconnect_inbox_oauth", tin),
-  connectInboxOauth: (tin: string) => bir<InboxState>("connect_inbox_oauth", tin),
-  testInboxConnection: (tin: string) => bir<InboxVerifyResult>("test_inbox_connection", tin),
-  checkInboxNow: (tin: string) => bir<InboxCheckResult>("check_inbox_now", tin),
   listSendGrants: (tin: string) => bir<SendGrant[]>("list_send_grants", tin),
   grantSend: (tin: string, form: string) => bir<SendGrant>("grant_send", tin, form),
   revokeSend: (tin: string, form: string) => bir<null>("revoke_send", tin, form),
@@ -633,7 +609,10 @@ export default function R() {
 
   // ---------------------------------------------------------------- selection and data
   const root = signal(startTin.slice(0, 9));
-  const code = signal(startTin.length >= 14 ? startTin.slice(9, 14) : "00000");
+  const startBranch = String(PROPS.branch || "").replace(/\D/g, "");
+  const code = signal(
+    startBranch && startBranch.length <= 5 ? startBranch.padStart(5, "0") : startTin.length >= 14 ? startTin.slice(9, 14) : "00000",
+  );
   const ver = signal(0);
   const bump = () => ver.update((v) => v + 1);
   const tab = signal<"profile" | "forms" | "templates" | "returns">("profile");
@@ -686,7 +665,7 @@ export default function R() {
     (s) => api.listTaxYears(s.tin),
     { initialValue: [] as number[] },
   );
-  const selYear = signal<number | null>(null);
+  const selYear = signal<number | null>(PROPS.year != null && PROPS.year !== "" && !Number.isNaN(Number(PROPS.year)) ? Number(PROPS.year) : null);
   /** The selected year, kept valid: this year if the branch has it, else its latest. */
   const year = computed<number | null>(() => {
     const ys = years();
@@ -714,10 +693,6 @@ export default function R() {
     () => year() !== null && { year: year() as number, v: ver() },
     (s) => api.deadlinesBetween(`${s.year}-01-01`, `${s.year + 1}-12-31`),
     { initialValue: [] as DeadlineRow[] },
-  );
-  const inbox = resource(
-    () => !!tin() && { tin: tin(), v: ver() },
-    (s) => api.inboxState(s.tin),
   );
   const grants = resource(
     () => !!tin() && { tin: tin(), v: ver() },
@@ -763,7 +738,7 @@ export default function R() {
   };
 
   // ---------------------------------------------------------------- profile sections (taxpayer.js startEdit / saveSection)
-  const open = signal<Record<string, boolean>>({ taxpayer: true, branch: true, address: true, branches: true, inbox: false, agent: false });
+  const open = signal<Record<string, boolean>>({ taxpayer: true, branch: true, address: true, branches: true, agent: false });
   const toggle = (id: string) => {
     open.update((o) => ({ ...o, [id]: !o[id] }));
     if (editSec() === id && !open()[id]) editSec.set(null);
@@ -882,8 +857,6 @@ export default function R() {
     code.set(c);
     editSec.set(null);
     tinError.set(null);
-    inboxEdit.set(null);
-    inboxMsg.set(null);
     formsEdit.set(null);
     addYear.set(false);
     newBranch.set(false);
@@ -952,68 +925,6 @@ export default function R() {
       else nbError.set(text);
     }
   };
-
-  // ---------------------------------------------------------------- confirmation inbox (P2-5)
-  type InboxEdit = { method: "AppPassword" | "GoogleOAuth"; email: Signal<string>; host: Signal<string>; password: Signal<string>; error: Signal<string | null> };
-  const inboxEdit = signal<InboxEdit | null>(null);
-  const inboxMsg = signal<{ ok: boolean; text: string } | null>(null);
-  const inboxBusy = signal(false);
-  const startInboxEdit = (method?: "AppPassword" | "GoogleOAuth") => {
-    const s = inbox();
-    inboxEdit.set({
-      method: method || (s?.auth_method === "GoogleOAuth" ? "GoogleOAuth" : "AppPassword"),
-      email: signal(s?.imap_login || ""),
-      host: signal(s?.imap_host || "imap.gmail.com"),
-      password: signal(""),
-      error: signal<string | null>(null),
-    });
-  };
-  const saveInbox = async () => {
-    const ib = inboxEdit();
-    if (!ib || ib.method !== "AppPassword") return;
-    const email = ib.email().trim();
-    if (!EMAIL_RE.test(email)) return ib.error.set("Type an email like name@example.com.");
-    try {
-      await api.setInboxAppPassword(tin(), { imap_email: email, imap_host: ib.host().trim() || null, app_password: ib.password().trim() || null });
-      inboxEdit.set(null);
-      bump();
-      say("Inbox credentials saved. Verify the connection to start tracking.");
-    } catch (e) {
-      ib.error.set(errorText(e));
-    }
-  };
-  const inboxRun = async (pending: string, fn: () => Promise<{ ok: boolean; text: string }>) => {
-    if (inboxBusy()) return;
-    inboxBusy.set(true);
-    inboxMsg.set({ ok: true, text: pending });
-    try {
-      const r = await fn();
-      inboxMsg.set(r);
-      say(r.text, r.ok);
-    } catch (e) {
-      inboxMsg.set({ ok: false, text: errorText(e) });
-    }
-    inboxBusy.set(false);
-    bump();
-  };
-  const verifyInbox = () =>
-    inboxRun("Testing connection…", async () => {
-      const r = await api.testInboxConnection(tin());
-      return { ok: r.ok, text: r.message };
-    });
-  const checkInbox = () =>
-    inboxRun("Checking the inbox for BIR confirmations…", async () => {
-      const r = await api.checkInboxNow(tin());
-      return r.ok
-        ? { ok: true, text: r.still_pending ? "Checked. A submitted return is still waiting for its confirmation." : "Checked. Everything submitted is confirmed." }
-        : { ok: false, text: r.error || "The check failed." };
-    });
-  const connectInbox = () =>
-    inboxRun("Google sign-in opened in your browser…", async () => {
-      await api.connectInboxOauth(tin());
-      inboxEdit.set(null);
-      return { ok: true, text: "Google account connected. Email tracking is on." };
-    });
 
   // ---------------------------------------------------------------- tax years and forms
   const addYear = signal(false);
@@ -1219,21 +1130,9 @@ export default function R() {
   };
 
   const profileTab = () => {
-    const ib = () => inbox();
-    const inboxMeta = () => {
-      const s = ib();
-      return s
-        ? s.tracking_enabled
-          ? `Tracking on · ${s.inbox_email}`
-          : s.oauth_connected || s.has_app_password
-            ? `Connected · ${s.inbox_email || s.oauth_inbox_email || ""}`
-            : "Not connected"
-        : "Not connected";
-    };
     const agentForms = () => (yearForms().length ? yearForms() : ["2551Q"]);
     const granted = () => new Set(grants().map((g) => g.form));
     const inhCount = () => ADDRESS_FIELDS.filter(([f]) => !branch()?.is_head_office && (branch()?.inherited || []).includes(f)).length;
-    const inboxMethod = () => inboxEdit()?.method || ib()?.auth_method || "AppPassword";
     return (
       <View class="gap-3">
         <Section
@@ -1383,109 +1282,6 @@ export default function R() {
               <FormActions onCancel={() => newBranch.set(false)} onSave={createBranch} saveLabel="Add branch" />
             </View>
           </If>
-        </Section>
-
-        <Section title="Confirmation inbox" meta={inboxMeta()} open={!!open().inbox} onToggle={() => toggle("inbox")}>
-          <LoadError error={inbox.error()} retry={inbox.refetch} what="the inbox" />
-          <Field label="Authentication method" full>
-            <Segmented
-              options={[
-                { value: "GoogleOAuth", label: "Google account (OAuth2)" },
-                { value: "AppPassword", label: "App password" },
-              ]}
-              value={inboxMethod()}
-              onChange={(v) => {
-                const ib0 = inboxEdit();
-                if (ib0) inboxEdit.set({ ...ib0, method: v as "AppPassword" | "GoogleOAuth" });
-                else startInboxEdit(v as "AppPassword" | "GoogleOAuth");
-              }}
-            />
-          </Field>
-          <If
-            when={inboxMethod() === "AppPassword"}
-            else={
-              <Field
-                label="Google account"
-                full
-                value={ib()?.oauth_connected ? `Connected as ${ib()?.oauth_inbox_email || ib()?.inbox_email}` : "Not connected"}
-              />
-            }
-          >
-            <View class="flex-row flex-wrap gap-4">
-              <Field label="Inbox email" value={ib()?.imap_login || ib()?.inbox_email || "Not set"}>
-                {inboxEdit() ? <TextInput value={(inboxEdit() as InboxEdit).email} placeholder="name@gmail.com" /> : null}
-              </Field>
-              <Field label="IMAP host" value={ib()?.imap_host}>
-                {inboxEdit() ? <TextInput value={(inboxEdit() as InboxEdit).host} /> : null}
-              </Field>
-              <Field label="App password" value={ib()?.has_app_password ? "Stored" : "Not set"} full>
-                {inboxEdit() ? (
-                  <View class="gap-1">
-                    <TextInput
-                      value={(inboxEdit() as InboxEdit).password}
-                      secure
-                      placeholder={ib()?.has_app_password ? "Leave empty to keep the stored password" : "16-letter app password"}
-                      error={!!(inboxEdit() as InboxEdit).error()}
-                    />
-                    <ErrorText text={(inboxEdit() as InboxEdit).error()} />
-                  </View>
-                ) : null}
-              </Field>
-            </View>
-          </If>
-          <If when={ib()?.last_check_at}>
-            <Field label="Last check" value={`${shortDate(ib()?.last_check_at)}${ib()?.last_check_status ? ` — ${ib()?.last_check_status}` : ""}`} />
-          </If>
-          <If when={inboxMethod() === "GoogleOAuth"}>
-            <Text class={`text-xs ${C.fg3}`}>
-              Profiles that share this inbox share one Google OAuth credential set. Re-authorize or Disconnect updates every profile using this email.
-            </Text>
-          </If>
-          <If when={inboxMethod() === "AppPassword" && inboxEdit()}>
-            <Text class={`text-xs ${C.fg3}`}>
-              An app password needs 2-Step Verification on the mail account first (Google / Outlook / Yahoo security settings).
-            </Text>
-          </If>
-          <View class="flex-row flex-wrap items-center gap-2">
-            <If when={inboxEdit()}>
-              <Button label="Cancel" variant="ghost" onPress={() => inboxEdit.set(null)} />
-            </If>
-            <If when={inboxEdit() && inboxMethod() === "AppPassword"}>
-              <Button label="Save" variant="primary" onPress={saveInbox} />
-            </If>
-            <If when={!inboxEdit() && inboxMethod() === "AppPassword"}>
-              <Button label="Edit credentials" variant="ghost" onPress={() => startInboxEdit("AppPassword")} />
-            </If>
-            <If when={inboxMethod() === "GoogleOAuth"}>
-              <Button label={ib()?.oauth_connected ? "Re-authorize" : "Connect Google account"} disabled={inboxBusy()} onPress={connectInbox} />
-            </If>
-            <If when={inboxMethod() === "GoogleOAuth" && ib()?.oauth_connected}>
-              <Button
-                label="Disconnect"
-                variant="ghost"
-                onPress={() => write(() => api.disconnectInboxOauth(tin()), "Google account disconnected for every profile sharing this inbox.")}
-              />
-            </If>
-            <Button label="Verify connection" disabled={inboxBusy()} onPress={verifyInbox} />
-            <Button label="Check now" variant="ghost" disabled={inboxBusy()} onPress={checkInbox} />
-          </View>
-          <If when={inboxMsg()}>
-            <Text class={`text-sm ${inboxMsg()?.ok ? C.success : C.danger}`}>{inboxMsg()?.text}</Text>
-          </If>
-          <View class="flex-row flex-wrap items-center gap-3">
-            <Switch
-              on={!!ib()?.tracking_enabled}
-              onChange={(on) => write(() => api.setInboxTracking(tin(), on), on ? "Automated receipt tracking on." : "Automated receipt tracking off.")}
-              label="Automated receipt tracking"
-            />
-          </View>
-          <Text class={`text-xs ${ib()?.tracking_enabled ? C.success : C.fg3}`}>
-            {ib()?.tracking_enabled
-              ? ib()?.still_pending
-                ? "● Automated BIR receipt tracking is active — a submitted return is still waiting for its confirmation."
-                : "● Automated BIR receipt tracking is active."
-              : "○ Verify your connection to activate email tracking."}
-          </Text>
         </Section>
 
         <Section

@@ -9,11 +9,18 @@
 //!   queued filings keep going when Rox is closed.
 //!
 //! Everything that touches the database runs on the main thread: the `bir`
-//! module keeps its handle thread-local. See [`server`] for the tools and
-//! [`apps`] for the TSX mini apps it serves as resources.
+//! module keeps its handle thread-local. See [`server`] for the tools,
+//! [`apps`] for the TSX mini apps it serves as resources and [`resolve`] for
+//! the commands and `@` scopes it announces to Rox.
 
 mod apps;
 mod bridge;
+mod calendar;
+mod confirm;
+mod payments;
+#[cfg(test)]
+mod demo_tests;
+mod resolve;
 mod scope;
 mod server;
 

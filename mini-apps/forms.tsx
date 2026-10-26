@@ -2,14 +2,15 @@
 // the ways into it (main.js / home.js / taxpayer.js / library.js), as one
 // Native Shell module. Opened full screen by Rox for ONE taxpayer branch
 // (`roxProps.tin`); every host call goes through the headless BIR daemon's
-// `bir_call` bridge. The schema-driven renderer covers all 43 forms the way
+// `bir_call` bridge. Rox's `/taxform` opens it on one return with
+// `{tin, form, period, action, draft_id?}`: `view` read-only, `file` to fill,
+// `submit` to validate and confirm with the user's own Submit. The schema-driven renderer covers all 43 forms the way
 // form_page.js does: parts -> items -> fields, schedules, locks, profile
 // boxes, penalties, samples, amendments, validation, save and queue.
 
 import { signal, computed, untracked, Text, View, Scroll, Input } from "nsh";
 import type { YNode } from "nsh";
 import { windowSize } from "nsh/device";
-import { Clipboard } from "nsh/clipboard";
 
 // =====================================================================
 // HOST CALLS: every call to the BIR daemon (and Rox) lives in this section.
@@ -18,8 +19,16 @@ import { Clipboard } from "nsh/clipboard";
 // dashboard_module}.rs.
 // =====================================================================
 
-/** Set by Rox before the module runs. `form_code`/`year`/`period`/`key` deep-link to a return. */
-type RoxProps = { server?: string; tin?: string; scope?: string; form_code?: string; year?: number | string; period?: number | string; key?: number | string | null };
+/**
+ * Set by Rox before the module runs. `form` + `period` (`2026-Q3`, `2026-01`, `2025`, `2026-10-26`)
+ * + `action` (+ `draft_id`) open one return (Rox's `/taxform`); the older `form_code`/`year`/`period`/`key`
+ * deep-link to a return too.
+ */
+type RoxProps = {
+  server?: string; tin?: string; scope?: string;
+  form?: string; action?: "view" | "file" | "submit"; draft_id?: number | string | null;
+  form_code?: string; year?: number | string; period?: number | string; key?: number | string | null;
+};
 const roxProps = (): RoxProps => (globalThis as any).roxProps || {};
 const digits = (v: unknown) => String(v ?? "").replace(/\D/g, "");
 
@@ -34,17 +43,56 @@ async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
   return r.result as T;
 }
 
-/** Opens another mini app through Rox (`rox://app/<server>/<app>?props=<JSON>`; nothing else is accepted). */
-async function openRoxApp(app: string, props: Record<string, unknown>) {
-  const server = roxProps().server || "bir";
-  const url = `rox://app/${server}/${app}?props=${encodeURIComponent(JSON.stringify(props))}`;
+/** One of the BIR server's own tools (not `bir_call`): the payments and the filing record. */
+async function tool<T = any>(name: string, args: Record<string, unknown>): Promise<T> {
+  const r = await fetch("http://127.0.0.1:8787/mcp/call", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ server: roxProps().server || "bir", tool: name, args }),
+  }).then((x) => x.json());
+  if (!r.ok) throw new Error(r.error || `${name} failed`);
+  return r.result as T;
+}
+
+/**
+ * Rox's native file picker (the composer's "Attach photos & files"): the first file chosen, as a local path.
+ * `null` when cancelled; throws when this Rox has no picker.
+ */
+async function pickFile(): Promise<string | null> {
+  const r = await fetch("http://127.0.0.1:8787/attach/pick", { method: "POST" });
+  if (!r.ok) throw new Error(`Rox has no file picker (${r.status})`);
+  const j = await r.json();
+  if (j?.cancelled) return null;
+  const uri = String(j?.files?.[0]?.uri || "");
+  if (!uri) throw new Error("Rox returned no file");
+  return uri.replace(/^file:\/\//, "");
+}
+
+/** Opens a `rox://` link through Rox: another mini app, or a new chat. */
+async function openRox(url: string, what: string) {
   const r = await fetch("http://127.0.0.1:8787/mcp/open", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
   });
-  if (!r.ok) throw new Error(`Rox could not open ${app} (${r.status})`);
+  if (!r.ok) throw new Error(`Rox could not open ${what} (${r.status})`);
 }
+
+/** Opens another mini app through Rox (`rox://app/<server>/<app>?props=<JSON>&token=<token>`); `token` is what it opens on, so Rox can attach and pin it. */
+async function openRoxApp(app: string, props: Record<string, unknown>, token?: string) {
+  const server = roxProps().server || "bir";
+  const tail = token ? `&token=${encodeURIComponent(token)}` : "";
+  await openRox(`rox://app/${server}/${app}?props=${encodeURIComponent(JSON.stringify(props))}${tail}`, app);
+}
+
+/** `@bir:taxprofile:<tin>`: a head office by its 9-digit root, another branch by all 14 digits. */
+function profileToken(tin: string) {
+  const d = digits(tin);
+  return `@bir:taxprofile:${d.length === 14 && /^0+$/.test(d.slice(9)) ? d.slice(0, 9) : d}`;
+}
+
+/** A new Rox chat with `text` in its composer, not sent (`rox://chat/new?draft=`). */
+const openRoxChat = (text: string) => openRox(`rox://chat/new?draft=${encodeURIComponent(text)}`, "a new chat");
 
 type Edits = Record<string, string>;
 const H = {
@@ -77,6 +125,15 @@ const H = {
   cancelQueue: (code: string, draft: any) => bir<null>("screen_form_cancel_queue", code, draft),
   queuePeriod: (tin: string, code: string, year: number, quarter: number | null) => bir<number>("queue_form_draft", tin, code, year, quarter),
   cancelQueued: (tin: string, code: string, year: number, quarter: number | null) => bir<null>("cancel_queued", tin, code, year, quarter),
+  // the assistant's standing OK to submit a form for this taxpayer
+  grants: (tin: string) => bir<{ tin: string; form: string; granted_at: string }[]>("list_send_grants", tin),
+  grant: (tin: string, code: string) => bir<any>("grant_send", tin, code),
+  revoke: (tin: string, code: string) => bir<null>("revoke_send", tin, code),
+  // payments and the printable filing record (the server's own tools)
+  payments: (tin: string, form: string, period: string) => tool<{ payments: Payment[] }>("bir_payments_list", { tin, form, period }),
+  markPaid: (tin: string, form: string, period: string, proof_path?: string) =>
+    tool<{ payment: Payment }>("bir_mark_paid", proof_path ? { tin, form, period, proof_path } : { tin, form, period }),
+  filingRecord: (tin: string, form: string, period: string) => tool<{ link: string; title: string }>("bir_filing_record", { tin, form, period }),
   // print (bir-shell opens a native preview window; headless this is best effort)
   print: (code: string, draft: any) => bir<{ path: string }>("screen_form_print", code, draft),
   printSample: (code: string, draft: any, edits: Edits, unlocked: string[]) => bir<{ path: string }>("screen_form_print_sample", code, draft, edits, unlocked),
@@ -101,10 +158,19 @@ type DateSpec = { single?: Field; month?: Field; day?: Field | null; year?: Fiel
 type Pen = { keys: string[]; edited: boolean; kept?: boolean; applies: boolean };
 type Err = { field: string; message: string; keys?: string[]; dismiss?: string; dismiss_label?: string };
 type PeriodPart = { key: string; part: string; quarter: number | null };
+/** A recorded payment (bir_payments_list). `channel` "manual" is "marked paid" with no details. */
+type Payment = {
+  id: string; channel: string; reference: string; amount: number | null; fee: number | null; total: number | null;
+  paid_at: string | null; recorded_at: string; source: "email" | "receipt" | "manual"; proof: { kind: string; name?: string | null };
+};
 
 interface Opts {
   tin: string; code: string; year: number; period: number;
   returnKey?: number | null; sample?: boolean; amend?: boolean; filedOriginalId?: number; back?: Opts;
+  /** Rox's `view`: every box read-only. */
+  viewOnly?: boolean;
+  /** Rox's `submit`: validate on open, then ask before the user's own Submit. */
+  submitAsk?: boolean;
 }
 
 interface Idx {
@@ -135,7 +201,12 @@ interface FS extends Opts {
   submittedAt: string | null; confirmedAt: string | null; amends: string | null; filedOriginal: any; filedOriginalView: any;
   removal: { r: any; edits: Edits; typed: Edits; draft: any } | null; chosenFrom: Edits;
   editSeq: number; validateSeq: number; chain: Promise<unknown>;
-  picker: Picker | null; printResult: { path: string; sample: boolean; error?: string } | null;
+  picker: Picker | null; printResult: { sample: boolean; error: string } | null;
+  /** Whether the assistant may submit this form for this taxpayer (null: not read yet). */
+  assistantMay: boolean | null;
+  /** This return's recorded payments (null: not read yet, or not a stored return). */
+  payments: Payment[] | null;
+  paying: boolean;
 }
 
 // =====================================================================
@@ -461,7 +532,7 @@ const TIN = () => digits(roxProps().tin);
 const ROOT = () => TIN().slice(0, 9);
 
 function openTaxProfile() {
-  openRoxApp("tax-profile", { tin: TIN(), scope: roxProps().scope || ROOT() }).catch((e) => toast(errText(e), "danger"));
+  openRoxApp("tax-profile", { tin: TIN(), scope: roxProps().scope || ROOT() }, profileToken(TIN())).catch((e) => toast(errText(e), "danger"));
 }
 
 // =====================================================================
@@ -487,7 +558,7 @@ function newState(opts: Opts): FS {
     periodComplete: false, periodInFlight: null, periodSeq: 0, periodToken: 0, opens: null, existing: null, saveAfterAnswer: null,
     submittedAt: null, confirmedAt: null, amends: null, filedOriginal: null, filedOriginalView: null,
     removal: null, chosenFrom: {}, editSeq: 0, validateSeq: 0, chain: Promise.resolve(),
-    picker: null, printResult: null,
+    picker: null, printResult: null, assistantMay: null, payments: null, paying: false,
   };
 }
 
@@ -542,6 +613,9 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
       bump();
       then?.(null);
       recordNotesWhenShown(s, token);
+      readGrant(s, token);
+      readPayments(s, token);
+      if (s.submitAsk && s.editable && !s.sample) validate(s);
     } catch (e) {
       if (token !== T) return;
       s.loading = false;
@@ -555,7 +629,7 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
 function takeOpened(s: FS, r: any) {
   s.draft = r.draft;
   s.status = r.status;
-  s.editable = r.editable;
+  s.editable = r.editable && !s.viewOnly;
   s.blank = new Set(r.blank || []);
   s.periodParts = new Map((r.period_parts || []).map((p: PeriodPart) => [p.key, p]));
   s.periodSet = Boolean(r.period_set);
@@ -1442,7 +1516,67 @@ async function ensureSaved(s: FS): Promise<boolean> {
 }
 
 function reload(s: FS) {
-  openForm({ tin: s.tin, code: s.code, year: s.year, period: s.period, sample: s.sample, ...(s.returnKey != null ? { returnKey: s.returnKey } : {}) });
+  openForm({ tin: s.tin, code: s.code, year: s.year, period: s.period, sample: s.sample, viewOnly: s.viewOnly, ...(s.returnKey != null ? { returnKey: s.returnKey } : {}) });
+}
+
+// ----- the assistant: its standing OK to submit, and the hand-off to a chat
+
+const grantTin = (s: FS) => (digits(s.tin).length === 9 ? `${digits(s.tin)}00000` : digits(s.tin));
+
+/** Reads whether the assistant may submit this form for this taxpayer. */
+async function readGrant(s: FS, token: number) {
+  if (s.sample) return;
+  try {
+    const grants = await H.grants(grantTin(s));
+    if (!live(s, token)) return;
+    s.assistantMay = grants.some((g) => digits(g.tin) === grantTin(s) && normCode(g.form) === s.code);
+  } catch {
+    if (live(s, token)) s.assistantMay = null;
+  }
+  bump();
+}
+
+/** The toggle: grants or revokes the assistant's standing OK. The user's own Submit never needs it. */
+async function setAssistantMay(s: FS, may: boolean) {
+  try {
+    if (may) await H.grant(grantTin(s), s.code);
+    else await H.revoke(grantTin(s), s.code);
+    s.assistantMay = may;
+    toast(may ? `The assistant may now submit ${s.code} for this taxpayer.` : `The assistant can no longer submit ${s.code} for this taxpayer.`, "success");
+  } catch (e) {
+    toast(errText(e), "danger");
+  }
+  bump();
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** The return's period as a token writes it: `2026-01`, `2026-Q3`, `2025`, `2026-10-26`. */
+function tokenPeriod(s: FS): string {
+  const freq = s.schema?.freq || "";
+  if (freq === "Monthly" && s.period >= 1 && s.period <= 12) return `${s.year}-${pad2(s.period)}`;
+  if (freq === "Quarterly" && s.period >= 1 && s.period <= 4) return `${s.year}-Q${s.period}`;
+  if (freq === "As needed") {
+    // The transaction's day when the return is keyed by it (`MMDD`), else today.
+    const key = Number(s.returnKey ?? 0);
+    const day = new Date(s.year, Math.floor(key / 100) - 1, key % 100);
+    if (key >= 101 && key <= 1231 && day.getMonth() === Math.floor(key / 100) - 1) return `${s.year}-${pad2(Math.floor(key / 100))}-${pad2(key % 100)}`;
+    const now = new Date();
+    return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  }
+  return String(s.year);
+}
+
+/** `@bir:taxform:<tin>/<FORM>-<period>`: a head office by its 9-digit root. */
+function taxformToken(s: FS): string {
+  const tin = digits(s.tin);
+  const who = tin.length === 14 && /^0+$/.test(tin.slice(9)) ? tin.slice(0, 9) : tin;
+  return `@bir:taxform:${who}/${s.code}-${tokenPeriod(s)}`;
+}
+
+/** "Ask the assistant": a new chat whose composer starts with this return's token. */
+function askAssistant(s: FS) {
+  openRoxChat(`${taxformToken(s)} `).catch((e) => toast(errText(e), "danger"));
 }
 
 async function queue(s: FS) {
@@ -1473,27 +1607,110 @@ async function cancelQueue(s: FS) {
   }
 }
 
-/** Print preview: bir-shell opens its native preview window; here the host's answer is shown as text. */
+/** Print preview: the host writes the filled sheet and Rox shows it in its file viewer (`rox://view`), over this app.
+ *  A return that has left Draft prints its whole record: the form, BIR's confirmation and the proof of payment. */
 async function print(s: FS) {
+  s.printResult = null;
   if (s.sample) {
     try {
       const pending = s.pending;
       const r = await H.printSample(s.code, s.draft, pending, unlockedFor(s, pending));
-      s.printResult = { path: String(r?.path ?? ""), sample: true };
+      await showPrint(s, r, true);
     } catch (e) {
-      s.printResult = { path: "", sample: true, error: errText(e) };
+      s.printResult = { sample: true, error: errText(e) };
     }
     return bump();
   }
   if (s.amends && !s.saved) await flush(s);
   else if (s.editable && !(await ensureSaved(s))) return;
   try {
-    const r = await H.print(s.code, s.draft);
-    s.printResult = { path: String(r?.path ?? ""), sample: false };
+    if (sentOrQueued(s)) {
+      const r = await H.filingRecord(digits(s.tin), s.code, tokenPeriod(s));
+      await openRox(r.link, "the print preview");
+    } else {
+      const r = await H.print(s.code, s.draft);
+      await showPrint(s, r, false);
+    }
   } catch (e) {
-    s.printResult = { path: "", sample: false, error: errText(e) };
+    s.printResult = { sample: false, error: errText(e) };
   }
   bump();
+}
+
+// ----- payment and the filing record
+
+/** Whether this return has left Draft: it can be paid and has a filing record. */
+const sentOrQueued = (s: FS) => !s.sample && !s.filedOriginalView && s.status !== "Draft";
+
+async function readPayments(s: FS, token: number) {
+  if (!sentOrQueued(s)) return;
+  try {
+    const r = await H.payments(digits(s.tin), s.code, tokenPeriod(s));
+    if (!live(s, token)) return;
+    s.payments = r.payments || [];
+  } catch {
+    if (live(s, token)) s.payments = null;
+  }
+  bump();
+}
+
+const pesos = (n: number | null) => (n == null ? "" : `PHP ${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+function paymentLine(p: Payment): string {
+  if (p.channel === "manual") return `Marked paid${p.proof.kind === "file" ? ", receipt attached" : ", no receipt"}`;
+  const paid = p.total ?? p.amount;
+  return [`Paid ${pesos(paid)}`.trim(), `via ${p.channel}`, p.paid_at ? `on ${shortDate(p.paid_at)}` : "", p.reference ? `ref ${p.reference}` : "", p.proof.kind === "file" ? "receipt attached" : p.proof.kind === "email" ? "from its email" : ""]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** "Mark as paid": on the user's word, no proof (a receipt can be attached later). */
+async function markPaid(s: FS) {
+  s.paying = true;
+  bump();
+  try {
+    await H.markPaid(digits(s.tin), s.code, tokenPeriod(s));
+    toast("Marked as paid. Attach the receipt when you have it.", "success");
+  } catch (e) {
+    toast(errText(e), "danger");
+  }
+  s.paying = false;
+  await readPayments(s, T);
+}
+
+/**
+ * "Attach receipt": Rox's file picker, and bir keeps a copy of the image or PDF as this return's proof of payment.
+ * Without a picker, a new chat with this return's token: the user drops the receipt there and the assistant records it.
+ */
+async function attachReceipt(s: FS) {
+  let path: string | null;
+  try {
+    path = await pickFile();
+  } catch {
+    openRoxChat(`${taxformToken(s)} Here is the payment receipt for this return: record it as proof of payment. `).catch((e) => toast(errText(e), "danger"));
+    return toast("Drop the receipt into the new chat and send it; the assistant records it.");
+  }
+  if (!path) return;
+  if (!/\.(png|jpe?g|gif|webp|heic|pdf)$/i.test(path)) return toast("A receipt must be an image or a PDF.", "danger");
+  s.paying = true;
+  bump();
+  try {
+    await H.markPaid(digits(s.tin), s.code, tokenPeriod(s), path);
+    toast("Receipt attached as proof of payment.", "success");
+  } catch (e) {
+    toast(errText(e), "danger");
+  }
+  s.paying = false;
+  await readPayments(s, T);
+}
+
+/** Opens the host's filled sheet in Rox's viewer (`rox://view?path=&title=`); the path is never shown. */
+async function showPrint(s: FS, r: { path: string } | null, sample: boolean) {
+  const path = String(r?.path ?? "");
+  if (!path) throw new Error("The host made the preview but returned no file.");
+  const what = sample ? "sample" : periodLabel(s.schema?.freq || "", s.year, s.period);
+  const title = `${s.code} · ${what}`;
+  await openRox(`rox://view?path=${encodeURIComponent(path)}&title=${encodeURIComponent(title)}`, "the print preview");
 }
 
 function openFiledOriginal(s: FS) {
@@ -1702,6 +1919,7 @@ function Box(p: { s: FS; k: string; t: string; width: number; label: string; max
       autoCapitalize="none"
       autoCorrect={false}
       maxLength={p.t === "text" || p.t === "int" ? p.maxLength : undefined}
+      readonly={(rev(), !s.editable)}
       onChange={(v) => typeInto(s, p.k, v)}
       onFocus={() => enterBox(s, p.k)}
       onBlur={() => blurBox(s, p.k)}
@@ -2442,6 +2660,12 @@ function FormPage(p: { s: FS }) {
         <Btn label="View tax profile" variant="ghost" onPress={openTaxProfile} />
       </View>
       <If when={s.sample}><Text class={`text-xs ${C.fg2}`}>{SAMPLE_NOTE}</Text></If>
+      <If when={(rev(), Boolean(s.viewOnly) && !s.loading && !s.error)}>
+        <Text class={`text-xs ${C.fg2}`}>Opened to view: nothing here can be changed. Open it from the forms list to edit it.</Text>
+      </If>
+      <SubmitConfirm s={s} />
+      <AssistantToggle s={s} />
+      <PaymentPanel s={s} />
       <If when={(rev(), s.profileUpdates.length > 0)}><Text class={`text-xs ${C.fg2}`}>{`Updated from your tax profile: ${s.profileUpdates.join("; ")}`}</Text></If>
       <Each of={(rev(), s.notes)}>{(n) => <Text class={`text-xs ${C.fg2}`}>{n().text}</Text>}</Each>
       <If when={(rev(), s.editable && s.profileDiffers.length > 0)}>
@@ -2460,20 +2684,11 @@ function FormPage(p: { s: FS }) {
         </Text>
       </If>
       <If when={(rev(), Boolean(s.printResult))}>
-        <View class={`p-3 rounded-xl gap-2 ${(rev(), s.printResult?.error ? C.dangerSoft : C.accentSoft)}`}>
-          <Text class={`text-sm font-semibold ${C.fg}`}>{(rev(), s.printResult?.error ? "Print preview could not be made" : "Print preview")}</Text>
-          <Text class={`text-xs ${(rev(), s.printResult?.error ? C.danger : C.fg)}`} selectable>
-            {(rev(), s.printResult?.error ? s.printResult.error : s.printResult?.path ? `Filled sheet: ${s.printResult.path}` : "The host made the preview but returned no file path.")}
-          </Text>
-          <Text class={`text-xs ${C.fg2}`}>
-            {(rev(), s.printResult?.sample
-              ? "This mini app has no preview window (the desktop app opens one). The result shows the sample as the page holds it now; nothing is saved. Print preview again after more edits to refresh it."
-              : "This mini app has no preview window (the desktop app opens one). The result shows the return as saved. Print preview again after more edits to refresh it.")}
-          </Text>
+        <View class={`p-3 rounded-xl gap-2 ${C.dangerSoft}`}>
+          <Text class={`text-sm font-semibold ${C.fg}`}>{(rev(), s.printResult?.sample ? "The sample's print preview could not be made" : "Print preview could not be made")}</Text>
+          <Text class={`text-xs ${C.danger}`} selectable>{(rev(), s.printResult?.error || "")}</Text>
           <View class="flex-row gap-2">
-            <If when={(rev(), Boolean(s.printResult?.path))}>
-              <Btn label="Copy path" onPress={() => { void Clipboard.writeText(s.printResult?.path || ""); toast("Path copied."); }} />
-            </If>
+            <Btn label="Try again" onPress={() => print(s)} disabled={(rev(), s.loading || !s.draft)} />
             <Btn label="Dismiss" variant="ghost" onPress={() => { s.printResult = null; bump(); }} />
           </View>
         </View>
@@ -2596,6 +2811,72 @@ function FormPage(p: { s: FS }) {
   );
 }
 
+/** Rox's `submit`: the return's Validate result and, when it passes, the user's own Submit. */
+function SubmitConfirm(p: { s: FS }) {
+  const s = p.s;
+  const close = () => {
+    s.submitAsk = false;
+    bump();
+  };
+  const shown = () => (rev(), Boolean(s.submitAsk) && s.editable && !s.sample && !s.loading && !s.error && s.status === "Draft");
+  const problems = () => (rev(), s.errors.length + s.formErrors.length);
+  return (
+    <If when={shown()}>
+      <View class={`p-3 rounded-xl gap-2 border ${C.line} ${(rev(), problems() ? C.dangerSoft : C.accentSoft)}`}>
+        <Text class={`text-sm font-semibold ${C.fg}`}>
+          {(rev(), s.checking ? `Checking ${s.code}…` : problems() ? `${problems()} item${problems() > 1 ? "s need" : " needs"} attention before you submit` : `${s.code} is ready to submit`)}
+        </Text>
+        <Text class={`text-xs ${C.fg2}`}>
+          {(rev(), problems() ? "Fix the items listed under Needs you, then check again." : "Submitting queues this return; this computer sends it to BIR in the background. Review every box first.")}
+        </Text>
+        <View class="flex-row gap-2">
+          <If when={(rev(), !s.checking && problems() === 0)} else={<Btn label={(rev(), s.checking ? "Checking…" : "Check again")} onPress={() => check(s)} disabled={(rev(), s.checking)} />}>
+            <Btn label="Submit" variant="primary" small={false} onPress={() => { close(); queue(s); }} />
+          </If>
+          <Btn label="Not now" variant="ghost" onPress={close} />
+        </View>
+      </View>
+    </If>
+  );
+}
+
+/** "Let the assistant submit <form> for this taxpayer": the standing OK, granted or revoked here. */
+function AssistantToggle(p: { s: FS }) {
+  const s = p.s;
+  const shown = () => (rev(), !s.sample && !s.filedOriginalView && s.assistantMay !== null && digits(s.tin).length >= 9);
+  const on = () => (rev(), s.assistantMay === true);
+  return (
+    <If when={shown()}>
+      <View class="flex-row items-center gap-2 self-start" activeStyle={{ opacity: 0.6 }} onPress={() => setAssistantMay(s, !on())}>
+        <CheckBox on={on()} />
+        <Text class={`text-xs ${C.fg2}`}>{`Let the assistant submit ${s.code} for this taxpayer`}</Text>
+      </View>
+    </If>
+  );
+}
+
+/** Payment, apart from BIR's filing confirmation: what is recorded, and Mark as paid / Attach receipt. */
+function PaymentPanel(p: { s: FS }) {
+  const s = p.s;
+  const shown = () => (rev(), sentOrQueued(s) && !s.loading && !s.error && s.payments !== null);
+  const paid = () => (rev(), (s.payments || []).length > 0);
+  const hasReceipt = () => (rev(), (s.payments || []).some((x) => x.proof.kind === "file"));
+  return (
+    <If when={shown()}>
+      <View class={`flex-row flex-wrap items-center gap-2 py-2 px-3 rounded-xl border ${C.line}`}>
+        <Chip text={(rev(), paid() ? "Paid" : "Not paid yet")} tone={(rev(), paid() ? "success" : "warning")} />
+        <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
+          <If when={paid()} else={<Text class={`text-xs ${C.fg2}`}>No payment recorded. Payment emails are recorded by the BIR payments routine; you can also mark it paid or attach the receipt.</Text>}>
+            <Each of={(rev(), s.payments || [])} key={(x) => x.id}>{(x) => <Text class={`text-xs ${C.fg2}`}>{paymentLine(x())}</Text>}</Each>
+          </If>
+        </View>
+        <If when={!paid()}><Btn label="Mark as paid" onPress={() => markPaid(s)} disabled={(rev(), s.paying)} /></If>
+        <Btn label={(rev(), hasReceipt() ? "Replace receipt" : "Attach receipt")} variant="ghost" onPress={() => attachReceipt(s)} disabled={(rev(), s.paying)} />
+      </View>
+    </If>
+  );
+}
+
 /** The top bar: back to the forms, the form's code, and its actions (the head's actions in form_page.js). */
 function FormBar(p: { s: FS }) {
   const s = p.s;
@@ -2611,6 +2892,7 @@ function FormBar(p: { s: FS }) {
       <Text class={`text-sm font-semibold flex-1 ${C.fg}`} numberOfLines={1}>
         {(rev(), `${s.code}${s.dirty ? " · unsaved edits" : ""}`)}
       </Text>
+      <Btn label="Ask the assistant" variant="ghost" onPress={() => askAssistant(s)} disabled={busy() || Boolean(s.sample)} />
       <Btn label="Print preview" onPress={() => print(s)} disabled={busy()} />
       <If when={(rev(), Boolean(s.filedOriginal) && !s.filedOriginalView)}>
         <Btn label="View the filed original" onPress={() => openFiledOriginal(s)} />
@@ -3168,9 +3450,50 @@ function FormsPicker() {
 // Root
 // =====================================================================
 
+/** `2026-Q3`, `2026-01`, `2025`, `2026-10-26`: the year, the page's period and, for a day, that it is one. */
+function readTokenPeriod(text: string): { year: number; period: number; day: boolean } | null {
+  const m = /^(\d{4})(?:-(?:Q([1-4])|(\d{2}))(?:-(\d{2}))?)?$/i.exec(String(text).trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  if (m[2]) return { year, period: Number(m[2]), day: false };
+  if (m[3]) return { year, period: Number(m[3]), day: Boolean(m[4]) };
+  return { year, period: 0, day: false };
+}
+
+/** Rox's `/taxform` props: `form` + `period` + `action` (+ `draft_id`) open that return. */
+async function followReturn(p: RoxProps) {
+  const code = normCode(p.form);
+  const action = p.action || "file";
+  const flags = { viewOnly: action === "view", submitAsk: action === "submit" };
+  const at = readTokenPeriod(String(p.period ?? ""));
+  picker.focus(code, at?.year ?? null);
+  // A stored return by its id: the very one, keyed as the forms list keys it.
+  const id = p.draft_id == null || p.draft_id === "" ? null : Number(p.draft_id);
+  if (id != null && !Number.isNaN(id)) {
+    try {
+      const row = (await H.returns("all")).find((r) => Number(r.id) === id && normCode(r.form_code) === code);
+      if (row) return openForm({ tin: TIN(), code, year: row.taxable_year, period: row.period, ...(row.return_key != null ? { returnKey: row.return_key } : {}), ...flags });
+    } catch (e) {
+      toast(errText(e), "danger");
+    }
+  }
+  if (!at) return;
+  // A day names an as-needed transaction: a form keyed by its month opens on
+  // that month; one keyed by the day starts as a sample (its date asked on save).
+  if (at.day) {
+    const freq = await H.schema(code).then((schema) => schema.freq).catch(() => "");
+    if (freq !== "Monthly") return openForm({ tin: TIN(), code, year: at.year, period: 0, sample: true, ...flags });
+  }
+  openForm({ tin: TIN(), code, year: at.year, period: at.period, ...flags });
+}
+
 /** Deep link: `form_code` + `year` + `period` (+ `key`) open that return; `form_code` alone opens the picker on it. */
 function followDeepLink() {
   const p = roxProps();
+  if (p.form) {
+    followReturn(p).catch((e) => toast(errText(e), "danger"));
+    return;
+  }
   if (!p.form_code) return;
   const code = normCode(p.form_code);
   const num = (v: unknown) => (v === undefined || v === null || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
