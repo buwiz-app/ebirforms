@@ -1,0 +1,17 @@
+[
+  {
+    "id": "forms",
+    "title": "BIR Forms",
+    "description": "Prepare, check and queue a taxpayer's BIR returns: pick a form and period, fill it, validate it with the official rules, save the draft, and queue it for filing."
+  },
+  {
+    "id": "tax-profile",
+    "title": "BIR Tax Profile",
+    "description": "View and edit a taxpayer's registration: name, TIN and branches, RDO and address, and the forms they file each year."
+  },
+  {
+    "id": "register",
+    "title": "BIR Register",
+    "description": "Sign in to Buwiz (or create an account) on this computer so BIR can open the taxpayer database."
+  }
+]
