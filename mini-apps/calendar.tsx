@@ -20,6 +20,10 @@
 
 import { signal, computed, resource, Text, View, Scroll, Input, Overlay } from "nsh";
 
+/** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
+ *  became objects (#558), the text itself before. */
+const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
+
 // =====================================================================
 // HOST CALLS: every call goes through `bir` (the daemon's `bir_call`
 // bridge). Names and shapes follow dashboard_module.rs DECLARATIONS.
@@ -428,7 +432,7 @@ function Field(p: { label: string; value: string; placeholder: string; onChange:
   return (
     <View class="gap-1">
       <Text class={`text-xs ${C.fg3}`}>{p.label}</Text>
-      <Input class={C.input} value={p.value} placeholder={p.placeholder} readonly={p.readonly} onChange={(text) => p.onChange(text)} onSubmit={() => saveMove()} />
+      <Input class={C.input} value={p.value} placeholder={p.placeholder} readonly={p.readonly} onChange={(e) => p.onChange(typed(e))} onSubmit={() => saveMove()} />
     </View>
   );
 }

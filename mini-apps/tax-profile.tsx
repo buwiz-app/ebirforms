@@ -17,6 +17,10 @@ import { signal, computed, resource, effect, cleanup, Text, View, Scroll, Input 
 import type { Signal, Accessor, JSX } from "nsh";
 import { Clipboard } from "nsh/clipboard";
 
+/** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
+ *  became objects (#558), the text itself before. */
+const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
+
 // ============================================================ host calls
 // Every bir.* call this app makes goes through `bir` and is listed in `api`.
 
@@ -416,7 +420,10 @@ function TextInput(p: {
   return (
     <Input
       value={p.value()}
-      onChange={(v) => p.value.set(p.digits ? v.replace(/\D/g, "").slice(0, p.digits) : v)}
+      onChange={(e) => {
+        const v = typed(e);
+        p.value.set(p.digits ? v.replace(/\D/g, "").slice(0, p.digits) : v);
+      }}
       placeholder={p.placeholder}
       readonly={p.disabled}
       masked={p.secure}
@@ -451,7 +458,7 @@ function Combo(p: { value: Signal<string>; options: Option[]; placeholder: strin
         <View class={`rounded-md p-2 gap-1 ${C.card} ${C.line}`}>
           <Input
             value={query()}
-            onChange={(v) => query.set(v)}
+            onChange={(e) => query.set(typed(e))}
             placeholder={p.placeholder}
             autoFocus
             class={`placeholder:text-[#8e8e93] rounded-md px-3 py-2 text-sm ${C.fg} ${C.pane} border border-black/10 dark:border-white/10`}

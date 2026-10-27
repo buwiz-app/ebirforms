@@ -15,6 +15,10 @@ import { signal, computed, effect, resource, cleanup, Text, View, Scroll, Input,
 import type { Signal, JSX, YNode } from "nsh";
 import { Clipboard } from "nsh/clipboard";
 
+/** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
+ *  became objects (#558), the text itself before. */
+const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
+
 // ============================================================ host calls
 // Every bir.* call this app makes goes through `bir` and is listed in `api`.
 
@@ -191,7 +195,8 @@ function TextInput(p: {
   return (
     <Input
       value={p.value()}
-      onChange={(v) => {
+      onChange={(e) => {
+        const v = typed(e);
         p.value.set(p.digits ? v.replace(/\D/g, "").slice(0, p.digits) : p.phone ? v.replace(/[^\d+\s-]/g, "").slice(0, 20) : v);
         p.onEdit?.();
       }}
@@ -253,7 +258,7 @@ function TinBoxes(p: { value: Signal<string>; error?: boolean; onBlur?: () => vo
       onFocus={() => inside++}
       ref={(n) => (boxes[i] = n)}
       value={parts()[i]}
-      onChange={(v) => put(i, v)}
+      onChange={(e) => put(i, typed(e))}
       onKeyPress={(e) => {
         if (e.key === "Backspace" && !parts()[i] && i > 0) boxes[i - 1]?.focus();
       }}
@@ -339,12 +344,12 @@ function Combo(p: {
     open.set(true);
   };
   return (
-    <View ref={(n) => (anchor = n)} onLayout={(e) => width.set(e.size.width)}>
+    <View ref={(n) => (anchor = n)} onLayout={(e: any) => width.set((e.bounds ?? e).size.width)}>
       <View class={`flex-row items-center rounded-md border ${C.pane} ${p.error ? "border-[#d92d20] dark:border-[#ff6961]" : "border-black/10 dark:border-white/10"}`}>
         <Input
           ref={(n) => (input = n)}
           value={text()}
-          onChange={edit}
+          onChange={(e) => edit(typed(e))}
           onFocus={() => open.set(true)}
           onBlur={() => {
             setTimeout(() => open.set(false), 150);

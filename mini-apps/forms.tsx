@@ -12,6 +12,10 @@ import { signal, computed, untracked, Text, View, Scroll, Input } from "nsh";
 import type { YNode } from "nsh";
 import { windowSize } from "nsh/device";
 
+/** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
+ *  became objects (#558), the text itself before. */
+const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
+
 // =====================================================================
 // HOST CALLS: every call to the BIR daemon (and Rox) lives in this section.
 // Names, argument order and result shapes follow the DECLARATIONS in
@@ -1920,7 +1924,7 @@ function Box(p: { s: FS; k: string; t: string; width: number; label: string; max
       autoCorrect={false}
       maxLength={p.t === "text" || p.t === "int" ? p.maxLength : undefined}
       readonly={(rev(), !s.editable)}
-      onChange={(v) => typeInto(s, p.k, v)}
+      onChange={(e) => typeInto(s, p.k, typed(e))}
       onFocus={() => enterBox(s, p.k)}
       onBlur={() => blurBox(s, p.k)}
     />
@@ -1986,7 +1990,7 @@ function SelectBox(p: { s: FS; k: string; label: string; listed?: any[]; width: 
         <If when={model().open}>
           <View class={`rounded-md border ${C.line} ${C.card} p-1 gap-0.5`}>
             <If when={model().options.length > 12}>
-              <Input class={C.input} placeholder={`Find in ${p.label}`} value={selectQuery()} onChange={(v) => selectQuery.set(v)} autoCapitalize="none" autoCorrect={false} />
+              <Input class={C.input} placeholder={`Find in ${p.label}`} value={selectQuery()} onChange={(e) => selectQuery.set(typed(e))} autoCapitalize="none" autoCorrect={false} />
             </If>
             <Scroll style={{ maxHeight: 280 }}>
               <Each of={filtered()} key={(o) => o.value}>
@@ -2986,7 +2990,7 @@ function SamplePeriodModal(p: { ask: SamplePeriodAsk }) {
         {(pp) => (
           <View class="gap-1">
             <Text class={`text-xs ${C.fg2}`}>{PERIOD_PART_LABELS[pp().part] || pp().part}</Text>
-            <Input class={C.input} defaultValue={ask.values[pp().key] || ""} keyboardType="numbers-and-punctuation" onChange={(v) => (ask.values[pp().key] = v)} />
+            <Input class={C.input} defaultValue={ask.values[pp().key] || ""} keyboardType="numbers-and-punctuation" onChange={(e) => (ask.values[pp().key] = typed(e))} />
           </View>
         )}
       </Each>
@@ -3397,7 +3401,7 @@ function FormsPicker() {
           <If when={tab() === "library"}>
             <Text class={`text-xs ${C.fg2}`}>A blank sample of any form for this taxpayer. Save makes it your return for its period.</Text>
             <View class="flex-row flex-wrap items-center gap-2">
-              <Input class={C.input} style={{ width: 260 }} placeholder="Find a form (1601C, VAT…)" value={libQ()} onChange={(v) => libQ.set(v)} autoCapitalize="none" autoCorrect={false} />
+              <Input class={C.input} style={{ width: 260 }} placeholder="Find a form (1601C, VAT…)" value={libQ()} onChange={(e) => libQ.set(typed(e))} autoCapitalize="none" autoCorrect={false} />
               <Each of={["owned", "all"] as ("owned" | "all")[]}>
                 {(sc) => (
                   <View class={`px-3 py-1 rounded-md ${libScope() === sc() ? C.accentSoft : C.inset}`} activeStyle={{ opacity: 0.7 }} onPress={() => libScope.set(sc())}>
