@@ -232,13 +232,15 @@ pub(crate) fn descriptors() -> Vec<Value> {
     ];
     list.push(json!({
         "name": PRINT_PREVIEW,
-        "description": "Mini apps only (refused for the assistant): a return's print preview for Rox to show, as a static HTML document. `draft_id` prints a saved return as stored; `draft_json` (the page's draft as JSON text, with its staged `edits` and `unlocked` boxes) prints a Form library sample as the page holds it; `period` prints a sent return's filing record.",
+        "description": "Mini apps only (refused for the assistant): a return's print preview for Rox to show, as a static HTML document. `draft_id` prints a saved return as stored (`year` and `quarter` for 2551Q and 1601C, which are kept by period: quarter is the month for 1601C); `draft_json` (the page's draft as JSON text, with its staged `edits` and `unlocked` boxes) prints a Form library sample as the page holds it; `period` prints a sent return's filing record.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "ticket": { "type": "string", "description": "The ticket the app was opened with." },
                 "form": { "type": "string" },
                 "draft_id": { "type": "integer" },
+                "year": { "type": "integer" },
+                "quarter": { "type": "integer" },
                 "draft_json": { "type": "string", "description": "The page's draft, JSON.stringify'd: a draft's amounts are not integers, which a signed call cannot carry as numbers." },
                 "edits": { "type": "object" },
                 "unlocked": { "type": "array", "items": { "type": "string" } },
@@ -472,12 +474,16 @@ pub(crate) enum PreviewAsk {
     /// `screen_form_print_sample` takes them (a saved return's, as stored,
     /// with no edits).
     Draft(Vec<Value>),
+    /// A 2551Q or 1601C as stored for its period (`quarter` is the month
+    /// for 1601C), of the ticket's branch.
+    Period { tin: String, form: String, year: u16, quarter: u8 },
     /// A sent return's filing record: `{tin, form, period}` with the
     /// ticket's TIN.
     Record(Map<String, Value>),
 }
 
-/// `bir_app_print_preview {ticket, form, draft_id}` (a saved return),
+/// `bir_app_print_preview {ticket, form, draft_id}` or `{ticket, form,
+/// year, quarter}` (a saved return; the second for 2551Q and 1601C),
 /// `{ticket, form, draft_json, edits?, unlocked?}` (a Form library sample,
 /// which is not stored) or `{ticket, form, period}` (a sent return's filing
 /// record), read and held to the ticket's taxpayer: a draft must be of that
@@ -485,7 +491,7 @@ pub(crate) enum PreviewAsk {
 /// are not integers, which a signed call carries only as text: a saved
 /// return is read here, and a sample comes as JSON text.
 pub(crate) fn preview_ask(db: &Database, arguments: &Map<String, Value>) -> Result<PreviewAsk, String> {
-    const KEYS: [&str; 7] = ["ticket", "form", "draft_id", "draft_json", "edits", "unlocked", "period"];
+    const KEYS: [&str; 9] = ["ticket", "form", "draft_id", "year", "quarter", "draft_json", "edits", "unlocked", "period"];
     if let Some(key) = arguments.keys().find(|key| !KEYS.contains(&key.as_str())) {
         return Err(format!("unknown argument `{key}` (allowed: {})", KEYS.join(", ")));
     }
@@ -498,9 +504,24 @@ pub(crate) fn preview_ask(db: &Database, arguments: &Map<String, Value>) -> Resu
         .get("form")
         .and_then(Value::as_str)
         .ok_or("`form` is required: a BIR form code")?;
-    let given = ["draft_id", "draft_json", "period"].iter().filter(|key| arguments.contains_key(**key)).count();
+    let given = ["draft_id", "year", "draft_json", "period"].iter().filter(|key| arguments.contains_key(**key)).count();
     if given != 1 {
-        return Err("pass one of `draft_id` (a saved return), `draft_json` (a sample) or `period` (a sent return's record)".into());
+        return Err("pass one of `draft_id` or `year` and `quarter` (a saved return), `draft_json` (a sample) or `period` (a sent return's record)".into());
+    }
+    if let Some(year) = arguments.get("year") {
+        let year = year.as_u64().and_then(|y| u16::try_from(y).ok()).ok_or("`year` must be a year like 2026")?;
+        let quarter = arguments
+            .get("quarter")
+            .and_then(Value::as_u64)
+            .and_then(|q| u8::try_from(q).ok())
+            .ok_or("`quarter` (the quarter, or the month for 1601C) must be a number")?;
+        if !["2551Q", "1601C"].contains(&form) {
+            return Err(format!("`year` and `quarter` name a 2551Q or 1601C; {form} prints by `draft_id`"));
+        }
+        if arguments.len() != 4 {
+            return Err("a saved return prints as stored: `ticket`, `form`, `year` and `quarter` only".into());
+        }
+        return Ok(PreviewAsk::Period { tin: subject.full_tin(), form: form.to_string(), year, quarter });
     }
     if let Some(id) = arguments.get("draft_id") {
         let id = id.as_i64().ok_or("`draft_id` must be an integer")?;

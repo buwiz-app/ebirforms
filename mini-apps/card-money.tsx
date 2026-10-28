@@ -1,6 +1,7 @@
 // BIR answer cards about payments (spec 9.8): returns not paid (unpaid),
-// what was paid this year (paidsum) and what the routines recorded since
-// yesterday (digest). Every button that records something runs only when
+// what was paid this year (paidsum), what the routines recorded since
+// yesterday (digest) and one return's receipt (receipt: View receipt shows
+// it in Rox's document view, Open in Gmail its payment email). Every button that records something runs only when
 // the user presses it (`rox.call`, origin app); the assistant can't press
 // them. (match, markpaid and confirm moved to the short card-quick app.)
 
@@ -368,7 +369,36 @@ function Digest() {
   );
 }
 
+// ------------------------------------------------------------ receipt
+
+/** BIR's receipt page for `form` and `period` of the card's taxpayer, shown by Rox over the chat. */
+const viewReceipt = (form: string, period: string) =>
+  act(() => rox.preview({ tool: "bir_payment_receipt", args: { tin: P.ticket, form, period } }));
+
+function Receipt() {
+  const s = () => snap() || {};
+  const payments = () => (s().payments || []) as any[];
+  const proof: Record<string, string> = { email: "from its payment email", receipt: "receipt attached", manual: "marked paid, no receipt" };
+  return (
+    <Card title={`Receipt · ${s().label || ""}`} sub={String(s().taxpayer || "")}
+      foot={
+        <View class="flex-row gap-2">
+          <If when={Boolean(rox.preview) && Boolean(P.ticket)}><Btn label="View receipt" primary onPress={() => viewReceipt(String(s().form), String(s().period))} /></If>
+          <If when={Boolean(s().gmail_url) && Boolean(rox.open)}><Btn label="Open in Gmail" onPress={() => act(() => rox.open({ url: String(s().gmail_url) }))} /></If>
+        </View>
+      }>
+      <Each of={payments()} key={(x) => `${x.channel}/${x.reference}/${x.recorded_at}`}>
+        {(x) => (
+          <Row title={x().channel === "manual" ? "Marked paid" : `${peso(x().total ?? x().amount)} via ${x().channel}`}
+            sub={[x().paid_at ? `paid ${shortDate(x().paid_at)}` : "", x().reference ? `ref ${x().reference}` : "", proof[x().proof] || ""].filter(Boolean).join(" · ")} />
+        )}
+      </Each>
+    </Card>
+  );
+}
+
 export default function MoneyCard() {
+  if (P.card === "receipt") return <Receipt />;
   if (P.card === "paidsum") return <PaidSum />;
   if (P.card === "digest") return <Digest />;
   return <Unpaid />;

@@ -104,15 +104,17 @@ const BIR_RECORD_PAYMENT: &str = "bir_record_payment";
 const BIR_MARK_PAID: &str = "bir_mark_paid";
 const BIR_PAYMENTS_LIST: &str = "bir_payments_list";
 const BIR_FILING_RECORD: &str = "bir_filing_record";
+const BIR_PAYMENT_RECEIPT: &str = "bir_payment_receipt";
 /// The payment and filing-record tools, as many as `tool_list` adds.
 #[cfg(test)]
-const PAYMENT_TOOLS: [&str; 6] = [
+const PAYMENT_TOOLS: [&str; 7] = [
     BIR_PAYMENT_SEARCH,
     BIR_PAYMENT_PARSE,
     BIR_RECORD_PAYMENT,
     BIR_MARK_PAID,
     BIR_PAYMENTS_LIST,
     BIR_FILING_RECORD,
+    BIR_PAYMENT_RECEIPT,
 ];
 
 // Deadline overrides (bir_core::deadline_overrides): global, one rule for
@@ -348,6 +350,8 @@ impl MiniServer {
         // user presses Save on (P5, spec 9.8).
         let reply = if name == BIR_MARK_PAID && caller.origin == Origin::Agent {
             Ok(now(cards::mark_paid_card(&arguments)))
+        } else if name == BIR_PAYMENT_RECEIPT {
+            Ok(now(self.payment_receipt(&arguments, caller.origin == Origin::App)))
         } else {
             self.dispatch(name, &arguments)
         };
@@ -367,7 +371,10 @@ impl MiniServer {
                     cards::decorate(name, &asked, &mut result);
                 }
                 // What the model or an app reads names taxpayers by ticket.
-                if matches!(caller.origin, Origin::Agent | Origin::App) {
+                // A receipt's page is for Rox's viewer (rox.preview) and
+                // keeps the payment email as it reads.
+                let viewer_page = name == BIR_PAYMENT_RECEIPT && caller.origin == Origin::App;
+                if matches!(caller.origin, Origin::Agent | Origin::App) && !viewer_page {
                     let today = taxform::today();
                     let _ = database(|db| {
                         let mut scrubber = v1::Scrubber::new(db, today);
@@ -388,6 +395,27 @@ impl MiniServer {
                 Ok(now(result))
             }
             other => other,
+        }
+    }
+
+    /// `bir_payment_receipt`: for an app (Rox's `rox.preview`), the receipt
+    /// page as an embedded text/html resource with its title and Gmail
+    /// link; for the assistant, the return's payments without the page (its
+    /// receipt card offers View receipt).
+    fn payment_receipt(&mut self, arguments: &Map<String, Value>, for_app: bool) -> Value {
+        if let Err(message) = self.allow() {
+            return tool_error(message);
+        }
+        let today = taxform::today();
+        match database(|db| payments::receipt(db, arguments, today)) {
+            Err(message) => tool_error(format!("{BIR_PAYMENT_RECEIPT}: {message}")),
+            Ok(receipt) if for_app => {
+                let form = receipt.summary["form"].as_str().unwrap_or("receipt").to_string();
+                let mut result = app_tools::preview_result(&form, receipt.html, receipt.title);
+                result["structuredContent"]["gmail_url"] = receipt.summary["gmail_url"].clone();
+                result
+            }
+            Ok(receipt) => call_result(Ok(receipt.summary)),
         }
     }
 
@@ -1066,6 +1094,13 @@ fn print_preview(arguments: &Map<String, Value>, today: chrono::NaiveDate) -> Va
             let arguments = gpui_shell::HostArguments::new(args.into_iter().map(crate::bir_module::json));
             crate::screen_form_module::print_preview_page(&arguments).map_err(|error| error.message().to_string())
         }
+        app_tools::PreviewAsk::Period { tin, form, year, quarter } => crate::bir_module::with_database(|db| {
+            let (fields, receipt) = crate::bir_module::print_fields(db, &tin, &form, year, Some(quarter))?;
+            let slug = crate::bir_module::print_slug_for(&form).ok_or_else(|| HostError::new(format!("Form {form} has no print sheet")))?;
+            let name = db.get_profile_by_tin(&tin).ok().flatten().map(|profile| profile.full_name.clone());
+            crate::bir_module::print_preview_page(slug, &form, &fields, receipt.as_ref(), name)
+        })
+        .map_err(|error| error.message().to_string()),
         app_tools::PreviewAsk::Record(args) => database(|db| payments::filing_record_page(db, &args, today)).map(|record| {
             let title = format!("BIR Form {} \u{2014} {} \u{b7} filing record", record.form, record.taxpayer);
             (record.html, title)
@@ -1123,7 +1158,7 @@ const CARD_TOOLS: [&str; 5] = [
 
 /// This server's tools that change nothing (`readOnlyHint`, P8): the ones a
 /// routine or resolve call may run, and the reads a routine may name.
-const READ_ONLY: [&str; 17] = [
+const READ_ONLY: [&str; 18] = [
     taxpayer::PROFILE_FORMS,
     taxpayer::RETURNS_LIST,
     BIR_STATUS,
@@ -1134,6 +1169,7 @@ const READ_ONLY: [&str; 17] = [
     BIR_PAYMENT_SEARCH,
     BIR_PAYMENT_PARSE,
     BIR_PAYMENTS_LIST,
+    BIR_PAYMENT_RECEIPT,
     BIR_DEADLINE_OVERRIDES_LIST,
     "bir_profiles_list",
     "bir_dues_list",
@@ -1478,11 +1514,12 @@ fn payment_tools() -> Vec<Value> {
         }),
         json!({
             "name": BIR_PAYMENT_PARSE,
-            "description": "Read one payment email's text into a payment, when bir knows its channel's format (MyEG today): channel, tin (14 digits with the branch), form, period (the return period's end, e.g. 09/30/2026, read as 2026-Q3), paid_at, reference, transaction_number, amount (the tax), fee, total, token, and `record`: the arguments for bir_record_payment (add the email's message_id). Answers null for an email it does not know: then read the email yourself and call bir_record_payment with what it says.",
+            "description": "Read one payment email's text into a payment, when bir knows its channel's format (MyEG today): channel, tin (14 digits with the branch), form, period (the return period's end, e.g. 09/30/2026, read as 2026-Q3), paid_at, reference, transaction_number, amount (the tax), fee, total, token, and `record`: the arguments for bir_record_payment, with the email's text (`raw`) and its `message_id` when you pass it here. Answers null for an email it does not know: then read the email yourself and call bir_record_payment with what it says.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "text": { "type": "string", "description": "The email's text (subject and body)." }
+                    "text": { "type": "string", "description": "The email's text (subject and body)." },
+                    "message_id": { "type": "string", "description": "The email's Gmail message id: it rides in `record`." }
                 },
                 "required": ["text"],
                 "additionalProperties": false
@@ -1541,6 +1578,20 @@ fn payment_tools() -> Vec<Value> {
                     "form": { "type": "string", "description": "Form code." },
                     "period": { "type": "string", "description": "The return's period." }
                 },
+                "additionalProperties": false
+            },
+        }),
+        json!({
+            "name": BIR_PAYMENT_RECEIPT,
+            "description": "Show a return's receipt: every payment recorded for it (channel, amount, fee, total, paid_at, reference, transaction number, when it was recorded) and its proof (the receipt file, or the payment email). Answers the payments and `gmail_url` (the payment email in Gmail, when it came from one); the user sees the receipt on a card with View receipt. A return with no payment recorded answers an error that says so.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tin": { "type": "string", "description": "Taxpayer TIN." },
+                    "form": { "type": "string", "description": "Form code, e.g. 1601C." },
+                    "period": { "type": "string", "description": "The return's period, e.g. 2026-01." }
+                },
+                "required": ["tin", "form", "period"],
                 "additionalProperties": false
             },
         }),
@@ -1826,6 +1877,15 @@ mod tests {
         assert!(html.contains("<html") && html.contains("</html>"), "a whole page");
         assert!(!html.contains("<script"), "a static page");
         assert_eq!(shown["structuredContent"]["title"], "BIR Form 2551Q \u{2014} Scratch Taxpayer");
+        // a 2551Q as stored for its quarter: this one has none yet
+        let period = call_as(
+            &mut server,
+            app("forms"),
+            app_tools::PRINT_PREVIEW,
+            json!({"ticket": ticket, "form": "2551Q", "year": 2026, "quarter": 3}),
+        );
+        assert_eq!(period["isError"], true);
+        assert!(period["content"][0]["text"].as_str().unwrap().contains("No saved 2551Q draft"), "{period}");
         // a saved return prints as stored, by its id
         let opened = call_as(
             &mut server,
@@ -1881,6 +1941,55 @@ mod tests {
         );
         assert_eq!(record["isError"], true);
         assert!(record["content"][0]["text"].as_str().unwrap().contains("has no 2551Q return"), "{record}");
+    }
+
+    #[test]
+    fn bir_payment_receipt_is_a_card_for_the_assistant_and_a_page_for_rox() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let ticket = ticket_of(ROOT);
+        let ask = json!({"tin": ticket, "form": "1601C", "period": "2026-01"});
+        let none = call_as(&mut server, agent(), BIR_PAYMENT_RECEIPT, ask.clone());
+        assert_eq!(none["isError"], true);
+        assert!(none["content"][0]["text"].as_str().unwrap().contains("no payment is recorded"), "{none}");
+        let email = format!("Payment received. TIN {ROOT}, Form 1601C, period 01/31/2026, PHP 1,000.00, ref TESTREF9");
+        let recorded = call_as(
+            &mut server,
+            agent(),
+            BIR_RECORD_PAYMENT,
+            json!({"tin": ticket, "form": "1601C", "period": "2026-01", "channel": "GCash", "reference": "TESTREF9",
+                   "amount": 1000, "paid_at": "2026-02-05", "message_id": "18f0a1b2c3d4e5f6", "raw": email}),
+        );
+        assert_eq!(recorded["isError"], false, "{recorded}");
+        // the assistant: the payments and the receipt card, never the email
+        let card = call_as(&mut server, agent(), BIR_PAYMENT_RECEIPT, ask.clone());
+        assert_card(&card, BIR_PAYMENT_RECEIPT, "receipt");
+        assert_no_tin(&card, BIR_PAYMENT_RECEIPT);
+        let snapshot = &card["_meta"]["rox/open"]["props"]["snapshot"];
+        assert_eq!(snapshot["gmail_url"], "https://mail.google.com/mail/u/0/#all/18f0a1b2c3d4e5f6");
+        assert_eq!(snapshot["payments"][0]["reference"], "TESTREF9");
+        assert!(!card.to_string().contains("Payment received"), "no email text");
+        assert_eq!(card["_meta"]["rox/open"]["props"]["ticket"], ticket);
+        // Forms (rox.preview): the page, its title and the Gmail link
+        let page = call_as(&mut server, app("forms"), BIR_PAYMENT_RECEIPT, ask.clone());
+        assert_eq!(page["isError"], false, "{page}");
+        assert_eq!(page["content"][0]["resource"]["mimeType"], "text/html");
+        let html = page["content"][0]["resource"]["text"].as_str().unwrap();
+        assert!(html.contains("Payment received. TIN") && html.contains("TESTREF9"), "the email as it reads");
+        assert!(!html.to_ascii_lowercase().contains("<script"));
+        assert_eq!(page["structuredContent"]["title"], "Receipt \u{b7} 1601C \u{b7} Jan 2026 \u{b7} Scratch Taxpayer");
+        assert_eq!(page["structuredContent"]["gmail_url"], snapshot["gmail_url"]);
+        // the parsed payment email's card leaves the email's text out
+        let parsed = call_as(
+            &mut server,
+            agent(),
+            BIR_PAYMENT_PARSE,
+            json!({"text": "Agency Name BUREAU OF INTERNAL REVENUE (BIR) | TIN 123456788 | Branch Code 00000 | RDO Code 040 - PASIG | Form Type 2551Q | Tax Type PT | Return Period 09/30/2026 | Transaction Date 10/26/2026 18:57:10 | Transaction Number TEST2026102618575200000001 | Reference Number TESTREF001 | Payment Channel Mobile | Transaction Amount PHP 629.94 | Bank Fee PHP 0.00 | Transaction Fee PHP 20.00 | Total Amount PHP 649.94", "message_id": "test-3"}),
+        );
+        assert!(parsed["structuredContent"]["result"]["record"]["raw"].is_string(), "the record keeps the email");
+        let props = &parsed["_meta"]["rox/open"]["props"]["snapshot"];
+        assert!(props["record"].get("raw").is_none() && props.get("raw").is_none(), "{props}");
+        assert_eq!(props["record"]["message_id"], "test-3");
     }
 
     #[test]

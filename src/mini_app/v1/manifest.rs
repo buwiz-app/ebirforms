@@ -39,6 +39,8 @@ pub(crate) const TICKET_PROP: &str = "ticket";
 /// A receipt scan or photo, up to 25 MB (`bir_mark_paid`'s own limit).
 const RECEIPT_EXTENSIONS: [&str; 7] = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
 const RECEIPT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// Gmail, where Open in Gmail shows a payment's email.
+const GMAIL: &str = "https://mail.google.com";
 /// A return's attachment (a scan or a PDF) or a sales sheet to import.
 const RETURN_FILE_EXTENSIONS: [&str; 7] = [".pdf", ".png", ".jpg", ".jpeg", ".heic", ".xlsx", ".csv"];
 
@@ -94,6 +96,7 @@ fn specs() -> Vec<AppSpec> {
         app_tools::TICKET_ISSUE.to_string(),
         app_tools::UPLOAD.to_string(),
         app_tools::PRINT_PREVIEW.to_string(),
+        "bir_payment_receipt".to_string(),
         "bir_payments_list".to_string(),
         "bir_mark_paid".to_string(),
         "bir_record_payment".to_string(),
@@ -126,11 +129,13 @@ fn specs() -> Vec<AppSpec> {
             }),
             permissions: json!({
                 "tools": forms_tools,
-                "open": { "apps": ["tax-profile"] },
+                // Open in Gmail: a payment's email (asks each time)
+                "open": { "apps": ["tax-profile"], "external": [GMAIL] },
                 "attach": ["taxprofile", "taxform"],
                 "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
-                // Print preview: the filled sheet in Rox's document view
-                // (`bir_app_print_preview`); the largest sheets are ~1.7 MB
+                // Print preview and the receipt in Rox's document view
+                // (`bir_app_print_preview`, `bir_payment_receipt`); the
+                // largest sheets are ~1.7 MB
                 "preview": {},
             }),
         },
@@ -188,8 +193,10 @@ fn specs() -> Vec<AppSpec> {
             "open": { "apps": ["forms", "calendar"] },
         })),
         card("card-money", json!({
-            "tools": ["bir_unpaid", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_payments_list", "bir_digest"],
-            "open": { "apps": ["forms"] },
+            "tools": ["bir_unpaid", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_payments_list", "bir_digest", "bir_payment_receipt"],
+            "open": { "apps": ["forms"], "external": [GMAIL] },
+            // the receipt card's View receipt
+            "preview": {},
             "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
         })),
         card("card-help", json!({
@@ -203,12 +210,14 @@ fn specs() -> Vec<AppSpec> {
         })),
         card("card-quick", json!({
             "tools": [
-                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_payments_list", "bir_app_upload",
+                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_payments_list", "bir_app_upload", "bir_payment_receipt",
                 "bir_status", "bir_deadline", "bir_deadline_override_set", "bir_deadline_override_remove", "bir_calendar_set",
             ],
             "open": { "apps": ["forms", "register", "calendar"] },
             // Payment found remembers "Not this return"
             "storage": {},
+            // and shows the receipt once recorded
+            "preview": {},
             "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
         })),
         card("card-calc", json!({
@@ -265,9 +274,9 @@ never the TIN) and the result: confirmed, already confirmed, or not confirmed wi
 reason. Do not file, submit or change anything else.";
 
 const PAYMENTS_PROMPT: &str = "New emails matched the BIR payment search. For each one: read it \
-with gws_read_mail and pass its text (subject and body) to bir_payment_parse. If it returns a \
-payment, call bir_record_payment with its `record` plus message_id (the email's id) and raw (the \
-email's text). If it returns null, read the email yourself: when it is a payment of a BIR \
+with gws_read_mail and pass its text (subject and body) and message_id (the email's id) to \
+bir_payment_parse. If it returns a payment, call bir_record_payment with its `record` as it is (it \
+carries the message_id and the email's text). If it returns null, read the email yourself: when it is a payment of a BIR \
 return, call bir_record_payment with tin (and branch), form, period (the return period; its last \
 day such as 09/30/2026 is fine), channel (who took it), reference, amount (the tax, without \
 fees), fee, paid_at, message_id and raw; when it is not, skip it. A payment never confirms a \
@@ -489,18 +498,24 @@ mod tests {
     }
 
     #[test]
-    fn only_forms_shows_print_previews_of_its_own_tool() {
+    fn print_previews_and_receipts_go_to_the_apps_that_show_them() {
         let m = unsigned(&Catalog::Embedded).unwrap();
         for app in m["apps"].as_array().unwrap() {
+            let id = app["id"].as_str().unwrap();
             let permissions = &app["permissions"];
             let tools = permissions["tools"].as_array().unwrap();
-            let previews = tools.iter().any(|tool| tool == app_tools::PRINT_PREVIEW);
-            if app["id"] == "forms" {
+            let has = |tool: &str| tools.iter().any(|t| t == tool);
+            let shows = ["forms", "card-money", "card-quick"].contains(&id);
+            assert_eq!(permissions.get("preview").is_some(), shows, "{id}: preview");
+            if shows {
                 assert_eq!(permissions["preview"], json!({}));
-                assert!(previews, "forms names {}", app_tools::PRINT_PREVIEW);
-            } else {
-                assert!(permissions.get("preview").is_none() && !previews, "{}", app["id"]);
             }
+            // only Forms prints a return; the three show receipts
+            assert_eq!(has(app_tools::PRINT_PREVIEW), id == "forms", "{id}");
+            assert_eq!(has("bir_payment_receipt"), shows, "{id}");
+            // Open in Gmail, from the apps that show a payment's email
+            let gmail = permissions["open"]["external"].as_array().is_some_and(|o| o.iter().any(|x| x == GMAIL));
+            assert_eq!(gmail, ["forms", "card-money"].contains(&id), "{id}: open.external");
         }
     }
 

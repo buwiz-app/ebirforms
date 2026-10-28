@@ -19,7 +19,8 @@
 //!
 //! `bir_filing_record` writes one printable document: the filled form, BIR's
 //! confirmation (its receipt email, else the filing's state) and the proof
-//! of payment, for Rox's viewer (`rox://view?path=`).
+//! of payment, for Rox's viewer (`rox://view?path=`). `bir_payment_receipt`
+//! makes the proof of payment alone, in memory, for Rox's `rox.preview`.
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,8 @@ const PROOF_EXTENSIONS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "heic"
 const PROOF_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// The channel of a payment marked paid with no details.
 const MANUAL: &str = "manual";
+/// The most of a payment email's text kept with its record.
+const RAW_MAX_BYTES: usize = 16 * 1024;
 
 /// A payment channel bir knows by its emails. Others still work: the agent
 /// reads their email and calls `bir_record_payment` with what it read.
@@ -793,13 +796,31 @@ pub(crate) fn search(
 
 /// `bir_payment_parse {text}`: the payment one email describes, when bir
 /// knows its channel's format; `null` otherwise.
+/// Its `record` carries the email's text (`raw`, trimmed, at most 16 KB)
+/// and `message_id` when given, so the payment keeps its email.
 pub(crate) fn parse(arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
-    check_keys(arguments, &["text"])?;
+    check_keys(arguments, &["text", "message_id"])?;
     let email = text(arguments, "text")?;
-    Ok(CHANNELS
-        .iter()
-        .find_map(|channel| (channel.parse)(email, today))
-        .unwrap_or(Value::Null))
+    let message_id = optional_text(arguments, "message_id")?;
+    let Some(mut parsed) = CHANNELS.iter().find_map(|channel| (channel.parse)(email, today)) else {
+        return Ok(Value::Null);
+    };
+    if let Some(record) = parsed.get_mut("record").and_then(Value::as_object_mut) {
+        record.insert("raw".into(), json!(capped(email.trim(), RAW_MAX_BYTES)));
+        if let Some(message_id) = message_id {
+            record.insert("message_id".into(), json!(message_id));
+        }
+    }
+    Ok(parsed)
+}
+
+/// `text` cut to at most `max` bytes, at a character boundary.
+fn capped(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// `parsed` (a payment email, as [`parse`] reads it) with `recorded`:
@@ -1173,6 +1194,81 @@ fn payment_page(payments: &[Payment], width: &str, height: &str) -> String {
     html
 }
 
+/// Gmail's page for the message `message_id`.
+fn gmail_url(message_id: &str) -> String {
+    format!("https://mail.google.com/mail/u/0/#all/{}", resolve::encode_component(message_id))
+}
+
+/// One return's receipt, made in memory.
+pub(crate) struct Receipt {
+    /// The static page: every payment's details and proof.
+    pub html: String,
+    /// "Receipt · 1601C · Jan 2026 · <taxpayer>".
+    pub title: String,
+    /// The return, its taxpayer, its Gmail link and its payments' details
+    /// (no email text, no image), for the assistant and the receipt card.
+    pub summary: Value,
+}
+
+/// `bir_payment_receipt {tin, form, period}`: the proof of payment of one
+/// return as a static page, every payment with its details and its proof
+/// (an uploaded receipt embedded, or the payment email's text), and the
+/// Gmail link of its email when it has one. Writes nothing.
+pub(crate) fn receipt(db: &Database, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Receipt, String> {
+    check_keys(arguments, &["tin", "form", "period"])?;
+    let target = target(
+        db,
+        text(arguments, "tin")?,
+        text(arguments, "form")?,
+        text(arguments, "period")?,
+        today,
+    )?;
+    let key = target.key();
+    let payments: Vec<Payment> = load(db)?.into_iter().filter(|payment| payment.key == key).collect();
+    if payments.is_empty() {
+        return Err(format!(
+            "no payment is recorded for {} of {}, so there is no receipt to show",
+            target.label(),
+            target.branch.name
+        ));
+    }
+    let title = format!("Receipt · {} · {}", target.label(), target.branch.name);
+    // A4, as the desktop's print preview lays a page
+    let html = format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title><style>@page{{size:595pt 842pt;margin:0}}body{{margin:0;background:#fff}}</style></head><body>{}</body></html>",
+        escape(&title),
+        payment_page(&payments, "595pt", "842pt")
+    );
+    let gmail = payments.iter().find_map(|payment| payment.message_id.as_deref()).map(gmail_url);
+    let details: Vec<Value> = payments
+        .iter()
+        .map(|payment| {
+            json!({
+                "channel": payment.channel,
+                "reference": payment.reference,
+                "transaction_number": payment.transaction_number,
+                "amount": payment.amount,
+                "fee": payment.fee,
+                "total": payment.total(),
+                "paid_at": payment.paid_at,
+                "recorded_at": payment.recorded_at,
+                "proof": payment.source(),
+                "gmail_url": payment.message_id.as_deref().map(gmail_url),
+            })
+        })
+        .collect();
+    let summary = json!({
+        "title": title,
+        "form": target.code,
+        "period": target.period.canonical(),
+        "label": target.label(),
+        "taxpayer": target.branch.name,
+        "gmail_url": gmail,
+        "payments": details,
+    });
+    Ok(Receipt { html, title, summary })
+}
+
 /// `bir_filing_record {tin, form, period}`: the filled return, BIR's
 /// confirmation and the proof of payment as one printable HTML file in
 /// `out_dir`, and the `rox://view` link that shows it.
@@ -1449,6 +1545,45 @@ mod tests {
         let none = list(&db, &args(json!({"tin": ROOT, "form": "1601C"})), today()).unwrap();
         assert_eq!(none["payments"], json!([]));
         assert!(list(&db, &args(json!({"period": "2026-Q3"})), today()).is_err());
+    }
+
+    #[test]
+    fn a_receipt_shows_each_payment_with_its_email_or_its_file() {
+        let db = db();
+        let receipts = scratch("receipt-page");
+        let ask = args(json!({"tin": ROOT, "form": "2551Q", "period": "2026-Q3"}));
+        let none = receipt(&db, &ask, today()).err().expect("no payment, no receipt");
+        assert!(none.contains("no payment is recorded for 2551Q · Q3 2026 of Dela Cruz, Juan"), "{none}");
+        // the payments routine: the email's text and id ride in the record
+        let parsed = parse(&args(json!({"text": format!("  {MYEG}\n"), "message_id": "18f0a1b2c3d4e5f6"})), today()).unwrap();
+        assert_eq!(parsed["record"]["raw"], MYEG, "trimmed");
+        assert_eq!(parsed["record"]["message_id"], "18f0a1b2c3d4e5f6");
+        assert_eq!(capped("ab₱", 3), "ab", "cut at a character");
+        record(&db, parsed["record"].as_object().unwrap(), today(), &receipts).unwrap();
+        let shown = receipt(&db, &ask, today()).unwrap();
+        assert_eq!(shown.title, "Receipt · 2551Q · Q3 2026 · Dela Cruz, Juan");
+        assert_eq!(shown.summary["gmail_url"], "https://mail.google.com/mail/u/0/#all/18f0a1b2c3d4e5f6");
+        assert_eq!(shown.summary["payments"][0]["total"], 649.94);
+        assert_eq!(shown.summary["payments"][0]["proof"], "email");
+        assert!(!shown.summary.to_string().contains("BUREAU"), "no email text in the summary");
+        assert!(shown.html.starts_with("<!DOCTYPE html>") && !shown.html.to_ascii_lowercase().contains("<script"));
+        assert!(shown.html.contains("Reference Number TESTREF") || shown.html.contains("Transaction Amount PHP 629.94"), "the email's text");
+        assert!(shown.html.contains("PHP 649.94") && shown.html.contains("Recorded"));
+        // a receipt file is embedded in the page
+        let scan = receipts.join("bank-receipt.png");
+        std::fs::write(&scan, b"\x89PNG\r\n\x1a\nnot really").unwrap();
+        mark_paid(
+            &db,
+            &args(json!({"tin": ROOT, "form": "1601C", "period": "2026-01", "proof_path": scan.display().to_string()})),
+            today(),
+            &receipts,
+        )
+        .unwrap();
+        let filed = receipt(&db, &args(json!({"tin": ROOT, "form": "1601C", "period": "2026-01"})), today()).unwrap();
+        assert_eq!(filed.title, "Receipt · 1601C · Jan 2026 · Dela Cruz, Juan");
+        assert!(filed.html.contains("<img src=\"data:image/png;base64,"), "the scan, embedded");
+        assert_eq!(filed.summary["gmail_url"], Value::Null);
+        assert_eq!(filed.summary["payments"][0]["proof"], "receipt");
     }
 
     #[test]

@@ -62,6 +62,7 @@ pub(crate) const KINDS: &[(&str, &str, bool)] = &[
     ("unpaid", "card-money", false),
     ("paidsum", "card-money", false),
     ("digest", "card-money", false),
+    ("receipt", "card-money", false),
     ("health", "card-help", false),
     ("summary", "card-return", false),
     ("preview", "card-return", false),
@@ -381,8 +382,18 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             open("approve", &format!("Send {}?", data["form"].as_str().unwrap_or("this return")), None, data.clone(), "", args_value),
             vec![],
         ),
-        "bir_payment_parse" if data.is_object() => (
-            open("match", "Payment found", None, data.clone(), "", args_value),
+        // The email's text stays out of the card (it names the TIN, 6.6).
+        "bir_payment_parse" if data.is_object() => {
+            let mut snapshot = without(&data, &["raw"]);
+            if let Some(record) = snapshot.get_mut("record").and_then(Value::as_object_mut) {
+                record.remove("raw");
+            }
+            (open("match", "Payment found", None, snapshot, "", args_value), vec![])
+        }
+        // A receipt's page can be larger than a call answers: no Refresh;
+        // View receipt shows it.
+        "bir_payment_receipt" => (
+            open("receipt", &format!("Receipt · {}", data["label"].as_str().unwrap_or("")), ticket.as_deref(), without(&data, &["title"]), "", args_value),
             vec![],
         ),
         "bir_confirm_filing" => (

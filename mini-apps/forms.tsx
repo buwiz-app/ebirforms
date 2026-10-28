@@ -164,6 +164,7 @@ type PeriodPart = { key: string; part: string; quarter: number | null };
 type Payment = {
   id: string; channel: string; reference: string; amount: number | null; fee: number | null; total: number | null;
   paid_at: string | null; recorded_at: string; source: "email" | "receipt" | "manual"; proof: { kind: string; name?: string | null };
+  message_id?: string | null;
 };
 
 interface Opts {
@@ -1628,7 +1629,8 @@ async function print(s: FS) {
     }
     if (s.amends && !s.saved) await flush(s);
     else if (s.editable && !(await ensureSaved(s))) return;
-    await preview(sentOrQueued(s) ? { period: tokenPeriod(s) } : { draft_id: Number(s.draft.id) });
+    // 2551Q and 1601C are kept by period; the others by their id
+    await preview(sentOrQueued(s) ? { period: tokenPeriod(s) } : usesPeriodPath(s) ? { year: s.year, quarter: s.period } : { draft_id: Number(s.draft.id) });
   } catch (e) {
     s.printResult = { sample: !!s.sample, error: errText(e) };
   }
@@ -1655,6 +1657,18 @@ async function readPayments(s: FS, token: number) {
   }
   bump();
 }
+
+/** The return's receipt (every payment and its proof: the receipt file or the payment email) in Rox's document
+ *  view, made by BIR (`bir_payment_receipt`). */
+function viewReceipt(s: FS) {
+  rox.preview({ tool: "bir_payment_receipt", args: { tin: BRANCH, form: s.code, period: tokenPeriod(s) } }).catch((e) => toast(errText(e), "danger"));
+}
+
+/** The payment email in Gmail, for a payment recorded from one ("" otherwise). */
+const gmailOf = (s: FS) => {
+  const id = (s.payments || []).map((p) => p.message_id).find(Boolean);
+  return id ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(id)}` : "";
+};
 
 const pesos = (n: number | null) => (n == null ? "" : `PHP ${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
 
@@ -2913,6 +2927,12 @@ function PaymentPanel(p: { s: FS }) {
           </View>
           <If when={!paid() && !form()}>
             <Btn label="Mark as paid" onPress={() => { s.payForm = { paid_at: isoToday(), amount: "", channel: "", reference: "" }; bump(); }} disabled={(rev(), s.paying)} />
+          </If>
+          <If when={paid() && Boolean(rox.preview)}>
+            <Btn label="View receipt" variant="ghost" onPress={() => viewReceipt(s)} />
+          </If>
+          <If when={(rev(), Boolean(gmailOf(s)))}>
+            <Btn label="Open in Gmail" variant="ghost" onPress={() => rox.open({ url: gmailOf(s) }).catch((e) => toast(errText(e), "danger"))} />
           </If>
           <Btn label={(rev(), hasReceipt() ? "Replace receipt" : "Attach receipt")} variant="ghost" onPress={() => attachReceipt(s)} disabled={(rev(), s.paying)} />
         </View>

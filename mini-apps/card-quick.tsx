@@ -349,9 +349,12 @@ function Match() {
       state.set(r?.already ? "already" : "recorded");
     });
   const said = { recorded: "Recorded on the return.", already: "Already recorded on the return.", no: "Left alone. Tell the assistant which return it pays." };
+  // once recorded, BIR's receipt page in Rox's document view
+  const viewReceipt = () => act(() => rox.preview({ tool: "bir_payment_receipt", args: { tin: rec().tin, form: rec().form, period: rec().period } }));
+  const paid = () => (state() === "recorded" || state() === "already") && Boolean(rox.preview);
   return (
     <Card title={`${s().channel || "Payment"} · ${peso(s().total ?? s().amount)}`} sub={`${s().form || ""} · ${s().period || ""}${s().reference ? ` · ref ${s().reference}` : ""}`}
-      foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={notThis} />] : undefined}>
+      foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={notThis} />] : paid() ? [<Btn label="View receipt" onPress={viewReceipt} />] : undefined}>
       <Row title="Paid on" sub={String(s().paid_at || "").replace("T", " ").slice(0, 16)} />
       <Row title="Tax and fee" sub={`${peso(s().amount)} tax · ${peso(s().fee)} fee`} />
       <If when={state() !== ""}>
