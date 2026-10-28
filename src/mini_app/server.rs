@@ -344,6 +344,18 @@ impl MiniServer {
         {
             return Ok(now(tool_error(message)));
         }
+        // A routine's turn records only what the email it read says.
+        if caller.origin == Origin::Agent && caller.routine.is_some() {
+            let today = taxform::today();
+            let backed = match name {
+                BIR_RECORD_PAYMENT => database(|db| payments::email_backed(db, &mut arguments, today)),
+                BIR_CONFIRM_FILING => confirm::email_backed(&arguments, today),
+                _ => Ok(()),
+            };
+            if let Err(message) = backed {
+                return Ok(now(v1::fail("permission_denied", &format!("{name}: {message}"))));
+            }
+        }
         let upload = match self.take_upload(name, &mut arguments, caller.origin) {
             Ok(upload) => upload,
             Err(message) => return Ok(now(tool_error(format!("{name}: {message}")))),
@@ -520,8 +532,10 @@ impl MiniServer {
 
     /// Whether `caller` may call `name` at all (P1, P5, P6): app-only tools
     /// answer apps, an app calls only what its manifest entry lists and only
-    /// from an open this process certified, and resolve and routine calls
-    /// never cause side effects.
+    /// from an open this process certified, resolve calls and routine
+    /// queries never cause side effects, and a routine's turn changes data
+    /// only with the tools that routine declares in `writes` (5.9; what it
+    /// may record is checked against its email in `tools_call`).
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
         if matches!(caller.origin, Origin::Resolve | Origin::Routine)
             && name != BIR_RESOLVE
@@ -529,6 +543,15 @@ impl MiniServer {
         {
             return Err(format!(
                 "{name} changes BIR data, so it does not run for a resolve or routine call"
+            ));
+        }
+        if caller.origin == Origin::Agent
+            && let Some(routine) = caller.routine.as_deref()
+            && !read_only(name)
+            && !v1_manifest::routine_writes(routine).contains(&name)
+        {
+            return Err(format!(
+                "{name} changes BIR data, and the {routine} routine does not list it in its writes"
             ));
         }
         if caller.origin != Origin::App {
@@ -2169,6 +2192,181 @@ mod tests {
             let refused = call_as(&mut server, routine.clone(), tool, args);
             assert_eq!(refused["structuredContent"]["code"], "permission_denied", "{tool}");
         }
+        // A routine's query writes nothing, even one the routine's turn may
+        // call with its email (its `writes`), and a resolve call neither.
+        let query = json!({ "origin": "routine", "plugin": "dev.goldcoders.bir", "routine": "bir-payments", "ts": 1 });
+        let resolve = json!({ "origin": "resolve", "plugin": "dev.goldcoders.bir", "ts": 1 });
+        for caller in [query, resolve] {
+            let refused = call_as(&mut server, caller.clone(), BIR_RECORD_PAYMENT, payment_record("REF-Q"));
+            assert_eq!(refused["structuredContent"]["code"], "permission_denied", "{caller}");
+            assert!(refused["content"][0]["text"].as_str().unwrap().contains("resolve or routine call"));
+        }
+    }
+
+    /// A MyEG payment email for the test taxpayer, its TIN printed dashed.
+    fn payment_email(reference: &str) -> String {
+        format!(
+            "Agency Name BUREAU OF INTERNAL REVENUE (BIR) | TIN 123-456-788 | Branch Code 00000 | RDO Code 040 - PASIG | Form Type 2551Q | Tax Type PT | Return Period 09/30/2026 | Transaction Date 10/26/2026 18:57:10 | Transaction Number TEST2026102618575200000001 | Reference Number {reference} | Payment Channel Mobile | Transaction Amount PHP 629.94 | Bank Fee PHP 0.00 | Transaction Fee PHP 20.00 | Total Amount PHP 649.94"
+        )
+    }
+
+    /// What that email records, as bir_payment_parse's `record` would say.
+    fn payment_record(reference: &str) -> Value {
+        json!({
+            "tin": TIN, "form": "2551Q", "period": "2026-Q3", "channel": "MyEG", "reference": reference,
+            "amount": 629.94, "fee": 20.0, "paid_at": "2026-10-26T18:57:10+08:00",
+            "message_id": format!("msg-{reference}"), "raw": payment_email(reference),
+        })
+    }
+
+    fn routine_turn(routine: &str) -> Value {
+        json!({ "origin": "agent", "plugin": "dev.goldcoders.bir", "routine": routine, "ts": 1 })
+    }
+
+    fn denied(result: &Value) -> String {
+        assert_eq!(result["structuredContent"]["code"], "permission_denied", "{result}");
+        result["content"][0]["text"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_routine_turn_records_the_payment_its_email_says() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let turn = routine_turn("bir-payments");
+        // what the model reads names the taxpayer by ticket, in `raw` too
+        let parsed = call_as(
+            &mut server,
+            turn.clone(),
+            BIR_PAYMENT_PARSE,
+            json!({"text": payment_email("TESTREF001"), "message_id": "msg-1"}),
+        );
+        let record = parsed["structuredContent"]["result"]["record"].clone();
+        let raw = record["raw"].as_str().unwrap();
+        assert!(raw.contains("tkt_") && !raw.contains("123-456-788"), "{raw}");
+        assert_eq!(record["message_id"], "msg-1");
+        let recorded = call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, record.clone());
+        assert_eq!(recorded["isError"], false, "{recorded}");
+        assert_eq!(recorded["structuredContent"]["result"]["recorded"], true, "{recorded}");
+        // kept with the email as it reads, its TIN back in place
+        let kept = crate::bir_module::with_database(|db| {
+            Ok(db.get_setting("mini_app.payments").map_err(|error| HostError::new(error.to_string()))?.unwrap_or_default())
+        })
+        .unwrap();
+        assert!(kept.contains("123-456-788") && !kept.contains("tkt_"), "{kept}");
+        let again = call_as(&mut server, turn, BIR_RECORD_PAYMENT, record);
+        assert_eq!(again["structuredContent"]["result"]["already"], true, "{again}");
+    }
+
+    #[test]
+    fn a_routine_turn_refuses_a_payment_its_email_does_not_say() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        save_taxpayer(&mut server, OTHER, "Other Taxpayer");
+        let turn = routine_turn("bir-payments");
+        let edited = |key: &str, value: Value| {
+            let mut record = payment_record("TESTREF002");
+            record[key] = value;
+            record
+        };
+        for (key, value, field) in [
+            ("tin", json!(ticket_of(OTHER)), "TIN"),
+            ("tin", json!(OTHER), "TIN"),
+            ("amount", json!(1000.0), "amount"),
+            ("form", json!("1601C"), "form"),
+            ("period", json!("2026-Q2"), "period"),
+            ("reference", json!("SOMETHING-ELSE"), "reference"),
+        ] {
+            let refused = call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited(key, value));
+            let message = denied(&refused);
+            assert!(message.contains("a routine records only what the email says"), "{message}");
+            assert!(message.contains(field), "{key}: {message}");
+        }
+        // the email itself is required, and it is the only proof
+        for (key, value) in [("message_id", Value::Null), ("raw", Value::Null), ("raw", json!(""))] {
+            let message = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited(key, value)));
+            assert!(message.contains("`message_id` and its text as `raw`"), "{message}");
+        }
+        let proof = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("proof_path", json!("/etc/hosts"))));
+        assert!(proof.contains("proof_path"), "{proof}");
+        // an email bir cannot read records nothing
+        let unknown = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("raw", json!("Thanks for paying."))));
+        assert!(unknown.contains("does not know this email's format"), "{unknown}");
+        // nothing was recorded
+        let listed = call(&mut server, BIR_PAYMENTS_LIST, json!({"tin": TIN}));
+        assert!(!listed.to_string().contains("TESTREF002"), "{listed}");
+    }
+
+    #[test]
+    fn a_routine_turn_writes_only_with_the_tools_its_routine_declares() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        // bir-confirmations declares bir_confirm_filing, not bir_record_payment
+        let message = denied(&call_as(&mut server, routine_turn("bir-confirmations"), BIR_RECORD_PAYMENT, payment_record("TESTREF003")));
+        assert!(message.contains("bir-confirmations routine does not list it in its writes"), "{message}");
+        // a routine BIR does not have declares nothing
+        denied(&call_as(&mut server, routine_turn("bir-other"), BIR_RECORD_PAYMENT, payment_record("TESTREF003")));
+        for (tool, args) in [
+            (BIR_MARK_PAID, json!({"tin": TIN, "form": "2551Q", "period": "2026-Q3"})),
+            (BIR_CALENDAR_SET, json!({"tin": ROOT, "forms": ["2551Q"], "enabled": false})),
+            (BIR_CONFIRM_FILING, json!({})),
+            ("bir_form_send", json!({})),
+        ] {
+            denied(&call_as(&mut server, routine_turn("bir-payments"), tool, args));
+        }
+        // its reads still run
+        let read = call_as(&mut server, routine_turn("bir-payments"), BIR_PAYMENTS_LIST, json!({"tin": TIN}));
+        assert_eq!(read["isError"], false, "{read}");
+        // the assistant in a chat records as before, with or without an email
+        let mut by_hand = payment_record("TESTREF004");
+        by_hand.as_object_mut().unwrap().remove("raw");
+        by_hand.as_object_mut().unwrap().remove("message_id");
+        by_hand["amount"] = json!(500.0);
+        let recorded = call_as(&mut server, agent(), BIR_RECORD_PAYMENT, by_hand);
+        assert_eq!(recorded["structuredContent"]["result"]["recorded"], true, "{recorded}");
+    }
+
+    #[test]
+    fn a_routine_turn_confirms_only_the_return_the_file_name_names() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let turn = routine_turn("bir-confirmations");
+        let confirm = |reference: Value, form: &str, period: &str| {
+            json!({
+                "tin": ticket_of(ROOT), "form": form, "period": period, "reference": reference,
+                "received_at": "2026-10-20T10:00:00+08:00", "message_id": "msg-c",
+            })
+        };
+        // the file name's TIN, form and period: past the check (this test
+        // taxpayer has no such return, so BIR answers that)
+        for (reference, form, period) in [
+            ("12345678800000-2551Qv2018-092026Q3.xml", "2551Q", "2026-Q3"),
+            ("123456788000-2551Qv2018-092026Q3.xml", "2551Q", "2026-Q3"),
+            ("12345678800000-1601Cv2018-092026.xml", "1601C", "2026-09"),
+        ] {
+            let answer = call_as(&mut server, turn.clone(), BIR_CONFIRM_FILING, confirm(json!(reference), form, period));
+            assert_ne!(answer["structuredContent"]["code"], "permission_denied", "{reference}: {answer}");
+            assert!(answer.to_string().contains("has no"), "{reference}: {answer}");
+        }
+        for (reference, form, period, field) in [
+            ("98765432100000-2551Qv2018-092026Q3.xml", "2551Q", "2026-Q3", "TIN"),
+            ("12345678800000-1601Cv2018-092026.xml", "2551Q", "2026-Q3", "form"),
+            ("12345678800000-2551Qv2018-062026Q2.xml", "2551Q", "2026-Q3", "period"),
+            ("12345678800000-1601Cv2018-082026.xml", "1601C", "2026-09", "period"),
+        ] {
+            let message = denied(&call_as(&mut server, turn.clone(), BIR_CONFIRM_FILING, confirm(json!(reference), form, period)));
+            assert!(message.contains("a routine confirms only the return BIR's email names"), "{message}");
+            assert!(message.contains(field), "{reference}: {message}");
+        }
+        for reference in [Value::Null, json!(""), json!("not a file name")] {
+            let message = denied(&call_as(&mut server, turn.clone(), BIR_CONFIRM_FILING, confirm(reference.clone(), "2551Q", "2026-Q3")));
+            assert!(message.contains("File name"), "{reference}: {message}");
+        }
+        let mut no_id = confirm(json!("12345678800000-2551Qv2018-092026Q3.xml"), "2551Q", "2026-Q3");
+        no_id.as_object_mut().unwrap().remove("message_id");
+        denied(&call_as(&mut server, turn, BIR_CONFIRM_FILING, no_id));
+        // the assistant in a chat is not held to a file name
+        let chat = call_as(&mut server, agent(), BIR_CONFIRM_FILING, confirm(json!(""), "2551Q", "2026-Q3"));
+        assert_ne!(chat["structuredContent"]["code"], "permission_denied", "{chat}");
     }
 
     #[test]

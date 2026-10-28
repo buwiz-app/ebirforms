@@ -27,13 +27,28 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.5.0";
+pub(crate) const VERSION: &str = "2.6.0";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
 pub(crate) const MANIFEST_ENV: &str = "BIR_V1_MANIFEST";
 /// The Google Workspace plugin the routines read mail through (Q1).
 pub(crate) const GWS_PLUGIN: &str = "dev.goldcoders.google-workspace";
+/// What each routine's turn may change without asking (`routines[].writes`,
+/// 5.9): one tool each, and only on the email it read (server.rs).
+pub(crate) const ROUTINE_WRITES: [(&str, &str); 2] = [
+    ("bir-confirmations", "bir_confirm_filing"),
+    ("bir-payments", "bir_record_payment"),
+];
+
+/// The tools routine `id` declares in its `writes`.
+pub(crate) fn routine_writes(id: &str) -> Vec<&'static str> {
+    ROUTINE_WRITES
+        .iter()
+        .filter(|(routine, _)| *routine == id)
+        .map(|(_, tool)| *tool)
+        .collect()
+}
 /// The props key every app takes its subject from.
 pub(crate) const TICKET_PROP: &str = "ticket";
 /// A receipt scan or photo, up to 25 MB (`bir_mark_paid`'s own limit).
@@ -268,22 +283,23 @@ const CONFIRMATIONS_PROMPT: &str = "New emails matched the BIR confirmation sear
 read it with gws_read_mail and find BIR's File name (e.g. 00000000000000-2551Qv2018-092026Q3.xml) \
 and the Date and Time received by BIR. The file name starts with the TIN (with the branch) and \
 names the form and period (092026Q3 is Q3 2026, 092026 is September 2026). Call \
-bir_confirm_filing with tin, form, period, reference (the File name), received_at (BIR's date \
-and time, Manila) and message_id (the email's id). If the email is not a filing confirmation, \
-skip it. Then post a short summary, one line per email: the return (form, period, taxpayer name, \
+bir_confirm_filing with tin, form, period, reference (the File name exactly as the email gives \
+it), received_at (BIR's date and time, Manila) and message_id (the email's id): this routine \
+confirms only the return the File name names, so tin, form and period must be the File name's. \
+If the email is not a filing confirmation or has no File name, skip it. Then post a short summary, one line per email: the return (form, period, taxpayer name, \
 never the TIN) and the result: confirmed, already confirmed, or not confirmed with the tool's \
 reason. Do not file, submit or change anything else.";
 
 const PAYMENTS_PROMPT: &str = "New emails matched the BIR payment search. For each one: read it \
 with gws_read_mail and pass its text (subject and body) and message_id (the email's id) to \
-bir_payment_parse. If it returns a payment, call bir_record_payment with its `record` as it is (it \
-carries the message_id and the email's text). If it returns null, read the email yourself: when it is a payment of a BIR \
-return, call bir_record_payment with tin (and branch), form, period (the return period; its last \
-day such as 09/30/2026 is fine), channel (who took it), reference, amount (the tax, without \
-fees), fee, paid_at, message_id and raw; when it is not, skip it. A payment never confirms a \
-filing: leave confirmation to BIR's own email. Then post a short summary, one line per payment: \
-the return (form, period, taxpayer name, never the TIN), amount and channel, and whether it was \
-recorded, already recorded, or for a return not in BIR.";
+bir_payment_parse. If it returns a payment, call bir_record_payment with its `record` exactly as \
+it is: it carries the message_id and the email's text (raw), and this routine records only what \
+that text says, so do not change or add any field. If it returns null, bir does not know that \
+email's format: record nothing, and say in the summary that it needs recording from a chat. A \
+payment never confirms a filing: leave confirmation to BIR's own email. Then post a short \
+summary, one line per payment: the return (form, period, taxpayer name, never the TIN), amount \
+and channel, and whether it was recorded, already recorded, not readable by bir, or for a return \
+not in BIR.";
 
 fn routine(id: &str, name: &str, description: &str, tool: &str, prompt: &str) -> Value {
     json!({
@@ -294,6 +310,7 @@ fn routine(id: &str, name: &str, description: &str, tool: &str, prompt: &str) ->
         "query": { "tool": tool, "field": "query" },
         "prompt": prompt,
         "reads": [{ "plugin": GWS_PLUGIN, "tools": ["gws_search_mail", "gws_read_mail"] }],
+        "writes": routine_writes(id),
     })
 }
 
@@ -459,6 +476,10 @@ mod tests {
                 routine["reads"],
                 json!([{"plugin": GWS_PLUGIN, "tools": ["gws_search_mail", "gws_read_mail"]}])
             );
+            // each routine changes data with one tool of its own (5.9)
+            let writes = routine["writes"].as_array().unwrap();
+            assert_eq!(writes.len(), 1, "{routine}");
+            assert!(writes[0].as_str().unwrap().starts_with("bir_"));
         }
         // the whole manifest is JCS-able (integers only) and under 256 KiB
         let text = jcs::canonical(&m).unwrap();

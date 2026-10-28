@@ -172,6 +172,74 @@ fn received(raw: &str) -> Result<(NaiveDate, NaiveTime, Option<String>), String>
     ))
 }
 
+/// The period a BIR file name names (`092026Q3`, `092026`), read the way
+/// `like` (the return's own period) is cut: a quarter by its `Q`, a month by
+/// its month, a year by its year.
+fn file_period(text: &str, like: TaxPeriod) -> Option<TaxPeriod> {
+    let upper = text.to_ascii_uppercase();
+    let (digits, quarter) = match upper.split_once('Q') {
+        Some((digits, quarter)) => (digits, Some(quarter.parse::<u8>().ok()?)),
+        None => (upper.as_str(), None),
+    };
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let month: u8 = digits[..2].parse().ok()?;
+    let year: u16 = digits[2..].parse().ok()?;
+    Some(match (like, quarter) {
+        (TaxPeriod::Quarter { .. }, Some(quarter)) => TaxPeriod::Quarter { year, quarter },
+        (TaxPeriod::Month { .. }, None) => TaxPeriod::Month { year, month },
+        (TaxPeriod::Year(_), None) => TaxPeriod::Year(year),
+        _ => return None,
+    })
+}
+
+/// A routine's `bir_confirm_filing` (spec 5.9, the routine's `writes`):
+/// email-backed only. It carries the email's `message_id` and BIR's File
+/// name as `reference`, and the TIN, form and period it confirms are the
+/// ones that file name starts with.
+pub(crate) fn email_backed(arguments: &Map<String, Value>, today: NaiveDate) -> Result<(), String> {
+    const RULE: &str = "a routine confirms only the return BIR's email names";
+    let (Ok(_), Ok(reference)) = (text(arguments, "message_id"), text(arguments, "reference")) else {
+        return Err(format!(
+            "{RULE}: pass the email's `message_id` and its File name as `reference`"
+        ));
+    };
+    let (file_tin, file_form, file_period_text) = split_bir_filename(reference).ok_or_else(|| {
+        format!("{RULE}: `reference` must be BIR's File name, e.g. 00000000000000-2551Qv2018-092026Q3.xml")
+    })?;
+    // `2551Qv2018`: the form, then its version
+    let file_form = match file_form.rfind('v') {
+        Some(at) if at > 0 && file_form[at + 1..].bytes().all(|byte| byte.is_ascii_digit()) => &file_form[..at],
+        _ => file_form.as_str(),
+    };
+    let asked = |key: &str| text(arguments, key).unwrap_or("");
+    let code = taxform::form_code_of(asked("form"));
+    let period = code.and_then(|code| {
+        taxform::parse(&format!("{code} {}", asked("period")), today)
+            .period?
+            .for_form(code, today)
+            .ok()
+    });
+    let mut differs = Vec::new();
+    let tin = taxform::tin_digits(asked("tin"))
+        .map(|digits| if digits.len() == 9 { format!("{digits}00000") } else { digits });
+    if !tin.is_some_and(|tin| tin_spellings(&tin).contains(&file_tin)) {
+        differs.push("TIN");
+    }
+    if code.is_none() || code != taxform::form_code_of(file_form) {
+        differs.push("form");
+    }
+    if period.is_none() || period.and_then(|period| file_period(&file_period_text, period)) != period {
+        differs.push("period");
+    }
+    if differs.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{RULE}: its File name names another {}", differs.join(", ")))
+    }
+}
+
 /// `bir_confirm_filing {tin, form, period, reference, received_at,
 /// message_id}`: confirm the filed return the email is about, and answer it.
 /// The same `message_id` again answers what the first call did.

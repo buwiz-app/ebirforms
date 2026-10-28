@@ -59,6 +59,9 @@ pub(crate) struct Caller {
     pub origin: Origin,
     pub app: Option<String>,
     pub open_id: Option<String>,
+    /// The routine whose turn (origin `agent`) or query (origin `routine`)
+    /// this call is (5.9).
+    pub routine: Option<String>,
 }
 
 impl Caller {
@@ -81,6 +84,7 @@ impl Caller {
             origin,
             app: text("app"),
             open_id: text("open_id"),
+            routine: text("routine"),
         }
     }
 }
@@ -529,6 +533,40 @@ impl<'a> Scrubber<'a> {
             Err(_) => String::new(),
         }
     }
+}
+
+/// Text the model hands back after reading it in a BIR answer (a payment
+/// email's `raw`): each ticket BIR issued becomes the formatted TIN it
+/// stands for, as the text read before [`Scrubber::text`]; anything else,
+/// an unknown ticket too, stays.
+pub(crate) fn untickets(db: &Database, text: &str) -> Result<String, String> {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\btkt_[0-9A-HJKMNP-TV-Z]{26}\b").expect("regex"));
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for found in re.find_iter(text) {
+        out.push_str(&text[last..found.start()]);
+        match tickets::subject(db, found.as_str())? {
+            Some(subject) => out.push_str(&dashed(&subject.tin())),
+            None => out.push_str(found.as_str()),
+        }
+        last = found.end();
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
+}
+
+/// A TIN as BIR prints it: `000-000-000`, with `-00000` for a branch.
+fn dashed(tin: &str) -> String {
+    if tin.len() < 9 || !tin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return tin.to_string();
+    }
+    let mut out = format!("{}-{}-{}", &tin[..3], &tin[3..6], &tin[6..9]);
+    if tin.len() > 9 {
+        out.push('-');
+        out.push_str(&tin[9..]);
+    }
+    out
 }
 
 // ------------------------------------------------------------ opening apps

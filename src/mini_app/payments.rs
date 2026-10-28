@@ -866,6 +866,72 @@ pub(crate) fn parse(arguments: &Map<String, Value>, today: NaiveDate) -> Result<
     Ok(parsed)
 }
 
+/// A TIN as a payment names it, all 14 digits (a root is its head office).
+fn full_tin(tin: &str) -> Option<String> {
+    taxform::tin_digits(tin).map(|digits| if digits.len() == 9 { format!("{digits}00000") } else { digits })
+}
+
+/// A routine's `bir_record_payment` (spec 5.9, the routine's `writes`):
+/// email-backed only. It carries the email (`message_id`, and its text as
+/// `raw`), bir reads the payment from that text itself, and the arguments
+/// must say the same: TIN, form, period and amount, and the reference when
+/// the email has one. The model read `raw` in bir's answer with tickets for
+/// TINs: they are read back first, and `raw` is kept that way.
+pub(crate) fn email_backed(
+    db: &Database,
+    arguments: &mut Map<String, Value>,
+    today: NaiveDate,
+) -> Result<(), String> {
+    const RULE: &str = "a routine records only what the email says";
+    let message_id = optional_text(arguments, "message_id")?;
+    let (Some(_), Some(raw)) = (message_id, optional_text(arguments, "raw")?) else {
+        return Err(format!(
+            "{RULE}: pass the email's `message_id` and its text as `raw` (bir_payment_parse's `record` carries both)"
+        ));
+    };
+    if optional_text(arguments, "proof_path")?.is_some() {
+        return Err(format!("{RULE}: the email is the proof, so a routine passes no `proof_path`"));
+    }
+    let raw = super::v1::untickets(db, &raw)?;
+    let mut email = Map::new();
+    email.insert("text".into(), json!(raw));
+    let parsed = parse(&email, today)?;
+    let Some(record) = parsed.get("record").filter(|record| record.is_object()) else {
+        return Err(format!(
+            "{RULE}: bir does not know this email's format, so a routine records nothing from it (record it from a chat)"
+        ));
+    };
+    let said = |key: &str| record[key].as_str().unwrap_or("");
+    let asked = |key: &str| optional_text(arguments, key).ok().flatten().unwrap_or_default();
+    let code = taxform::form_code_of(&asked("form"));
+    let period = |text: &str| code.and_then(|code| period_of(code, text, today).ok());
+    let mut differs = Vec::new();
+    if full_tin(&asked("tin")).is_none() || full_tin(&asked("tin")) != full_tin(said("tin")) {
+        differs.push("TIN");
+    }
+    if code.is_none() || code != taxform::form_code_of(said("form")) {
+        differs.push("form");
+    }
+    if period(&asked("period")).is_none() || period(&asked("period")) != period(said("period")) {
+        differs.push("period");
+    }
+    let amount = amount_argument(arguments, "amount").ok().flatten();
+    if amount.is_none() || amount != record["amount"].as_f64().map(cents) {
+        differs.push("amount");
+    }
+    if !said("reference").is_empty() && !asked("reference").eq_ignore_ascii_case(said("reference")) {
+        differs.push("reference");
+    }
+    if !differs.is_empty() {
+        return Err(format!(
+            "{RULE}: its {} differ from the arguments; pass bir_payment_parse's `record` as it is",
+            differs.join(", ")
+        ));
+    }
+    arguments.insert("raw".into(), json!(raw));
+    Ok(())
+}
+
 /// `text` cut to at most `max` bytes, at a character boundary.
 fn capped(text: &str, max: usize) -> &str {
     let mut end = text.len().min(max);
