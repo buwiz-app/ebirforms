@@ -570,8 +570,11 @@ impl MiniServer {
             app_tools::ALLOW_SEND => now(call_result(self.allow_send_once(arguments))),
             answers::ADD_TAXPAYER => now(call_result(database(|db| answers::add_taxpayer(db, arguments)))),
             answers::CANCEL_SEND => now(call_result(self.cancel_send(arguments))),
+            // an app names the return by its ticket: the TIN is expanded here
             BIR_CARD_REMOVE_PAYMENT => now(call_result(database(|db| {
-                payments::remove(db, arguments, today, &payments::receipts_dir())
+                let mut arguments = arguments.clone();
+                v1::expand(db, name, &mut arguments, Origin::App)?;
+                payments::remove(db, &arguments, today, &payments::receipts_dir())
             }))),
             return_view::ATTACH => now(call_result(self.card_attach(arguments))),
             return_view::IMPORT => now(call_result(self.card_import(arguments))),
@@ -2011,6 +2014,23 @@ mod tests {
         let props = &parsed["_meta"]["rox/open"]["props"]["snapshot"];
         assert!(props["record"].get("raw").is_none() && props.get("raw").is_none(), "{props}");
         assert_eq!(props["record"]["message_id"], "test-3");
+    }
+
+    #[test]
+    fn forms_removes_a_payment_by_its_ticket() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let ticket = ticket_of(ROOT);
+        let paid = call(&mut server, BIR_MARK_PAID, json!({"tin": ROOT, "form": "2551Q", "period": "2026-Q3"}));
+        assert_eq!(paid["isError"], false, "{paid}");
+        let listed = call_as(&mut server, app("forms"), BIR_PAYMENTS_LIST, json!({"tin": ticket, "form": "2551Q", "period": "2026-Q3"}));
+        let id = listed["structuredContent"]["result"]["payments"][0]["id"].as_str().unwrap().to_string();
+        let args = json!({"tin": ticket, "form": "2551Q", "period": "2026-Q3", "id": id});
+        assert_eq!(call_as(&mut server, agent(), BIR_CARD_REMOVE_PAYMENT, args.clone())["isError"], true, "the assistant cannot");
+        let removed = call_as(&mut server, app("forms"), BIR_CARD_REMOVE_PAYMENT, args);
+        assert_eq!(removed["isError"], false, "{removed}");
+        let left = call_as(&mut server, app("forms"), BIR_PAYMENTS_LIST, json!({"tin": ticket, "form": "2551Q", "period": "2026-Q3"}));
+        assert_eq!(left["structuredContent"]["result"]["payments"], json!([]), "{left}");
     }
 
     #[test]
