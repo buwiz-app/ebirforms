@@ -646,8 +646,8 @@ impl MiniServer {
             BIR_CONFIRM_FILING => Ok(now(self.on_database(name, arguments, confirm::confirm))),
             // Payments and the printable filing record.
             BIR_PAYMENT_SEARCH => Ok(now(routine_query(self.on_database(name, arguments, payments::search)))),
-            BIR_PAYMENT_PARSE => Ok(now(self.on_database(name, arguments, |_, arguments, today| {
-                payments::parse(arguments, today)
+            BIR_PAYMENT_PARSE => Ok(now(self.on_database(name, arguments, |db, arguments, today| {
+                payments::parse(arguments, today).map(|parsed| payments::with_recorded(db, parsed, today))
             }))),
             BIR_RECORD_PAYMENT => Ok(now(self.on_database(name, arguments, |db, arguments, today| {
                 payments::record(db, arguments, today, &payments::receipts_dir())
@@ -855,7 +855,8 @@ impl MiniServer {
             .find(id)?
             .ok_or_else(|| format!("the `{id}` mini app is not shipped in this build"))?;
         let today = taxform::today();
-        let (props, text) = match (id, form, tin) {
+        // the card names what opens: the return, or whose profile
+        let (props, text, title) = match (id, form, tin) {
             ("forms", Some(form), tin) => {
                 let target = database(|db| {
                     resolve::app_return(db, tin.as_deref(), &form, period.as_deref(), action, today)
@@ -864,9 +865,9 @@ impl MiniServer {
                 if let Some(draft_id) = draft_id {
                     props["draft_id"] = json!(draft_id);
                 }
-                (props, format!("Opening {} on {}…", app.title, target.title))
+                (props, format!("Opening {} on {}…", app.title, target.title), format!("BIR Form {}", target.title))
             }
-            (_, _, None) => (json!({}), format!("Opening {}…", app.title)),
+            (_, _, None) => (json!({}), format!("Opening {}…", app.title), app.title.clone()),
             ("tax-profile", None, Some(tin)) => {
                 let (mut props, name) = database(|db| resolve::app_profile(db, &tin))?
                     .ok_or_else(|| {
@@ -883,7 +884,7 @@ impl MiniServer {
                     }
                     props["branch"] = json!(format!("{digits:0>5}"));
                 }
-                (props, format!("Opening {} for {name}…", app.title))
+                (props, format!("Opening {} for {name}…", app.title), format!("{} · {name}", app.title))
             }
             (_, _, Some(tin)) => {
                 let (row, _) = self.taxpayer(&tin)?;
@@ -891,6 +892,7 @@ impl MiniServer {
                 (
                     json!({ "tin": row["tin"].clone() }),
                     format!("Opening {} for {name}…", app.title),
+                    format!("{} · {name}", app.title),
                 )
             }
         };
@@ -899,7 +901,7 @@ impl MiniServer {
         Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "isError": false,
-            "_meta": { "rox/open": v1::open_meta(id, &app.title, &opened, placement) },
+            "_meta": { "rox/open": v1::open_meta(id, &title, &opened, placement) },
         }))
     }
 
@@ -1785,7 +1787,7 @@ mod tests {
         assert_eq!(result["isError"], false, "{result}");
         assert_eq!(
             result["_meta"]["rox/open"],
-            json!({"app": "forms", "props": {"ticket": ticket}, "ticket": ticket, "title": "BIR Forms", "placement": "full"})
+            json!({"app": "forms", "props": {"ticket": ticket}, "ticket": ticket, "title": "BIR Forms · Scratch Taxpayer", "placement": "full"})
         );
         assert_eq!(result["content"][0]["text"], "Opening BIR Forms for Scratch Taxpayer…");
         let plain = call(&mut server, BIR_APP_OPEN, json!({"app": "calendar"}));
@@ -1804,6 +1806,8 @@ mod tests {
         assert_ne!(open["ticket"], ticket, "a return has its own ticket");
         assert_eq!(open["props"]["form"], "2551Q");
         assert_eq!(open["props"]["action"], "submit");
+        // its card names the return and whose it is
+        assert_eq!(open["title"], "BIR Form 2551Q · Q3 2026 · Scratch Taxpayer");
         assert!(!open.to_string().contains(ROOT), "{open}");
         // the deadline card opens inline
         let card = call_as(&mut server, agent(), BIR_APP_OPEN, json!({"app": "deadlines", "tin": ticket}));

@@ -319,16 +319,23 @@ function Approve() {
 
 function Match() {
   const s = () => snap() || {};
-  const record = () => (s().record || {}) as Record<string, unknown>;
-  const state = signal<"" | "recorded" | "no">("");
-  const yes = () => act(() => rox.call("bir_record_payment", record() as any)).then(() => !failure() && state.set("recorded"));
+  // A signed call carries whole numbers only: the pesos go as text.
+  const record = () =>
+    Object.fromEntries(Object.entries((s().record || {}) as Record<string, unknown>).filter(([, v]) => v != null).map(([k, v]) => [k, typeof v === "number" ? String(v) : v]));
+  const state = signal<"" | "recorded" | "already" | "no">(s().recorded ? "already" : "");
+  const yes = () =>
+    act(async () => {
+      const r = answerOf(await rox.call("bir_record_payment", record() as any));
+      state.set(r?.already ? "already" : "recorded");
+    });
+  const said = { recorded: "Recorded on the return.", already: "Already recorded on the return.", no: "Left alone. Tell the assistant which return it pays." };
   return (
     <Card title={`${s().channel || "Payment"} · ${peso(s().total ?? s().amount)}`} sub={`${s().form || ""} · ${s().period || ""}${s().reference ? ` · ref ${s().reference}` : ""}`}
       foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={() => state.set("no")} />] : undefined}>
       <Row title="Paid on" sub={String(s().paid_at || "").replace("T", " ").slice(0, 16)} />
       <Row title="Tax and fee" sub={`${peso(s().amount)} tax · ${peso(s().fee)} fee`} />
       <If when={state() !== ""}>
-        <Text class={`text-sm ${state() === "recorded" ? K.ok : K.fg2}`}>{state() === "recorded" ? "Recorded on the return." : "Left alone. Tell the assistant which return it pays."}</Text>
+        <Text class={`text-sm ${state() === "no" ? K.fg2 : K.ok}`}>{said[state() as keyof typeof said] || ""}</Text>
       </If>
     </Card>
   );

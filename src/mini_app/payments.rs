@@ -802,6 +802,28 @@ pub(crate) fn parse(arguments: &Map<String, Value>, today: NaiveDate) -> Result<
         .unwrap_or(Value::Null))
 }
 
+/// `parsed` (a payment email, as [`parse`] reads it) with `recorded`:
+/// whether its return already holds it, by the rule [`record`] uses for
+/// the same payment (its reference through the same channel).
+pub(crate) fn with_recorded(db: &Database, mut parsed: Value, today: NaiveDate) -> Value {
+    let Some(record) = parsed.get("record") else { return parsed };
+    let field = |name: &str| record[name].as_str().unwrap_or("");
+    let (reference, channel) = (field("reference"), field("channel"));
+    let recorded = !reference.is_empty()
+        && target(db, field("tin"), field("form"), field("period"), today).is_ok_and(|target| {
+            let key = target.key();
+            load(db).is_ok_and(|payments| {
+                payments.iter().any(|payment| {
+                    payment.key == key
+                        && payment.reference.eq_ignore_ascii_case(reference)
+                        && payment.channel.eq_ignore_ascii_case(channel)
+                })
+            })
+        });
+    parsed["recorded"] = json!(recorded);
+    parsed
+}
+
 /// The labels of MyEG's "BIR Transaction Success" email, in its order.
 const MYEG_LABELS: [&str; 15] = [
     "Agency Name",
@@ -1353,9 +1375,12 @@ mod tests {
         let db = db();
         let receipts = scratch("email");
         let parsed = parse(&args(json!({"text": MYEG})), today()).unwrap();
+        assert_eq!(with_recorded(&db, parsed.clone(), today())["recorded"], false);
         let mut call = parsed["record"].as_object().unwrap().clone();
         call.insert("message_id".into(), json!("gmail-1"));
         let first = record(&db, &call, today(), &receipts).unwrap();
+        // the Payment found card now opens as already recorded
+        assert_eq!(with_recorded(&db, parsed.clone(), today())["recorded"], true);
         assert_eq!(first["recorded"], true, "{first}");
         assert_eq!(first["already"], false);
         let payment = &first["payment"];
@@ -1376,6 +1401,13 @@ mod tests {
         call.insert("message_id".into(), json!("gmail-2"));
         let same = record(&db, &call, today(), &receipts).unwrap();
         assert_eq!(same["already"], true);
+        // as the card sends it: a signed call's pesos are text
+        let mut card = parsed["record"].as_object().unwrap().clone();
+        card.retain(|_, value| !value.is_null());
+        for key in ["amount", "fee"] {
+            card.insert(key.into(), json!(card[key].to_string()));
+        }
+        assert_eq!(record(&db, &card, today(), &receipts).unwrap()["already"], true);
 
         let listed = list(&db, &args(json!({"tin": ROOT, "form": "2551Q", "period": "Q3 2026"})), today()).unwrap();
         assert_eq!(listed["payments"].as_array().unwrap().len(), 1, "{listed}");
