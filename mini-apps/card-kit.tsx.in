@@ -133,38 +133,64 @@ function Btn(p: { label: string; onPress: () => void; primary?: boolean; disable
   );
 }
 
-/** The card's frame: title and subtitle, the body, and its notes. The
- *  body takes the height it needs (it scrolls only past the card's), so
- *  the buttons sit right under it and a short card leaves no gap above
- *  them; each card app declares a height that fits its cards. */
+/** The card's height as its content needs it, for `rox.fit`: the
+ *  column's, with the body's full height in place of the part the scroll
+ *  shows. The same whether or not the frame cuts the body short, so the
+ *  card settles at once. Measured after a layout pass (its parts report
+ *  one by one). */
+const fitParts = { column: 0, shown: 0, body: 0 };
+let fitSent = 0;
+let fitTimer: any = null;
+function measured(part: keyof typeof fitParts, e: any) {
+  fitParts[part] = (e.bounds ?? e).size.height;
+  if (fitTimer !== null) return;
+  fitTimer = setTimeout(() => {
+    fitTimer = null;
+    const { column, shown, body } = fitParts;
+    const h = Math.ceil(column - shown + body);
+    // a Rox without rox.fit keeps the declared height
+    if (!column || Math.abs(h - fitSent) < 1 || typeof rox.fit !== "function") return;
+    fitSent = h;
+    rox.fit(h);
+  }, 0);
+}
+
+/** The card's frame: title and subtitle, the body, and its notes. Rox
+ *  sizes the card to all of it (`rox.fit`, within the manifest's
+ *  min_height..max_height), so a status line, an error, a note or a
+ *  button that appears grows the card rather than scrolling it. Only a
+ *  body past max_height (a long list) scrolls, under the title and above
+ *  the buttons. */
 function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
   return (
-    <View style={{ flex: 1 }} class={`${K.pane} p-3 gap-2`}>
-      <View class="flex-row items-start gap-2">
-        <View class="flex-1">
-          <Text class={`text-base font-semibold ${K.fg}`} numberOfLines={1}>{p.title}</Text>
-          <If when={Boolean(p.sub)}>
-            <Text class={`text-xs ${K.fg2}`} numberOfLines={1}>{p.sub}</Text>
+    <View style={{ flex: 1 }} class={K.pane}>
+      <View style={{ flexShrink: 1, minHeight: 0 }} class="p-3 gap-2" onLayout={(e: any) => measured("column", e)}>
+        <View class="flex-row items-start gap-2">
+          <View class="flex-1">
+            <Text class={`text-base font-semibold ${K.fg}`} numberOfLines={1}>{p.title}</Text>
+            <If when={Boolean(p.sub)}>
+              <Text class={`text-xs ${K.fg2}`} numberOfLines={1}>{p.sub}</Text>
+            </If>
+          </View>
+          {/* Rox draws "as of" and Refresh above the card (spec 9.8); Refresh
+              remounts it without a snapshot and the card reads live. */}
+          <If when={busy()}>
+            <Text class={`text-xs ${K.fg3}`}>Working…</Text>
           </If>
         </View>
-        {/* Rox draws "as of" and Refresh above the card (spec 9.8); Refresh
-            remounts it without a snapshot and the card reads live. */}
-        <If when={busy()}>
-          <Text class={`text-xs ${K.fg3}`}>Working…</Text>
+        <If when={Boolean(failure())}>
+          <Text class={`text-xs ${K.danger}`}>{failure()}</Text>
+        </If>
+        <If when={Boolean(note())}>
+          <Text class={`text-xs ${K.ok}`}>{note()}</Text>
+        </If>
+        <Scroll style={{ flexGrow: 0, flexShrink: 1, minHeight: 0 }} onLayout={(e: any) => measured("shown", e)}>
+          <View class="gap-1.5" onLayout={(e: any) => measured("body", e)}>{p.children}</View>
+        </Scroll>
+        <If when={Boolean(p.foot)}>
+          <View class="flex-row flex-wrap gap-2">{p.foot}</View>
         </If>
       </View>
-      <If when={Boolean(failure())}>
-        <Text class={`text-xs ${K.danger}`}>{failure()}</Text>
-      </If>
-      <If when={Boolean(note())}>
-        <Text class={`text-xs ${K.ok}`}>{note()}</Text>
-      </If>
-      <Scroll style={{ flexGrow: 0, flexShrink: 1 }}>
-        <View class="gap-1.5">{p.children}</View>
-      </Scroll>
-      <If when={Boolean(p.foot)}>
-        <View class="flex-row flex-wrap gap-2">{p.foot}</View>
-      </If>
     </View>
   );
 }
