@@ -24,11 +24,15 @@ mod bridge;
 mod calendar;
 mod confirm;
 mod payments;
+mod plain;
 #[cfg(test)]
 mod demo_tests;
+#[cfg(test)]
+mod e2e_seed;
 mod resolve;
 mod scope;
 mod server;
+mod taxpayer;
 mod v1;
 
 use std::io::{BufRead, Write};

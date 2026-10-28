@@ -27,7 +27,7 @@ use serde_json::{Map, Value, json};
 use super::apps::{self, Catalog};
 use super::bridge::{Bridge, Call};
 use super::v1::{self, Caller, Origin, app_tools, manifest as v1_manifest};
-use super::{calendar, confirm, payments, resolve, scope};
+use super::{calendar, confirm, payments, plain, resolve, scope, taxpayer};
 use crate::agent::{Session, UiQueue};
 
 pub(crate) const SERVER_NAME: &str = "bir-mini-app";
@@ -68,7 +68,9 @@ bir_app_open: `forms` to prepare and file returns, `tax-profile` for a taxpayer'
 user an Open button. You can read taxpayer profiles and dues and draft a return yourself with the \
 bir_form_* tools: open, read fields and context, fill with a stated source, list what needs the \
 user, validate, save the draft, dismiss. Only one form is open at a time. bir_drafts_list shows a \
-taxpayer's unsubmitted returns. Sending (bir_form_send) needs the user's standing OK for that \
+taxpayer's unsubmitted returns. To answer what forms a taxpayer is registered for or what returns \
+they have filed, call bir_profile_forms or bir_returns_list with the ticket from @bir:taxprofile; \
+do not open an app unless the user asks to. Sending (bir_form_send) needs the user's standing OK for that \
 taxpayer and form; without it the user presses Submit in the Forms app themselves. The tools \
 whose description starts with \"Mini apps only\" and bir_resolve belong to the apps and to Rox: do \
 not call them. The form calendar: bir_calendar_get lists returns and due dates with their status, \
@@ -308,7 +310,21 @@ impl MiniServer {
             return Ok(now(v1::fail("permission_denied", &message)));
         }
         if is_app_only(name) {
-            return Ok(self.app_tool(name, arguments));
+            return Ok(match self.app_tool(name, arguments) {
+                Reply::Now(Some(mut result)) => {
+                    plain::rewrite(name, &mut result, true);
+                    now(result)
+                }
+                Reply::Later(run) => {
+                    let tool = name.to_string();
+                    Reply::Later(Box::new(move || {
+                        let mut result = run();
+                        plain::rewrite(&tool, &mut result, true);
+                        result
+                    }))
+                }
+                other => other,
+            });
         }
         let mut arguments = arguments.clone();
         let has_ticket = Value::Object(arguments.clone()).to_string().contains("tkt_");
@@ -325,14 +341,18 @@ impl MiniServer {
         if let Some(path) = upload {
             let _ = std::fs::remove_file(path);
         }
-        // What the model or an app reads names taxpayers by ticket.
         match reply {
-            Ok(Reply::Now(Some(mut result))) if matches!(caller.origin, Origin::Agent | Origin::App) => {
-                let today = taxform::today();
-                let _ = database(|db| {
-                    v1::Scrubber::new(db, today).result(&mut result);
-                    Ok(())
-                });
+            Ok(Reply::Now(Some(mut result))) => {
+                // Signed out or offline, in plain words.
+                plain::rewrite(name, &mut result, caller.origin == Origin::App);
+                // What the model or an app reads names taxpayers by ticket.
+                if matches!(caller.origin, Origin::Agent | Origin::App) {
+                    let today = taxform::today();
+                    let _ = database(|db| {
+                        v1::Scrubber::new(db, today).result(&mut result);
+                        Ok(())
+                    });
+                }
                 Ok(now(result))
             }
             other => other,
@@ -466,6 +486,8 @@ impl MiniServer {
             BIR_RESOLVE => Ok(now(self.resolve(arguments))),
             BIR_DRAFTS_LIST => Ok(now(self.drafts_list(arguments))),
             BIR_CALENDAR_GET => Ok(now(self.on_database(name, arguments, calendar::get))),
+            taxpayer::PROFILE_FORMS => Ok(now(self.on_database(name, arguments, taxpayer::profile_forms))),
+            taxpayer::RETURNS_LIST => Ok(now(self.on_database(name, arguments, taxpayer::returns_list))),
             BIR_CALENDAR_SET => Ok(now(self.on_database(name, arguments, |db, arguments, _| {
                 calendar::set(db, arguments)
             }))),
@@ -889,7 +911,9 @@ fn is_app_only(name: &str) -> bool {
 
 /// This server's tools that change nothing (`readOnlyHint`, P8): the ones a
 /// routine or resolve call may run, and the reads a routine may name.
-const READ_ONLY: [&str; 15] = [
+const READ_ONLY: [&str; 17] = [
+    taxpayer::PROFILE_FORMS,
+    taxpayer::RETURNS_LIST,
     BIR_STATUS,
     BIR_DRAFTS_LIST,
     BIR_CALENDAR_GET,
@@ -1115,6 +1139,7 @@ fn tool_list() -> Value {
             "additionalProperties": false
         },
     }));
+    list.extend(taxpayer::descriptors());
     list.extend(app_tools::descriptors());
     for name in v1::RESERVED {
         list.push(json!({
@@ -1653,11 +1678,14 @@ mod tests {
     fn a_closed_license_stops_model_tools_but_not_the_app_tools() {
         let mut server = server();
         server.set_license(License::settled(Err(UNAUTHENTICATED.to_string())));
+        // signed out: plain words and the sign-in app's card, not an error
         let refused = call(&mut server, "bir_profiles_list", json!({}));
-        assert_eq!(refused["isError"], true);
-        assert_eq!(refused["content"][0]["text"], UNAUTHENTICATED);
+        assert_eq!(refused["isError"], false, "{refused}");
+        assert_eq!(refused["content"][0]["text"], plain::signed_out_text("bir_profiles_list"));
+        assert_eq!(refused["_meta"]["rox/open"]["app"], "register");
         let opened = call(&mut server, BIR_APP_OPEN, json!({"app": "forms"}));
-        assert_eq!(opened["isError"], true);
+        assert_eq!(opened["isError"], false);
+        assert_eq!(opened["_meta"]["rox/open"]["app"], "register", "{opened}");
         // (bir_app_list_rdos, not the account status: that reads the
         // Buwiz account from the Keychain, which tests leave alone)
         let rdos = call_as(&mut server, app("register"), "bir_app_list_rdos", json!({}));

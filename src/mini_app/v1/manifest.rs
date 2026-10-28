@@ -71,6 +71,7 @@ fn specs() -> Vec<AppSpec> {
         app_tools::UPLOAD.to_string(),
         "bir_payments_list".to_string(),
         "bir_mark_paid".to_string(),
+        "bir_record_payment".to_string(),
     ];
     forms_tools.extend(host_tools(app_tools::FORMS));
     let mut profile_tools = vec![
@@ -149,7 +150,7 @@ fn specs() -> Vec<AppSpec> {
             props: json!({ "type": "object", "properties": {} }),
             permissions: json!({
                 "tools": host_tools(app_tools::REGISTER),
-                "open": { "apps": ["tax-profile"] },
+                "open": { "apps": ["forms", "tax-profile"] },
                 "copy": true,
             }),
         },

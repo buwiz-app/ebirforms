@@ -115,6 +115,7 @@ pub(crate) const REGISTER: &[&str] = &[
     "cloud_account_begin_sign_up",
     "cloud_account_finish_sign_in",
     "cloud_account_session_opened",
+    "cloud_account_sign_out",
     "cloud_account_status",
     "create_taxpayer",
     "list_rdos",
