@@ -1391,10 +1391,12 @@ mod tests {
             assert!(!is_app_only(agent_tool), "{agent_tool}");
         }
         assert!(is_app_only("bir_app_list_taxpayers") && is_app_only(app_tools::UPLOAD));
-        // 10.1: every bir_app_* tool, and nothing else, is for apps only
+        // 10.1: the apps' tools, and nothing else, are for apps only
         for tool in tool_list()["tools"].as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
-            let app_only = name.starts_with(app_tools::PREFIX) && name != BIR_APP_OPEN;
+            let app_only = is_app_only(name);
+            assert_eq!(app_only, name.starts_with(app_tools::PREFIX) && name != BIR_APP_OPEN
+                || name == app_tools::TICKET_SUBJECT || name == app_tools::TICKET_ISSUE, "{name}");
             let audience = &tool["_meta"]["rox/audience"];
             if app_only {
                 assert_eq!(audience, &json!(["app"]), "{name}");
