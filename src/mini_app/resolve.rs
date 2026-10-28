@@ -922,7 +922,8 @@ pub(crate) fn filing_reference(filename: &str) -> String {
 }
 
 /// A stored return's status in words: `Not started`, `Draft · Oct 20, 2026`,
-/// `Queued · <date>`, `Filed · <date>`, `Confirmed · <reference>`.
+/// `Queued · <date>`, `Filed · <date>`, `Confirmed · <date>`. Never BIR's
+/// file name: it starts with the TIN, and this text reaches cards (spec 6.6).
 pub(crate) fn status_detail(db: &Database, filing: Option<&FormDraftSummary>) -> String {
     let Some(filing) = filing else {
         return "Not started".to_string();
@@ -944,11 +945,8 @@ pub(crate) fn status_detail(db: &Database, filing: Option<&FormDraftSummary>) ->
         }
         FilingStatus::Confirmed | FilingStatus::Paid => {
             let marks = marks();
-            let reference = mark(&marks, "submission_filename")
-                .map(|name| filing_reference(&name))
-                .or_else(|| mark(&marks, "confirmed_at").map(|at| short_date(&at)))
-                .unwrap_or_else(|| short_date(&filing.updated_at));
-            format!("Confirmed · {reference}")
+            let at = mark(&marks, "confirmed_at").unwrap_or_else(|| filing.updated_at.clone());
+            format!("Confirmed · {}", short_date(&at))
         }
     }
 }

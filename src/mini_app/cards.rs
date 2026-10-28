@@ -96,6 +96,10 @@ fn kind(id: &str) -> (&'static str, &'static str, bool) {
 /// `_meta["rox/open"]` for card `id`.
 pub(crate) fn open(id: &str, title: &str, ticket: Option<&str>, snapshot: Value, tool: &str, args: Value) -> Value {
     let (card, app, small) = kind(id);
+    // The arguments are kept only for Refresh: an action card's (no tool)
+    // could hold what the assistant read (an email's text, BIR's file name),
+    // which embeds a TIN (spec 6.6).
+    let args = if tool.is_empty() { json!({}) } else { args };
     let mut props = json!({
         "card": card,
         "snapshot": snapshot,
@@ -123,6 +127,65 @@ pub(crate) fn open(id: &str, title: &str, ticket: Option<&str>, snapshot: Value,
         open["size"] = json!("small");
     }
     open
+}
+
+/// `data` without `keys`.
+fn without(data: &Value, keys: &[&str]) -> Value {
+    let mut data = data.clone();
+    if let Some(map) = data.as_object_mut() {
+        for key in keys {
+            map.remove(*key);
+        }
+    }
+    data
+}
+
+/// The last guard of spec 6.6 for a result that carries a card: any run of
+/// digits in its props (and its text) that holds a saved taxpayer's TIN
+/// root, plain or dashed and with or without a branch code (`123456788`,
+/// `12345678800000-2551Qv2018-…`, `123-456-788-000`), becomes `[TIN]`. The
+/// tools already answer with tickets; this catches a TIN embedded in other
+/// text, such as an email the assistant passed in or a BIR file name.
+pub(crate) fn redact(result: &mut Value, roots: &[String]) {
+    if result.pointer("/_meta/rox~1open").is_none() || roots.is_empty() {
+        return;
+    }
+    static RUN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let run = RUN.get_or_init(|| regex::Regex::new(r"\d(?:[\d-]*\d)?").expect("regex"));
+    let clean = |text: &str| -> Option<String> {
+        let mut hit = false;
+        let out = run.replace_all(text, |caps: &regex::Captures<'_>| {
+            let digits: String = caps[0].chars().filter(char::is_ascii_digit).collect();
+            if digits.len() >= 9 && roots.iter().any(|root| digits.contains(root.as_str())) {
+                hit = true;
+                "[TIN]".to_string()
+            } else {
+                caps[0].to_string()
+            }
+        });
+        hit.then(|| out.into_owned())
+    };
+    fn walk(value: &mut Value, clean: &dyn Fn(&str) -> Option<String>) {
+        match value {
+            Value::String(text) => {
+                if let Some(out) = clean(text) {
+                    *text = out;
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| walk(item, clean)),
+            Value::Object(map) => map.values_mut().for_each(|item| walk(item, clean)),
+            _ => {}
+        }
+    }
+    if let Some(props) = result.pointer_mut("/_meta/rox~1open/props") {
+        walk(props, &clean);
+    }
+    if let Some(content) = result.get_mut("content") {
+        walk(content, &clean);
+    }
+    if let Some(structured) = result.get_mut("structuredContent") {
+        walk(structured, &clean);
+    }
 }
 
 fn suggest(chips: &[(&str, String)]) -> Value {
@@ -323,7 +386,9 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             vec![],
         ),
         "bir_confirm_filing" => (
-            open("confirm", "BIR confirmation", None, data.clone(), "", args_value),
+            // BIR's file name starts with the TIN: the card shows the return
+            // and when BIR received it, never the file name.
+            open("confirm", "BIR confirmation", None, without(&data, &["reference", "message_id", "filename"]), "", args_value),
             vec![],
         ),
         _ => return,

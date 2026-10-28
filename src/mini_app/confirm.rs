@@ -290,10 +290,10 @@ pub(crate) fn confirm(
         return Ok(answer(
             false,
             &filing.status,
+            // Form and period only: the file names start with the TIN.
             Some(format!(
-                "The email confirms {}, not this return's {}.",
-                resolve::filing_reference(reference),
-                resolve::filing_reference(&filename)
+                "The email confirms {} {}, not this return's {} {}.",
+                named.1, named.2, ours.1, ours.2
             )),
         ));
     }

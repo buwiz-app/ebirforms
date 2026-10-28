@@ -777,7 +777,13 @@ pub(crate) fn digest(db: &Database, arguments: &Map<String, Value>, today: Naive
         let at = summary.updated_at.get(..10).unwrap_or(&summary.updated_at).to_string();
         match summary.status {
             FilingStatus::Confirmed | FilingStatus::Paid if at >= since_text => {
-                items.push(row("confirmed", format!("BIR confirmed it · {}", resolve::status_detail(db, Some(&summary)))));
+                let received = db
+                    .draft_data_json(summary.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|data| data["confirmed_at"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| summary.updated_at.clone());
+                items.push(row("confirmed", format!("BIR confirmation received {}", received.get(..10).unwrap_or(&received))));
             }
             FilingStatus::Submitted if at < stale => {
                 items.push(row("waiting", format!("Sent {at}; no confirmation from BIR yet")));

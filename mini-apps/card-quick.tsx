@@ -363,14 +363,13 @@ function MarkPaid() {
 
 function Confirm() {
   const s = () => snap() || {};
-  const retry = () => act(async () => snap.set(answerOf(await rox.call("bir_confirm_filing", (P.args || {}) as any))));
+  // BIR's file name starts with the TIN, so the card shows when BIR
+  // received the return, never the file name (spec 6.6).
   return (
     <Card title={s().confirmed ? "Confirmed by BIR" : "Not confirmed yet"} sub={`${s().form || ""} · ${s().period || ""}${s().taxpayer ? ` · ${s().taxpayer}` : ""}`}
-      foot={[
-        <If when={!s().confirmed && /submitted|sent|filed/i.test(String(s().status || ""))}><Btn label="Mark confirmed" primary onPress={retry} /></If>,
-        <If when={Boolean(s().token)}><Btn label="Open the return" onPress={() => openApp("forms", ticketOf(s().token))} /></If>,
-      ]}>
+      foot={<If when={Boolean(s().token)}><Btn label="Open the return" onPress={() => openApp("forms", ticketOf(s().token))} /></If>}>
       <Row title="Status" sub={String(s().status || "")} right={<Chip text={s().confirmed ? "Confirmed" : "Waiting"} tone={s().confirmed ? "ok" : "warn"} />} />
+      <If when={Boolean(s().received_at)}><Text class={`text-sm ${K.fg2}`}>{`BIR confirmation received ${String(s().received_at || "").slice(0, 16)}`}</Text></If>
       <If when={Boolean(s().reason)}><Text class={`text-sm ${K.fg2}`}>{String(s().reason || "")}</Text></If>
     </Card>
   );

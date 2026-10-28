@@ -375,6 +375,12 @@ impl MiniServer {
                         if let Some(props) = result.pointer_mut("/_meta/rox~1open/props") {
                             scrubber.value(props);
                         }
+                        let roots: Vec<String> = resolve::branches(db, None)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|branch| branch.root)
+                            .collect();
+                        cards::redact(&mut result, &roots);
                         Ok(())
                     });
                     cards::fit(&mut result);
@@ -1991,7 +1997,7 @@ mod tests {
             }
             let props = open["props"].to_string();
             assert!(props.len() <= 8 * 1024, "{tool}: {} bytes", props.len());
-            assert!(!props.contains(ROOT) && !result["content"].to_string().contains(ROOT), "{tool} names the TIN: {props}");
+            assert_no_tin(&result, tool);
             if let Some(chips) = result["_meta"]["rox/suggest"].as_array() {
                 assert!(chips.len() <= 3);
             }
@@ -2011,6 +2017,35 @@ mod tests {
         // apps get no card: they draw their own
         let from_app = call_as(&mut server, app("card-forms"), "bir_profile_forms", json!({"ticket": ticket}));
         assert!(from_app["_meta"]["rox/open"].is_null());
+    }
+
+    /// The TIN roots the card tests save.
+    const SEEDED: [&str; 3] = [ROOT, OTHER, "111222333"];
+
+    /// Whether `text` holds a seeded TIN in any form: the 9-digit root
+    /// alone, dashed (`123-456-788`), or inside a longer run of digits and
+    /// dashes (`12345678800000-2551Qv2018-…`, `123-456-788-00000`).
+    fn names_a_tin(text: &str) -> Option<&'static str> {
+        let runs = regex::Regex::new(r"\d(?:[\d-]*\d)?").unwrap();
+        SEEDED.into_iter().find(|root| {
+            runs.find_iter(text).any(|run| run.as_str().chars().filter(char::is_ascii_digit).collect::<String>().contains(root))
+        })
+    }
+
+    /// Spec 6.6 for an answer with a card: neither its props (kept in the
+    /// chat's history), its chips nor what the assistant reads name a TIN.
+    fn assert_no_tin(result: &Value, tool: &str) {
+        for (part, value) in [
+            ("props", &result["_meta"]["rox/open"]["props"]),
+            ("chips", &result["_meta"]["rox/suggest"]),
+            ("content", &result["content"]),
+            ("structuredContent", &result["structuredContent"]),
+        ] {
+            let text = value.to_string();
+            if let Some(root) = names_a_tin(&text) {
+                panic!("{tool}: its {part} name the TIN {root}: {text}");
+            }
+        }
     }
 
     /// One card answer's checks (spec 9.8): inline, the expected card, a
@@ -2035,9 +2070,7 @@ mod tests {
         }
         let props = open["props"].to_string();
         assert!(props.len() <= 8 * 1024, "{tool}: {} bytes", props.len());
-        for tin in [ROOT, "123-456-788"] {
-            assert!(!props.contains(tin) && !result["content"].to_string().contains(tin), "{tool} names the TIN: {props}");
-        }
+        assert_no_tin(result, tool);
         if let Some(chips) = result["_meta"]["rox/suggest"].as_array() {
             assert!(chips.len() <= 3);
         }
@@ -2085,6 +2118,30 @@ mod tests {
             let result = call_as(&mut server, agent(), tool, args.clone());
             assert_card(&result, tool, card);
         }
+        // wave 1's cards whose answers carry what the assistant read: a BIR
+        // file name and a payment email, both of which embed the TIN
+        let wave_one = [
+            ("bir_form_needs_you", json!({}), "needs"),
+            ("bir_form_send", json!({}), "approve"),
+            (BIR_PAYMENT_PARSE, json!({"text": "Agency Name BUREAU OF INTERNAL REVENUE (BIR) | TIN 123456788 | Branch Code 00000 | RDO Code 040 - PASIG | Form Type 2551Q | Tax Type PT | Return Period 09/30/2026 | Transaction Date 10/26/2026 18:57:10 | Transaction Number TEST2026102618575200000001 | Reference Number TESTREF001 | Payment Channel Mobile | Transaction Amount PHP 629.94 | Bank Fee PHP 0.00 | Transaction Fee PHP 20.00 | Total Amount PHP 649.94"}), "match"),
+            (BIR_CONFIRM_FILING, json!({"tin": ticket, "form": "2551Q", "period": "2026-Q3", "reference": "12345678800000-2551Qv2018-092026Q3.xml", "received_at": "2026-10-20T10:00:00+08:00", "message_id": "test-1"}), "confirm"),
+            (BIR_CONFIRM_FILING, json!({"tin": ticket, "form": "2551Q", "period": "2026-Q3", "reference": "123-456-788-00000-2551Qv2018-062026Q2.xml", "received_at": "2026-10-20T10:00:00+08:00", "message_id": "test-2"}), "confirm"),
+        ];
+        for (tool, args, card) in wave_one {
+            let result = call_as(&mut server, agent(), tool, args.clone());
+            assert_card(&result, tool, card);
+        }
+        // the sign-in card (a signed-out answer) names no one
+        let signin = json!({"_meta": {"rox/open": cards::open("signin", "Buwiz sign-in", None, json!({"message": plain::signed_out_text("bir_calendar_get")}), "bir_status", json!({}))}, "content": [], "structuredContent": {}});
+        assert_no_tin(&signin, "signin");
+        // the guard itself: a TIN in any form, inside other text, is caught
+        for leak in ["123456788", "123-456-788", "12345678800000-2551Qv2018-092026Q3", "x 123-456-788-00000 y", "TIN987654321"] {
+            assert!(names_a_tin(leak).is_some(), "{leak}");
+            let mut guarded = json!({"_meta": {"rox/open": {"props": {"snapshot": {"note": leak}}}}, "content": [{"type": "text", "text": leak}]});
+            cards::redact(&mut guarded, &SEEDED.map(str::to_string));
+            assert!(names_a_tin(&guarded.to_string()).is_none(), "{guarded}");
+        }
+        assert!(names_a_tin("2026-10-26 ₱186,000.00 TEST2026102618575200000001").is_none());
         // the rate card's sum and the ATC's forms come from BIR's tables
         let rate = call_as(&mut server, agent(), "bir_lookup", json!({"amount": 186000, "rate": "3%"}));
         assert_eq!(rate["structuredContent"]["result"]["tax"], 5580.0, "{rate}");

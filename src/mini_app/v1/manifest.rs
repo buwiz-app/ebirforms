@@ -199,7 +199,7 @@ fn specs() -> Vec<AppSpec> {
         })),
         card("card-quick", json!({
             "tools": [
-                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_confirm_filing",
+                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_app_upload",
                 "bir_status", "bir_deadline", "bir_deadline_override_set", "bir_deadline_override_remove", "bir_calendar_set",
             ],
             "open": { "apps": ["forms", "register", "calendar"] },
