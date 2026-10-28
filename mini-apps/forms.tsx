@@ -1,16 +1,19 @@
 // BIR Forms mini app: the bir-shell form page (app/shell/form_page.js) and
 // the ways into it (main.js / home.js / taxpayer.js / library.js), as one
-// Native Shell module. Opened full screen by Rox for ONE taxpayer branch
-// (`roxProps.tin`); every host call goes through the headless BIR daemon's
-// `bir_call` bridge. Rox's `/taxform` opens it on one return with
-// `{tin, form, period, action, draft_id?}`: `view` read-only, `file` to fill,
-// `submit` to validate and confirm with the user's own Submit. The schema-driven renderer covers all 43 forms the way
+// Native Shell module. Opened full screen by Rox for ONE taxpayer branch:
+// `rox.props.ticket`, a ticket BIR issued for the branch or one of its
+// returns. The app asks BIR what the ticket stands for (`bir_ticket_subject`)
+// and every host call goes through Rox's bridge to BIR's named tool for that
+// function (`bir_app_<fn>`), held to the ticket. Rox's `/taxform` opens it on
+// one return (`{ticket, form, period, action, draft_id?}`): `view`
+// read-only, `file` to fill, `submit` to validate and confirm with the
+// user's own Submit. The schema-driven renderer covers all 43 forms the way
 // form_page.js does: parts -> items -> fields, schedules, locks, profile
 // boxes, penalties, samples, amendments, validation, save and queue.
 
 import { signal, computed, untracked, Text, View, Scroll, Input } from "nsh";
 import type { YNode } from "nsh";
-import { windowSize } from "nsh/device";
+import { rox } from "rox";
 
 /** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
  *  became objects (#558), the text itself before. */
@@ -24,79 +27,73 @@ const typed = (e: { value: string } | string): string => (typeof e === "string" 
 // =====================================================================
 
 /**
- * Set by Rox before the module runs. `form` + `period` (`2026-Q3`, `2026-01`, `2025`, `2026-10-26`)
- * + `action` (+ `draft_id`) open one return (Rox's `/taxform`); the older `form_code`/`year`/`period`/`key`
- * deep-link to a return too.
+ * Set by Rox before the module runs (`rox.props`). `ticket` names the branch or one of its returns;
+ * `form` + `period` (`2026-Q3`, `2026-01`, `2025`, `2026-10-26`) + `action` (+ `draft_id`) open one return
+ * (Rox's `/taxform`); `form_code`/`year`/`period`/`key` deep-link to a return too.
  */
 type RoxProps = {
-  server?: string; tin?: string; scope?: string;
+  ticket?: string;
   form?: string; action?: "view" | "file" | "submit"; draft_id?: number | string | null;
   form_code?: string; year?: number | string; period?: number | string; key?: number | string | null;
 };
-const roxProps = (): RoxProps => (globalThis as any).roxProps || {};
+const roxProps = (): RoxProps => (rox.props || {}) as RoxProps;
 const digits = (v: unknown) => String(v ?? "").replace(/\D/g, "");
 
+/** What BIR says the props' ticket stands for (`bir_ticket_subject`). */
+type Subject = { kind: "taxpayer" | "branch" | "return"; tin: string; form?: string; period?: string; title: string };
+const subject = signal<Subject | null>(null);
+/** The branch's own ticket: what every call is held to and what tools take as `tin`. */
+let BRANCH = "";
+
+/** One BIR host function through its named tool (`bir_app_<fn>`), held to the branch's ticket. */
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const p = roxProps();
-  const r = await fetch("http://127.0.0.1:8787/mcp/call", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ server: p.server || "bir", tool: "bir_call", args: { fn, args, scope: p.scope || (p.tin ? digits(p.tin).slice(0, 9) : undefined) } }),
-  }).then((x) => x.json());
-  if (!r.ok) throw new Error(r.error || "BIR call failed");
-  return r.result as T;
+  const r: any = await rox.call(`bir_app_${fn}`, BRANCH ? { args, ticket: BRANCH } : { args });
+  return r?.result as T;
 }
 
-/** One of the BIR server's own tools (not `bir_call`): the payments and the filing record. */
+/** One of the BIR server's own tools: the payments. `tin` there is the branch's ticket. */
 async function tool<T = any>(name: string, args: Record<string, unknown>): Promise<T> {
-  const r = await fetch("http://127.0.0.1:8787/mcp/call", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ server: roxProps().server || "bir", tool: name, args }),
-  }).then((x) => x.json());
-  if (!r.ok) throw new Error(r.error || `${name} failed`);
-  return r.result as T;
+  const r: any = await rox.call(name, args);
+  return r?.result as T;
 }
+
+/** base64 of bytes, 3 at a time (the bridge carries JSON only). */
+function base64(bytes: Uint8Array): string {
+  const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    out += A[(n >> 18) & 63] + A[(n >> 12) & 63] + (i + 1 < bytes.length ? A[(n >> 6) & 63] : "=") + (i + 2 < bytes.length ? A[n & 63] : "=");
+  }
+  return out;
+}
+
+/** A receipt's extensions, as the manifest's `pick_file` grants them. */
+const RECEIPTS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
+/** Bytes per upload call: base64 of this stays under the bridge's 256 KiB argument cap. */
+const CHUNK = 180 * 1024;
 
 /**
- * Rox's native file picker (the composer's "Attach photos & files"): the first file chosen, as a local path.
- * `null` when cancelled; throws when this Rox has no picker.
+ * Rox's file picker: the receipt the user chose, sent to BIR in chunks (`bir_app_upload`).
+ * `null` when cancelled. The app never sees a path.
  */
-async function pickFile(): Promise<string | null> {
-  const r = await fetch("http://127.0.0.1:8787/attach/pick", { method: "POST" });
-  if (!r.ok) throw new Error(`Rox has no file picker (${r.status})`);
-  const j = await r.json();
-  if (j?.cancelled) return null;
-  const uri = String(j?.files?.[0]?.uri || "");
-  if (!uri) throw new Error("Rox returned no file");
-  return uri.replace(/^file:\/\//, "");
+async function pickReceipt(): Promise<{ upload: string; name: string } | null> {
+  const files = await rox.pickFile({ extensions: RECEIPTS, multiple: false });
+  const file = files[0];
+  if (!file) return null;
+  const bytes = await file.read();
+  let upload = "";
+  let at = 0;
+  do {
+    const r: any = await rox.call("bir_app_upload", { ...(upload ? { upload } : {}), data: base64(bytes.subarray(at, at + CHUNK)) });
+    upload = String(r?.result?.upload || "");
+    at += CHUNK;
+  } while (at < bytes.length);
+  return { upload, name: file.name };
 }
 
-/** Opens a `rox://` link through Rox: another mini app, or a new chat. */
-async function openRox(url: string, what: string) {
-  const r = await fetch("http://127.0.0.1:8787/mcp/open", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
-  });
-  if (!r.ok) throw new Error(`Rox could not open ${what} (${r.status})`);
-}
-
-/** Opens another mini app through Rox (`rox://app/<server>/<app>?props=<JSON>&token=<token>`); `token` is what it opens on, so Rox can attach and pin it. */
-async function openRoxApp(app: string, props: Record<string, unknown>, token?: string) {
-  const server = roxProps().server || "bir";
-  const tail = token ? `&token=${encodeURIComponent(token)}` : "";
-  await openRox(`rox://app/${server}/${app}?props=${encodeURIComponent(JSON.stringify(props))}${tail}`, app);
-}
-
-/** `@bir:taxprofile:<tin>`: a head office by its 9-digit root, another branch by all 14 digits. */
-function profileToken(tin: string) {
-  const d = digits(tin);
-  return `@bir:taxprofile:${d.length === 14 && /^0+$/.test(d.slice(9)) ? d.slice(0, 9) : d}`;
-}
-
-/** A new Rox chat with `text` in its composer, not sent (`rox://chat/new?draft=`). */
-const openRoxChat = (text: string) => openRox(`rox://chat/new?draft=${encodeURIComponent(text)}`, "a new chat");
+/** Attaches a return to the chat Rox opened this app from (the assistant reads it there). */
+const attachReturn = (s: FS) => rox.attach("taxform", `${BRANCH}/${s.code}-${tokenPeriod(s)}`);
 
 type Edits = Record<string, string>;
 const H = {
@@ -134,13 +131,9 @@ const H = {
   grant: (tin: string, code: string) => bir<any>("grant_send", tin, code),
   revoke: (tin: string, code: string) => bir<null>("revoke_send", tin, code),
   // payments and the printable filing record (the server's own tools)
-  payments: (tin: string, form: string, period: string) => tool<{ payments: Payment[] }>("bir_payments_list", { tin, form, period }),
-  markPaid: (tin: string, form: string, period: string, proof_path?: string) =>
-    tool<{ payment: Payment }>("bir_mark_paid", proof_path ? { tin, form, period, proof_path } : { tin, form, period }),
-  filingRecord: (tin: string, form: string, period: string) => tool<{ link: string; title: string }>("bir_filing_record", { tin, form, period }),
-  // print (bir-shell opens a native preview window; headless this is best effort)
-  print: (code: string, draft: any) => bir<{ path: string }>("screen_form_print", code, draft),
-  printSample: (code: string, draft: any, edits: Edits, unlocked: string[]) => bir<{ path: string }>("screen_form_print_sample", code, draft, edits, unlocked),
+  payments: (form: string, period: string) => tool<{ payments: Payment[] }>("bir_payments_list", { tin: BRANCH, form, period }),
+  markPaid: (form: string, period: string, proof?: { upload: string; name: string }) =>
+    tool<{ payment: Payment }>("bir_mark_paid", proof ? { tin: BRANCH, form, period, proof_upload: proof.upload, proof_name: proof.name } : { tin: BRANCH, form, period }),
 };
 
 // =====================================================================
@@ -531,12 +524,12 @@ function toast(text: string, tone: Toast["tone"] = "info", undo?: () => void) {
 }
 const offerUndo = (what: string, undo: () => void) => toast(`${what}.`, "info", undo);
 
-// The taxpayer this app is focused on.
-const TIN = () => digits(roxProps().tin);
+// The taxpayer branch this app is focused on (its 14-digit TIN, from BIR).
+const TIN = () => digits(subject()?.tin);
 const ROOT = () => TIN().slice(0, 9);
 
 function openTaxProfile() {
-  openRoxApp("tax-profile", { tin: TIN(), scope: roxProps().scope || ROOT() }, profileToken(TIN())).catch((e) => toast(errText(e), "danger"));
+  rox.open({ app: "tax-profile", ticket: BRANCH, props: { ticket: BRANCH } }).catch((e) => toast(errText(e), "danger"));
 }
 
 // =====================================================================
@@ -1571,16 +1564,11 @@ function tokenPeriod(s: FS): string {
   return String(s.year);
 }
 
-/** `@bir:taxform:<tin>/<FORM>-<period>`: a head office by its 9-digit root. */
-function taxformToken(s: FS): string {
-  const tin = digits(s.tin);
-  const who = tin.length === 14 && /^0+$/.test(tin.slice(9)) ? tin.slice(0, 9) : tin;
-  return `@bir:taxform:${who}/${s.code}-${tokenPeriod(s)}`;
-}
-
-/** "Ask the assistant": a new chat whose composer starts with this return's token. */
+/** "Ask the assistant": this return attached to the chat (Rox asks the user first). */
 function askAssistant(s: FS) {
-  openRoxChat(`${taxformToken(s)} `).catch((e) => toast(errText(e), "danger"));
+  attachReturn(s)
+    .then(() => toast("Attached to the chat: ask the assistant about this return there.", "success"))
+    .catch((e) => toast(errText(e), "danger"));
 }
 
 async function queue(s: FS) {
@@ -1611,33 +1599,11 @@ async function cancelQueue(s: FS) {
   }
 }
 
-/** Print preview: the host writes the filled sheet and Rox shows it in its file viewer (`rox://view`), over this app.
- *  A return that has left Draft prints its whole record: the form, BIR's confirmation and the proof of payment. */
+/** Print preview: Rox has no file viewer for mini apps yet (its bridge opens apps and https pages only), so the
+ *  preview and the filing record are printed from BIR on the desktop, or asked of the assistant
+ *  (bir_filing_record). */
 async function print(s: FS) {
-  s.printResult = null;
-  if (s.sample) {
-    try {
-      const pending = s.pending;
-      const r = await H.printSample(s.code, s.draft, pending, unlockedFor(s, pending));
-      await showPrint(s, r, true);
-    } catch (e) {
-      s.printResult = { sample: true, error: errText(e) };
-    }
-    return bump();
-  }
-  if (s.amends && !s.saved) await flush(s);
-  else if (s.editable && !(await ensureSaved(s))) return;
-  try {
-    if (sentOrQueued(s)) {
-      const r = await H.filingRecord(digits(s.tin), s.code, tokenPeriod(s));
-      await openRox(r.link, "the print preview");
-    } else {
-      const r = await H.print(s.code, s.draft);
-      await showPrint(s, r, false);
-    }
-  } catch (e) {
-    s.printResult = { sample: false, error: errText(e) };
-  }
+  s.printResult = { sample: !!s.sample, error: "Print preview is not available in Rox yet. Print this return from BIR on the desktop, or ask the assistant for its filing record." };
   bump();
 }
 
@@ -1649,7 +1615,7 @@ const sentOrQueued = (s: FS) => !s.sample && !s.filedOriginalView && s.status !=
 async function readPayments(s: FS, token: number) {
   if (!sentOrQueued(s)) return;
   try {
-    const r = await H.payments(digits(s.tin), s.code, tokenPeriod(s));
+    const r = await H.payments(s.code, tokenPeriod(s));
     if (!live(s, token)) return;
     s.payments = r.payments || [];
   } catch {
@@ -1673,7 +1639,7 @@ async function markPaid(s: FS) {
   s.paying = true;
   bump();
   try {
-    await H.markPaid(digits(s.tin), s.code, tokenPeriod(s));
+    await H.markPaid(s.code, tokenPeriod(s));
     toast("Marked as paid. Attach the receipt when you have it.", "success");
   } catch (e) {
     toast(errText(e), "danger");
@@ -1684,37 +1650,40 @@ async function markPaid(s: FS) {
 
 /**
  * "Attach receipt": Rox's file picker, and bir keeps a copy of the image or PDF as this return's proof of payment.
- * Without a picker, a new chat with this return's token: the user drops the receipt there and the assistant records it.
+ * When the picker fails, the return is attached to the chat: the user drops the receipt there and the assistant records it.
  */
 async function attachReceipt(s: FS) {
-  let path: string | null;
-  try {
-    path = await pickFile();
-  } catch {
-    openRoxChat(`${taxformToken(s)} Here is the payment receipt for this return: record it as proof of payment. `).catch((e) => toast(errText(e), "danger"));
-    return toast("Drop the receipt into the new chat and send it; the assistant records it.");
-  }
-  if (!path) return;
-  if (!/\.(png|jpe?g|gif|webp|heic|pdf)$/i.test(path)) return toast("A receipt must be an image or a PDF.", "danger");
+  let proof: { upload: string; name: string } | null;
   s.paying = true;
   bump();
   try {
-    await H.markPaid(digits(s.tin), s.code, tokenPeriod(s), path);
+    proof = await pickReceipt();
+  } catch (e) {
+    s.paying = false;
+    bump();
+    if ((e as any)?.code === "quota_exceeded") return toast("The receipt is over 25 MB; attach a smaller scan.", "danger");
+    attachReturn(s)
+      .then(() => toast("Attached to the chat: drop the receipt there and send it; the assistant records it."))
+      .catch((err) => toast(errText(err), "danger"));
+    return;
+  }
+  if (!proof) {
+    s.paying = false;
+    return bump();
+  }
+  if (!/\.(png|jpe?g|gif|webp|heic|pdf)$/i.test(proof.name)) {
+    s.paying = false;
+    bump();
+    return toast("A receipt must be an image or a PDF.", "danger");
+  }
+  try {
+    await H.markPaid(s.code, tokenPeriod(s), proof);
     toast("Receipt attached as proof of payment.", "success");
   } catch (e) {
     toast(errText(e), "danger");
   }
   s.paying = false;
   await readPayments(s, T);
-}
-
-/** Opens the host's filled sheet in Rox's viewer (`rox://view?path=&title=`); the path is never shown. */
-async function showPrint(s: FS, r: { path: string } | null, sample: boolean) {
-  const path = String(r?.path ?? "");
-  if (!path) throw new Error("The host made the preview but returned no file.");
-  const what = sample ? "sample" : periodLabel(s.schema?.freq || "", s.year, s.period);
-  const title = `${s.code} · ${what}`;
-  await openRox(`rox://view?path=${encodeURIComponent(path)}&title=${encodeURIComponent(title)}`, "the print preview");
 }
 
 function openFiledOriginal(s: FS) {
@@ -2617,7 +2586,7 @@ function FormPage(p: { s: FS }) {
   const s = p.s;
   const ready = () => (rev(), Boolean(s.schema) && !s.loading && !s.error);
   const f = () => (rev(), s.schema);
-  const wide = () => windowSize().width >= 980;
+  const wide = () => rox.viewport().width >= 980;
   const errorsIn = (pi: number) => Object.keys(s.messages).filter((id) => id.startsWith(`${pi}:`)).length;
   const needing = () => (rev(), (s.schema?.parts || []).map((_p, i) => i).filter((i) => errorsIn(i) > 0));
   const openOne = () => (rev(), s.openParts.size === 1 ? [...s.openParts][0] : -1);
@@ -3493,7 +3462,13 @@ async function followReturn(p: RoxProps) {
 
 /** Deep link: `form_code` + `year` + `period` (+ `key`) open that return; `form_code` alone opens the picker on it. */
 function followDeepLink() {
-  const p = roxProps();
+  const p = { ...roxProps() };
+  // A return's ticket names its form and period.
+  const subj = subject();
+  if (!p.form && !p.form_code && subj?.kind === "return" && subj.form) {
+    p.form = subj.form;
+    p.period = subj.period;
+  }
   if (p.form) {
     followReturn(p).catch((e) => toast(errText(e), "danger"));
     return;
@@ -3509,17 +3484,41 @@ function followDeepLink() {
 }
 
 // Rox's nsh ignores contentContainerClass: each Scroll's padding lives on a View inside it.
+/** Why the ticket did not open, if it did not. */
+const opening = signal("");
+
+/** What the props' ticket stands for, from BIR; a return's ticket also gets its branch's own ticket. */
+async function openTicket(ticket: string) {
+  try {
+    const r: any = await rox.call("bir_ticket_subject", { ticket });
+    const s = r?.result as Subject;
+    if (s.kind === "return") {
+      const issued: any = await rox.call("bir_ticket_issue", { ticket, tin: s.tin });
+      BRANCH = String(issued?.result?.ticket || "");
+    } else BRANCH = ticket;
+    subject.set(s);
+    followDeepLink();
+  } catch (e) {
+    opening.set(errText(e));
+  }
+}
+
 export default function R() {
-  const hasTin = TIN().length >= 9;
-  if (hasTin) followDeepLink();
+  const ticket = String(roxProps().ticket || "");
+  if (ticket) openTicket(ticket);
   return (
     <View style={{ flex: 1 }} class={C.pane}>
       <If
-        when={hasTin}
+        when={TIN().length >= 9}
         else={
           <View style={{ flex: 1 }} class="items-center justify-center p-8 gap-2">
-            <Text class={`text-lg font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
-            <Text class={`text-sm ${C.fg2}`}>BIR Forms works on one taxpayer at a time. Ask for a taxpayer's forms in the chat to open it for them.</Text>
+            <If
+              when={!ticket}
+              else={<Text class={`text-sm ${opening() ? C.danger : C.fg2}`}>{opening() || "Opening the taxpayer's forms…"}</Text>}
+            >
+              <Text class={`text-lg font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
+              <Text class={`text-sm ${C.fg2}`}>BIR Forms works on one taxpayer at a time. Ask for a taxpayer's forms in the chat to open it for them.</Text>
+            </If>
           </View>
         }
       >

@@ -5,7 +5,8 @@
 // computer?" setup (app/shell/auth.js renderSetup; main.js chooseSolo /
 // chooseHelpdesk / submitHelpdeskPin / finishHelpdeskSetup), then the first
 // taxpayer (app/shell/taxpayer.js renderNewTaxpayer / createTaxpayer). It ends
-// with a link that opens the BIR Tax Profile mini app for the new taxpayer.
+// with a button that opens the BIR Tax Profile mini app on the new taxpayer's
+// ticket (Rox's bridge, `rox.open`: the app never builds a link with a TIN).
 //
 // Sign-in screens for an existing setup (TIN + PIN), PIN/TOTP management and
 // setup changes (security.js, setup_change.js) are not part of onboarding: the
@@ -13,24 +14,20 @@
 
 import { signal, computed, effect, resource, cleanup, Text, View, Scroll, Input, Overlay } from "nsh";
 import type { Signal, JSX, YNode } from "nsh";
-import { Clipboard } from "nsh/clipboard";
+import { rox } from "rox";
 
 /** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
  *  became objects (#558), the text itself before. */
 const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
 
 // ============================================================ host calls
-// Every bir.* call this app makes goes through `bir` and is listed in `api`.
+// Every bir.* call this app makes goes through `bir` and is listed in `api`:
+// Rox's bridge to the BIR plugin's named tool for that host function
+// (`bir_app_<fn>`). Onboarding names no taxpayer yet, so it holds no ticket.
 
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const p = (globalThis as any).roxProps || {};
-  const r = await fetch("http://127.0.0.1:8787/mcp/call", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ server: p.server || "bir", tool: "bir_call", args: { fn, args, scope: p.scope } }),
-  }).then((x) => x.json());
-  if (!r.ok) throw new Error(r.error || "BIR call failed");
-  return r.result as T;
+  const r: any = await rox.call(`bir_app_${fn}`, { args });
+  return r?.result as T;
 }
 
 interface CloudAccountStatus {
@@ -58,6 +55,8 @@ interface AuthState {
 }
 type TaxpayerType = "Individual" | "Corporation" | "Partnership" | "Cooperative" | "Estate" | "Trust";
 interface Taxpayer {
+  /** BIR's ticket for the taxpayer: what opens its profile. */
+  ticket?: string;
   tin_root: string;
   tin_display: string;
   name: string;
@@ -92,27 +91,6 @@ const api = {
   listRdos: () => bir<RdoOption[]>("list_rdos"),
   listZipCodes: () => bir<string[]>("list_zip_codes"),
 };
-
-/** Opens a `rox://app/…` link through Rox (nsh has no open-URL API). */
-async function openRoxLink(url: string): Promise<boolean> {
-  try {
-    const r = await fetch("http://127.0.0.1:8787/mcp/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    }).then((x) => x.json());
-    return !!r.ok;
-  } catch {
-    return false;
-  }
-}
-
-/** The BIR Tax Profile mini app for a taxpayer. */
-function profileLink(root: string): string {
-  const server = ((globalThis as any).roxProps || {}).server || "bir";
-  const token = encodeURIComponent(`@bir:taxprofile:${root}`);
-  return `rox://app/${server}/tax-profile?props=${encodeURIComponent(JSON.stringify({ tin: `${root}00000`, scope: root }))}&token=${token}`;
-}
 
 // ============================================================ helpers
 
@@ -446,7 +424,6 @@ export default function R() {
   const pin = signal("");
   const recoveryKey = signal("");
   const created = signal<Taxpayer | null>(null);
-  const copied = signal(false);
   let alive = true;
   cleanup(() => {
     alive = false;
@@ -678,13 +655,15 @@ export default function R() {
     }
   };
 
-  /** Opens the new taxpayer's profile; when Rox can't, the link is copied. */
-  const copyLink = async () => {
+  /** Opens the new taxpayer's profile in the BIR Tax Profile app. */
+  const openProfile = async () => {
     const t = created();
-    if (!t) return;
-    if (await openRoxLink(profileLink(t.tin_root))) return;
-    void Clipboard.writeText(profileLink(t.tin_root));
-    copied.set(true);
+    if (!t?.ticket) return formError.set("BIR gave no ticket for this taxpayer; open them from the chat.");
+    try {
+      await rox.open({ app: "tax-profile", ticket: t.ticket, props: { ticket: t.ticket } });
+    } catch (e) {
+      formError.set(errorText(e));
+    }
   };
 
   // ---------------------------------------------------------------- views
@@ -731,7 +710,7 @@ export default function R() {
         <Text class={`text-xs ${C.fg2}`}>Waiting for approval…</Text>
         <Button
           label="Copy link"
-          onPress={() => void Clipboard.writeText(started()?.verification_uri_complete || started()?.verification_uri || "")}
+          onPress={() => void rox.copy(started()?.verification_uri_complete || started()?.verification_uri || "")}
         />
       </View>
     </Card>
@@ -884,15 +863,7 @@ export default function R() {
 
   const doneView = () => (
     <Card icon="✓" title={`${created()?.name || ""} is ready`} line={`TIN ${formatTin(created()?.tin_root || "")}. Next, open the tax profile to add a tax year and choose its forms.`}>
-      <Button label={copied() ? "Link copied" : "Open tax profile"} variant="primary" block onPress={copyLink} />
-      <If when={copied()}>
-        <View class="gap-1">
-          <Text class={`text-xs ${C.fg2}`}>The link is copied. Open it in Rox to continue in the Tax Profile app:</Text>
-          <Text class={`text-xs ${C.accent}`} selectable>
-            {profileLink(created()?.tin_root || "")}
-          </Text>
-        </View>
-      </If>
+      <Button label="Open tax profile" variant="primary" block onPress={openProfile} />
       <ErrorText text={formError()} />
       <View class="items-center">
         <Button label="Add another taxpayer" variant="ghost" onPress={openNewTaxpayer} />

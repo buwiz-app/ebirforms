@@ -3,19 +3,21 @@
 // Port of bir-shell's taxpayer page (app/shell/taxpayer.js: header, Profile /
 // Forms / Templates tabs, New branch) plus that taxpayer's dues and returns
 // from Home and Filings (app/shell/home.js, filings.js). It is focused on the
-// one taxpayer Rox opened it for (props.tin / props.scope), on the branch
-// props.branch names (Rox's `@bir:branchcode:`), else the TIN's own branch;
-// there is no taxpayer switcher. Opening a return hands off to the BIR Forms
-// mini app.
+// one taxpayer Rox opened it for: `rox.props.ticket`, a ticket BIR issued (a
+// taxpayer's opens its head office, a `@bir:branchcode:` one that branch).
+// The app learns the ticket's TIN from BIR (`bir_ticket_subject`), never from
+// Rox, and every call is held to that taxpayer. There is no taxpayer
+// switcher. Opening a return hands off to the BIR Forms mini app, on a ticket
+// for that branch (`bir_ticket_issue`).
 //
 // Desktop-only pieces left out: profile export (host save dialog), the
 // right-panel quick edit (the section editors cover it), Recent, and "Use as
 // template" on a filed return (create_template_from_return is refused under a
 // taxpayer scope).
 
-import { signal, computed, resource, effect, cleanup, Text, View, Scroll, Input } from "nsh";
+import { signal, computed, resource, effect, cleanup, untracked, Text, View, Scroll, Input } from "nsh";
 import type { Signal, Accessor, JSX } from "nsh";
-import { Clipboard } from "nsh/clipboard";
+import { rox } from "rox";
 
 /** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
  *  became objects (#558), the text itself before. */
@@ -24,21 +26,16 @@ const typed = (e: { value: string } | string): string => (typeof e === "string" 
 // ============================================================ host calls
 // Every bir.* call this app makes goes through `bir` and is listed in `api`.
 
-/** `branch`: a branch code (`00001`) to open on; `year`: the tax year to show (Rox's App Details versions). */
-type Props = { server?: string; tin?: string; scope?: string; branch?: string; year?: number | string };
-const PROPS: Props = ((globalThis as any).roxProps || {}) as Props;
-/** The taxpayer scope sent with every call; follows a TIN move. */
-let SCOPE: string | undefined = PROPS.scope || (PROPS.tin ? String(PROPS.tin).slice(0, 9) : undefined);
+/** `ticket`: the taxpayer or branch; `year`: the tax year to show. */
+type Props = { ticket?: string; year?: number | string };
+const PROPS: Props = (rox.props || {}) as Props;
+/** The ticket every call is held to; BIR moves it with a TIN change. */
+const TICKET = typeof PROPS.ticket === "string" ? PROPS.ticket : "";
 
+/** One BIR host function through its named tool (`bir_app_<fn>`). */
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const p = (globalThis as any).roxProps || {};
-  const r = await fetch("http://127.0.0.1:8787/mcp/call", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ server: p.server || "bir", tool: "bir_call", args: { fn, args, scope: SCOPE } }),
-  }).then((x) => x.json());
-  if (!r.ok) throw new Error(r.error || "BIR call failed");
-  return r.result as T;
+  const r: any = await rox.call(`bir_app_${fn}`, TICKET ? { args, ticket: TICKET } : { args });
+  return r?.result as T;
 }
 
 type TaxpayerType = "Individual" | "Corporation" | "Partnership" | "Cooperative" | "Estate" | "Trust";
@@ -171,23 +168,14 @@ interface FormsTarget {
   key?: number | null;
 }
 
-/** The BIR Forms mini app for one branch, optionally on one return. */
-function formsLink(tin: string, scope: string, target: FormsTarget = {}): string {
-  return `rox://app/${PROPS.server || "bir"}/forms?props=${encodeURIComponent(JSON.stringify({ tin, scope, ...target }))}`;
-}
-
-/** Opens a `rox://app/…` link through Rox (nsh has no open-URL API). */
-async function openRoxLink(url: string): Promise<boolean> {
-  try {
-    const r = await fetch("http://127.0.0.1:8787/mcp/open", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    }).then((x) => x.json());
-    return !!r.ok;
-  } catch {
-    return false;
-  }
+/** Opens the BIR Forms mini app on one branch (a ticket BIR issues for
+ *  it), optionally on one return. */
+async function openFormsApp(tin: string, target: FormsTarget = {}): Promise<void> {
+  const issued: any = await rox.call("bir_ticket_issue", { ticket: TICKET, tin });
+  const ticket = String(issued?.result?.ticket || "");
+  const props: Record<string, string | number> = { ticket };
+  for (const [k, v] of Object.entries(target)) if (v !== null && v !== undefined) props[k] = v;
+  await rox.open({ app: "forms", ticket, props });
 }
 
 // ============================================================ helpers
@@ -599,8 +587,46 @@ function LoadError(p: { error: unknown; retry: () => void; what: string }) {
 
 // ============================================================ the app
 
+/** The ticket's branch, from BIR, then the profile; without a ticket, a
+ *  note on how to open it. */
 export default function R() {
-  const startTin = String(PROPS.tin || "").replace(/\D/g, "");
+  if (!TICKET) return <NoTaxpayer />;
+  const subject = signal<{ tin: string } | null>(null);
+  const failed = signal("");
+  rox
+    .call("bir_ticket_subject", { ticket: TICKET })
+    .then((r: any) => subject.set(r?.result || null))
+    .catch((e) => failed.set(errorText(e)));
+  return (
+    <View class={`flex-1 ${C.pane}`}>
+      {() => {
+        const s = subject();
+        if (s) return untracked(() => <Profile tin={String(s.tin || "")} />);
+        return (
+          <View class="flex-1 items-center justify-center p-6" style={{ minHeight: 400 }}>
+            <Text class={`text-sm ${failed() ? C.danger : C.fg2}`}>{failed() || "Opening the tax profile…"}</Text>
+          </View>
+        );
+      }}
+    </View>
+  );
+}
+
+function NoTaxpayer() {
+  return (
+    <View class={`flex-1 items-center justify-center p-6 ${C.pane}`} style={{ minHeight: 400 }}>
+      <View class={`rounded-2xl p-6 gap-2 items-center ${C.card} ${C.line}`} style={{ maxWidth: 420 }}>
+        <Text class={`text-base font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
+        <Text class={`text-sm text-center ${C.fg2}`}>
+          The tax profile shows one taxpayer. Ask Rox for a taxpayer's profile, or open it from a taxpayer in BIR.
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function Profile(p: { tin: string }) {
+  const startTin = String(p.tin || "").replace(/\D/g, "");
   if (startTin.length < 9) {
     return (
       <View class={`flex-1 items-center justify-center p-6 ${C.pane}`} style={{ minHeight: 400 }}>
@@ -616,10 +642,7 @@ export default function R() {
 
   // ---------------------------------------------------------------- selection and data
   const root = signal(startTin.slice(0, 9));
-  const startBranch = String(PROPS.branch || "").replace(/\D/g, "");
-  const code = signal(
-    startBranch && startBranch.length <= 5 ? startBranch.padStart(5, "0") : startTin.length >= 14 ? startTin.slice(9, 14) : "00000",
-  );
+  const code = signal(startTin.length >= 14 ? startTin.slice(9, 14) : "00000");
   const ver = signal(0);
   const bump = () => ver.update((v) => v + 1);
   const tab = signal<"profile" | "forms" | "templates" | "returns">("profile");
@@ -634,15 +657,14 @@ export default function R() {
   };
   cleanup(() => clearTimeout(toastTimer));
 
-  /** The forms hand-off: Rox opens the link; when it can't, the link is copied and shown. */
+  /** The forms hand-off: Rox opens the Forms app; when it can't, why. */
   const handoff = signal<{ title: string; url: string } | null>(null);
-  const openForms = async (title: string, tin: string, rootOf: string, target: FormsTarget = {}) => {
-    const url = formsLink(tin, rootOf, target);
-    if (await openRoxLink(url)) return;
+  const openForms = async (title: string, tin: string, _rootOf: string, target: FormsTarget = {}) => {
     try {
-      void Clipboard.writeText(url);
-    } catch {}
-    handoff.set({ title, url });
+      await openFormsApp(tin, target);
+    } catch (e) {
+      handoff.set({ title, url: errorText(e) });
+    }
   };
 
   const tp = resource(
@@ -827,7 +849,6 @@ export default function R() {
           bump();
           return;
         }
-        SCOPE = digits;
         root.set(digits);
       }
       editSec.set(null);
@@ -1077,7 +1098,7 @@ export default function R() {
           <Button
             label="Copy TIN"
             onPress={() => {
-              void Clipboard.writeText(fullTin());
+              void rox.copy(fullTin());
               say(`Copied ${fullTin()}`);
             }}
           />
@@ -1679,20 +1700,10 @@ export default function R() {
       <If when={handoff()}>
         <View class={`gap-2 px-4 py-3 border-b border-black/10 dark:border-white/10 bg-[#1680f30d] dark:bg-[#1884fc1a]`}>
           <View class="flex-row items-center gap-3">
-            <Text class={`text-sm font-semibold flex-1 ${C.fg}`}>{`Open in BIR Forms: ${handoff()?.title || ""}`}</Text>
-            <Button
-              label="Copy link"
-              onPress={() => {
-                void Clipboard.writeText(handoff()?.url || "");
-                say("Link copied.");
-              }}
-            />
+            <Text class={`text-sm font-semibold flex-1 ${C.fg}`}>{`Could not open BIR Forms: ${handoff()?.title || ""}`}</Text>
             <Button label="Close" variant="ghost" onPress={() => handoff.set(null)} />
           </View>
-          <Text class={`text-xs ${C.fg2}`}>The link is copied. Open it in Rox to continue in the Forms app:</Text>
-          <Text class={`text-xs ${C.accent}`} selectable>
-            {handoff()?.url || ""}
-          </Text>
+          <Text class={`text-xs ${C.danger}`}>{handoff()?.url || ""}</Text>
         </View>
       </If>
       <Scroll class="flex-1">

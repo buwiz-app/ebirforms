@@ -8,9 +8,11 @@
 // holiday list for (2026 so far); a later year's deadlines move off weekends
 // only.
 //
-// Opened for one taxpayer (`roxProps.tin`) it shows that branch's deadlines
-// or, as the page's "Whose deadlines" switch does, all of them (held to the
-// taxpayer's TIN root). A row opens its return in the BIR Forms mini app.
+// Opened for one taxpayer (`rox.props.ticket`, a ticket BIR issued: the app
+// never gets a TIN from Rox) it shows that branch's deadlines or, as the
+// page's "Whose deadlines" switch does, all of that taxpayer's (BIR holds
+// every call to the ticket's taxpayer). A row opens its return in the BIR
+// Forms mini app, with the row's own ticket.
 //
 // Added to the page: this year's schedule (the page shows the next twelve
 // months, kept as the other range), and deadline overrides. A deadline the
@@ -19,46 +21,40 @@
 // sync reads); a moved row says so and can be put back.
 
 import { signal, computed, resource, Text, View, Scroll, Input, Overlay } from "nsh";
+import { rox } from "rox";
 
 /** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
  *  became objects (#558), the text itself before. */
 const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
 
 // =====================================================================
-// HOST CALLS: every call goes through `bir` (the daemon's `bir_call`
-// bridge). Names and shapes follow dashboard_module.rs DECLARATIONS.
+// HOST CALLS: every call goes through `bir`, Rox's bridge to the BIR
+// plugin's named tool for each host function (`bir_app_<fn>`), held to the
+// app's ticket. Names and shapes follow dashboard_module.rs DECLARATIONS.
 // =====================================================================
 
-type RoxProps = { server?: string; tin?: string; scope?: string };
-const roxProps = (): RoxProps => (globalThis as any).roxProps || {};
+type RoxProps = { ticket?: string };
+const PROPS = (rox.props || {}) as RoxProps;
+/** The ticket Rox opened the app with: the taxpayer every call is held to. */
+const TICKET = typeof PROPS.ticket === "string" ? PROPS.ticket : "";
 const digits = (v: unknown) => String(v ?? "").replace(/\D/g, "");
-/** The branch Rox opened the app for, and the TIN root every call is held to. */
-// a 9-digit root is the head office: rows carry the 14-digit branch TIN
-const TIN = ((t) => (t.length === 9 ? `${t}00000` : t))(digits(roxProps().tin));
-const SCOPE: string | undefined = roxProps().scope || (TIN ? TIN.slice(0, 9) : undefined);
+/** The branch the ticket names (14 digits), once BIR has said. */
+const tin = signal("");
+const TIN = () => tin();
+if (TICKET)
+  rox
+    .call("bir_ticket_subject", { ticket: TICKET })
+    .then((r: any) => tin.set(digits(r?.result?.tin)))
+    .catch(() => {});
 
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const p = roxProps();
-  const r = await fetch("http://127.0.0.1:8787/mcp/call", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ server: p.server || "bir", tool: "bir_call", args: { fn, args, scope: SCOPE } }),
-  }).then((x) => x.json());
-  if (!r.ok) throw new Error(r.error || "BIR call failed");
-  return r.result as T;
-}
-
-/** Opens a `rox://app/…` link through Rox (nsh has no open-URL API). */
-async function openRox(url: string) {
-  const r = await fetch("http://127.0.0.1:8787/mcp/open", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
-  });
-  if (!r.ok) throw new Error(`Rox could not open the return (${r.status})`);
+  const r: any = await rox.call(`bir_app_${fn}`, TICKET ? { args, ticket: TICKET } : { args });
+  return r?.result as T;
 }
 
 interface DeadlineRow {
+  /** BIR's ticket for this row's branch: what opens it in Forms. */
+  ticket: string;
   tin: string;
   tin_root: string;
   branch_code: string;
@@ -187,7 +183,7 @@ const now = new Date();
 const range = signal<"year" | "upcoming">("year");
 const year = signal(now.getFullYear());
 /** The page's "Whose deadlines": the branch Rox opened, or all. */
-const whose = signal<"mine" | "all">(TIN ? "mine" : "all");
+const whose = signal<"mine" | "all">(TICKET ? "mine" : "all");
 const busy = signal(false);
 const message = signal<{ ok: boolean; text: string } | null>(null);
 const ver = signal(0);
@@ -215,7 +211,7 @@ const overrides = resource(
 
 const rows = computed(() => {
   const all = deadlines() || [];
-  return whose() === "mine" && TIN ? all.filter((d) => digits(d.tin) === TIN) : all;
+  return whose() === "mine" && TIN() ? all.filter((d) => digits(d.tin) === TIN()) : all;
 });
 /** Rows by month, in date order (calendar_page.js groups). */
 const groups = computed(() => {
@@ -229,7 +225,7 @@ const groups = computed(() => {
   }
   return out;
 });
-const mine = computed(() => (deadlines() || []).find((d) => digits(d.tin) === TIN) || null);
+const mine = computed(() => (deadlines() || []).find((d) => digits(d.tin) === TIN()) || null);
 const moved = computed(() => (overrides()?.overrides || []).filter((o) => o.kind === "moved"));
 const holidays = computed(() => (overrides()?.overrides || []).filter((o) => o.kind === "holiday").length);
 
@@ -242,9 +238,9 @@ function say(ok: boolean, text: string) {
 
 /** Open the row's return in the Forms app (the page's `app.openForm`). */
 async function open(d: DeadlineRow) {
-  const props = { tin: d.tin, scope: d.tin_root, form_code: d.form_code, year: d.taxable_year, period: d.period, key: d.return_key };
+  const props = { ticket: d.ticket, form_code: d.form_code, year: d.taxable_year, period: d.period, ...(d.return_key != null ? { key: d.return_key } : {}) };
   try {
-    await openRox(`rox://app/${roxProps().server || "bir"}/forms?props=${encodeURIComponent(JSON.stringify(props))}`);
+    await rox.open({ app: "forms", ticket: d.ticket, props });
   } catch (err) {
     say(false, errText(err));
   }
@@ -506,7 +502,7 @@ export default function R() {
                 <Btn label="›" variant="ghost" onPress={() => year.set(year() + 1)} />
               </View>
             </If>
-            <If when={Boolean(TIN)}>
+            <If when={Boolean(TICKET)}>
               <Segmented
                 options={[
                   { value: "mine", label: mineLabel() },
