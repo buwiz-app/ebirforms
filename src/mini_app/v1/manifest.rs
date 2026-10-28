@@ -27,7 +27,7 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.3.3";
+pub(crate) const VERSION: &str = "2.4.0";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -93,6 +93,7 @@ fn specs() -> Vec<AppSpec> {
         app_tools::TICKET_SUBJECT.to_string(),
         app_tools::TICKET_ISSUE.to_string(),
         app_tools::UPLOAD.to_string(),
+        app_tools::PRINT_PREVIEW.to_string(),
         "bir_payments_list".to_string(),
         "bir_mark_paid".to_string(),
         "bir_record_payment".to_string(),
@@ -128,6 +129,9 @@ fn specs() -> Vec<AppSpec> {
                 "open": { "apps": ["tax-profile"] },
                 "attach": ["taxprofile", "taxform"],
                 "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
+                // Print preview: the filled sheet in Rox's document view
+                // (`bir_app_print_preview`); the largest sheets are ~1.7 MB
+                "preview": {},
             }),
         },
         AppSpec {
@@ -482,6 +486,22 @@ mod tests {
         assert_eq!(deadlines["inline"]["width"], 480);
         assert_eq!(deadlines["permissions"]["tools"], json!(["bir_calendar_get"]));
         assert_eq!(deadlines["permissions"]["open"]["apps"], json!(["forms", "calendar"]));
+    }
+
+    #[test]
+    fn only_forms_shows_print_previews_of_its_own_tool() {
+        let m = unsigned(&Catalog::Embedded).unwrap();
+        for app in m["apps"].as_array().unwrap() {
+            let permissions = &app["permissions"];
+            let tools = permissions["tools"].as_array().unwrap();
+            let previews = tools.iter().any(|tool| tool == app_tools::PRINT_PREVIEW);
+            if app["id"] == "forms" {
+                assert_eq!(permissions["preview"], json!({}));
+                assert!(previews, "forms names {}", app_tools::PRINT_PREVIEW);
+            } else {
+                assert!(permissions.get("preview").is_none() && !previews, "{}", app["id"]);
+            }
+        }
     }
 
     #[test]

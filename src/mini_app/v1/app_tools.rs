@@ -21,6 +21,8 @@
 //! and `bir_ticket_issue` (a ticket for another branch of the same
 //! taxpayer). `bir_app_upload` carries a picked receipt's bytes in chunks
 //! under the bridge's 256 KiB argument cap, for `bir_mark_paid`.
+//! `bir_app_print_preview` answers Rox's `rox.preview` with a return's
+//! print sheet as a static HTML document, made in memory.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -37,6 +39,8 @@ pub(crate) const PREFIX: &str = "bir_app_";
 pub(crate) const TICKET_SUBJECT: &str = "bir_ticket_subject";
 pub(crate) const TICKET_ISSUE: &str = "bir_ticket_issue";
 pub(crate) const UPLOAD: &str = "bir_app_upload";
+/// The Forms app's print preview (`rox.preview`).
+pub(crate) const PRINT_PREVIEW: &str = "bir_app_print_preview";
 /// The approve card's "Allow this once" (spec 9.8).
 pub(crate) const ALLOW_SEND: &str = "bir_card_allow_send";
 /// One receipt, as `bir_mark_paid` takes it.
@@ -177,6 +181,7 @@ pub(crate) fn function_of(tool: &str) -> Option<&'static str> {
 /// Whether a tool of this module only reads.
 pub(crate) fn read_only(tool: &str) -> bool {
     tool == TICKET_SUBJECT
+        || tool == PRINT_PREVIEW
         || function_of(tool).is_some_and(|function| READ_ONLY.contains(&function))
 }
 
@@ -225,6 +230,26 @@ pub(crate) fn descriptors() -> Vec<Value> {
             "_meta": { "rox/audience": ["app"] },
         }),
     ];
+    list.push(json!({
+        "name": PRINT_PREVIEW,
+        "description": "Mini apps only (refused for the assistant): a return's print preview for Rox to show, as a static HTML document. `draft_id` prints a saved return as stored; `draft_json` (the page's draft as JSON text, with its staged `edits` and `unlocked` boxes) prints a Form library sample as the page holds it; `period` prints a sent return's filing record.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticket": { "type": "string", "description": "The ticket the app was opened with." },
+                "form": { "type": "string" },
+                "draft_id": { "type": "integer" },
+                "draft_json": { "type": "string", "description": "The page's draft, JSON.stringify'd: a draft's amounts are not integers, which a signed call cannot carry as numbers." },
+                "edits": { "type": "object" },
+                "unlocked": { "type": "array", "items": { "type": "string" } },
+                "period": { "type": "string" }
+            },
+            "required": ["ticket", "form"],
+            "additionalProperties": false
+        },
+        "annotations": { "readOnlyHint": true },
+        "_meta": { "rox/audience": ["app"] },
+    }));
     list.push(json!({
         "name": ALLOW_SEND,
         "description": "Mini apps only (refused for the assistant): the approve card's Allow this once, a send grant for one taxpayer and form that ends with the next send.",
@@ -438,6 +463,104 @@ pub(crate) fn ticket_issue(
         .title(db, today)
         .ok_or("no such branch is saved in BIR")?;
     Ok(json!({ "ticket": tickets::issue(db, &subject)?, "title": title }))
+}
+
+/// What `bir_app_print_preview` prints, its ticket checked.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PreviewAsk {
+    /// A draft: `[form, draft, edits, unlocked]`, as
+    /// `screen_form_print_sample` takes them (a saved return's, as stored,
+    /// with no edits).
+    Draft(Vec<Value>),
+    /// A sent return's filing record: `{tin, form, period}` with the
+    /// ticket's TIN.
+    Record(Map<String, Value>),
+}
+
+/// `bir_app_print_preview {ticket, form, draft_id}` (a saved return),
+/// `{ticket, form, draft_json, edits?, unlocked?}` (a Form library sample,
+/// which is not stored) or `{ticket, form, period}` (a sent return's filing
+/// record), read and held to the ticket's taxpayer: a draft must be of that
+/// taxpayer, and a record is of the ticket's own branch. A draft's amounts
+/// are not integers, which a signed call carries only as text: a saved
+/// return is read here, and a sample comes as JSON text.
+pub(crate) fn preview_ask(db: &Database, arguments: &Map<String, Value>) -> Result<PreviewAsk, String> {
+    const KEYS: [&str; 7] = ["ticket", "form", "draft_id", "draft_json", "edits", "unlocked", "period"];
+    if let Some(key) = arguments.keys().find(|key| !KEYS.contains(&key.as_str())) {
+        return Err(format!("unknown argument `{key}` (allowed: {})", KEYS.join(", ")));
+    }
+    let ticket = arguments
+        .get("ticket")
+        .and_then(Value::as_str)
+        .ok_or("`ticket` is required: the ticket the app was opened with")?;
+    let subject = subject_of(db, ticket)?;
+    let form = arguments
+        .get("form")
+        .and_then(Value::as_str)
+        .ok_or("`form` is required: a BIR form code")?;
+    let given = ["draft_id", "draft_json", "period"].iter().filter(|key| arguments.contains_key(**key)).count();
+    if given != 1 {
+        return Err("pass one of `draft_id` (a saved return), `draft_json` (a sample) or `period` (a sent return's record)".into());
+    }
+    if let Some(id) = arguments.get("draft_id") {
+        let id = id.as_i64().ok_or("`draft_id` must be an integer")?;
+        if arguments.contains_key("edits") || arguments.contains_key("unlocked") {
+            return Err("a saved return prints as stored: no `edits` or `unlocked`".into());
+        }
+        let draft = db
+            .draft_data_json(id)
+            .map_err(|error| error.to_string())?
+            .filter(Value::is_object)
+            .ok_or_else(|| format!("no saved return has id {id}"))?;
+        let args = vec![Value::String(form.into()), draft];
+        scope::check_args("screen_form_print", &args, &subject.root())?;
+        return Ok(PreviewAsk::Draft(args));
+    }
+    match (arguments.get("draft_json"), arguments.get("period")) {
+        (Some(Value::String(text)), None) => {
+            let draft = serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(Value::is_object)
+                .ok_or("`draft_json` must be a draft object as JSON text")?;
+            let mut args = vec![Value::String(form.into()), draft];
+            scope::check_args("screen_form_print", &args, &subject.root())?;
+            let edits = arguments.get("edits").cloned().unwrap_or_else(|| json!({}));
+            if !edits.is_object() {
+                return Err("`edits` must be an object of box keys to values".into());
+            }
+            let unlocked = arguments.get("unlocked").cloned().unwrap_or_else(|| json!([]));
+            if !unlocked.as_array().is_some_and(|keys| keys.iter().all(Value::is_string)) {
+                return Err("`unlocked` must be a list of box keys".into());
+            }
+            args.extend([edits, unlocked]);
+            Ok(PreviewAsk::Draft(args))
+        }
+        (None, Some(Value::String(period))) => {
+            if arguments.contains_key("edits") || arguments.contains_key("unlocked") {
+                return Err("a filing record takes no `edits` or `unlocked`".into());
+            }
+            let mut record = Map::new();
+            record.insert("tin".into(), Value::String(subject.full_tin()));
+            record.insert("form".into(), Value::String(form.into()));
+            record.insert("period".into(), Value::String(period.clone()));
+            Ok(PreviewAsk::Record(record))
+        }
+        _ => Err("`draft_json` and `period` are strings".into()),
+    }
+}
+
+/// The tool result Rox's `rox.preview` reads: the page as an embedded
+/// HTML resource, and its title.
+pub(crate) fn preview_result(form: &str, html: String, title: String) -> Value {
+    let form: String = form.chars().filter(char::is_ascii_alphanumeric).collect();
+    json!({
+        "content": [{
+            "type": "resource",
+            "resource": { "uri": format!("bir://print/{form}.html"), "mimeType": "text/html", "text": html },
+        }],
+        "structuredContent": { "title": title },
+        "isError": false,
+    })
 }
 
 /// Receipt chunks in flight, by upload id.

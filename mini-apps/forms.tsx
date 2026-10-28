@@ -1608,11 +1608,30 @@ async function cancelQueue(s: FS) {
   }
 }
 
-/** Print preview: Rox has no file viewer for mini apps yet (its bridge opens apps and https pages only), so the
- *  preview and the filing record are printed from BIR on the desktop, or asked of the assistant
- *  (bir_filing_record). */
+/** Print preview: BIR fills the return's print sheet (`bir_app_print_preview`) and Rox shows it over this app
+ *  with Print (the macOS print panel, which also saves a PDF) and Close; the page never comes through here. A
+ *  sample previews as the page holds it (staged edits, held boxes blank); a return is saved first and prints as
+ *  stored; a sent or queued return shows its filing record. A Rox without `rox.preview` gets today's note. */
 async function print(s: FS) {
-  s.printResult = { sample: !!s.sample, error: "Print preview is not available in Rox yet. Print this return from BIR on the desktop, or ask the assistant for its filing record." };
+  s.printResult = null;
+  if (!rox.preview) {
+    s.printResult = { sample: !!s.sample, error: "Print preview is not available in Rox yet. Print this return from BIR on the desktop, or ask the assistant for its filing record." };
+    return bump();
+  }
+  const preview = (args: Record<string, unknown>) => rox.preview({ tool: "bir_app_print_preview", args: { ticket: BRANCH, form: s.code, ...args } });
+  try {
+    if (s.sample) {
+      const pending = s.pending;
+      // as text: a draft's amounts are not integers, and a signed call carries no other numbers
+      await preview({ draft_json: JSON.stringify(s.draft), edits: pending, unlocked: unlockedFor(s, pending) });
+      return bump();
+    }
+    if (s.amends && !s.saved) await flush(s);
+    else if (s.editable && !(await ensureSaved(s))) return;
+    await preview(sentOrQueued(s) ? { period: tokenPeriod(s) } : { draft_id: Number(s.draft.id) });
+  } catch (e) {
+    s.printResult = { sample: !!s.sample, error: errText(e) };
+  }
   bump();
 }
 

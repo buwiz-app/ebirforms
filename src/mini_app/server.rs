@@ -536,6 +536,7 @@ impl MiniServer {
                 app_tools::ticket_issue(db, arguments, today)
             }))),
             app_tools::UPLOAD => now(call_result(self.v1.uploads.append(arguments))),
+            app_tools::PRINT_PREVIEW => now(print_preview(arguments, today)),
             app_tools::ALLOW_SEND => now(call_result(self.allow_send_once(arguments))),
             answers::ADD_TAXPAYER => now(call_result(database(|db| answers::add_taxpayer(db, arguments)))),
             answers::CANCEL_SEND => now(call_result(self.cancel_send(arguments))),
@@ -1053,6 +1054,29 @@ fn database<R>(
         .map_err(|error| error.message().to_string())
 }
 
+/// `bir_app_print_preview`: the return's print sheet (or a sent return's
+/// filing record) as the HTML document Rox previews, made in memory. The
+/// ticket is read, then the lock let go: the sheet takes the database
+/// itself. The page keeps its TINs and names as printed: it goes to Rox's
+/// viewer, never to the app or the model.
+fn print_preview(arguments: &Map<String, Value>, today: chrono::NaiveDate) -> Value {
+    let form = arguments.get("form").and_then(Value::as_str).unwrap_or_default().to_string();
+    let page = database(|db| app_tools::preview_ask(db, arguments)).and_then(|ask| match ask {
+        app_tools::PreviewAsk::Draft(args) => {
+            let arguments = gpui_shell::HostArguments::new(args.into_iter().map(crate::bir_module::json));
+            crate::screen_form_module::print_preview_page(&arguments).map_err(|error| error.message().to_string())
+        }
+        app_tools::PreviewAsk::Record(args) => database(|db| payments::filing_record_page(db, &args, today)).map(|record| {
+            let title = format!("BIR Form {} \u{2014} {} \u{b7} filing record", record.form, record.taxpayer);
+            (record.html, title)
+        }),
+    });
+    match page {
+        Ok((html, title)) => app_tools::preview_result(&form, html, title),
+        Err(message) => tool_error(format!("{}: {message}", app_tools::PRINT_PREVIEW)),
+    }
+}
+
 fn call_result(result: Result<Value, String>) -> Value {
     match result {
         Ok(value) => json!({
@@ -1082,7 +1106,8 @@ fn now(result: Value) -> Reply {
 /// assistant's, not one of them).
 fn is_app_only(name: &str) -> bool {
     app_tools::function_of(name).is_some()
-        || [app_tools::TICKET_SUBJECT, app_tools::TICKET_ISSUE, app_tools::UPLOAD, app_tools::ALLOW_SEND].contains(&name)
+        || [app_tools::TICKET_SUBJECT, app_tools::TICKET_ISSUE, app_tools::UPLOAD, app_tools::PRINT_PREVIEW, app_tools::ALLOW_SEND]
+            .contains(&name)
         || CARD_TOOLS.contains(&name)
 }
 
@@ -1776,6 +1801,86 @@ mod tests {
         let reply = reply.wait().unwrap();
         assert_eq!(reply["id"], 7);
         assert_eq!(reply["result"]["structuredContent"]["result"]["form_code"], "0619E");
+    }
+
+    #[test]
+    fn bir_app_print_preview_answers_forms_with_a_static_sheet_held_to_its_ticket() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let ticket = ticket_of(ROOT);
+        let sample = call_as(
+            &mut server,
+            app("forms"),
+            "bir_app_screen_form_sample",
+            json!({"args": [TIN, "2551Q"], "ticket": ticket}),
+        );
+        let draft = sample["structuredContent"]["result"]["draft"].clone();
+        assert!(draft.is_object(), "{sample}");
+        let ask = json!({"ticket": ticket, "form": "2551Q", "draft_json": draft.to_string()});
+        let shown = call_as(&mut server, app("forms"), app_tools::PRINT_PREVIEW, ask.clone());
+        assert_eq!(shown["isError"], false, "{}", shown["content"]);
+        let resource = &shown["content"][0]["resource"];
+        assert_eq!(shown["content"][0]["type"], "resource");
+        assert_eq!(resource["mimeType"], "text/html");
+        let html = resource["text"].as_str().unwrap().to_ascii_lowercase();
+        assert!(html.contains("<html") && html.contains("</html>"), "a whole page");
+        assert!(!html.contains("<script"), "a static page");
+        assert_eq!(shown["structuredContent"]["title"], "BIR Form 2551Q \u{2014} Scratch Taxpayer");
+        // a saved return prints as stored, by its id
+        let opened = call_as(
+            &mut server,
+            app("forms"),
+            "bir_app_screen_form_open",
+            json!({"args": [TIN, "0619E", 2026, 1], "ticket": ticket}),
+        );
+        let opened = opened["structuredContent"]["result"]["draft"].clone();
+        let saved = call_as(
+            &mut server,
+            app("forms"),
+            "bir_app_screen_form_save",
+            json!({"args": ["0619E", opened], "ticket": ticket}),
+        );
+        let id = saved["structuredContent"]["result"]["id"].as_i64().expect("a saved return's id");
+        let stored = call_as(
+            &mut server,
+            app("forms"),
+            app_tools::PRINT_PREVIEW,
+            json!({"ticket": ticket, "form": "0619E", "draft_id": id}),
+        );
+        assert_eq!(stored["isError"], false, "{}", stored["content"]);
+        assert_eq!(stored["structuredContent"]["title"], "BIR Form 0619E \u{2014} Scratch Taxpayer");
+        assert!(stored["content"][0]["resource"]["text"].as_str().unwrap().len() > 1000);
+        // the assistant, another app, another taxpayer's ticket, no ticket,
+        // or nothing to print: refused
+        assert_eq!(call_as(&mut server, agent(), app_tools::PRINT_PREVIEW, ask.clone())["isError"], true);
+        assert_eq!(call_as(&mut server, app("calendar"), app_tools::PRINT_PREVIEW, ask.clone())["isError"], true);
+        save_taxpayer(&mut server, &format!("{OTHER}00000"), "Other Taxpayer");
+        let other = ticket_of(OTHER);
+        let mut theirs = ask.clone();
+        theirs["ticket"] = json!(other);
+        for bad in [
+            theirs,
+            json!({"form": "2551Q", "draft_json": ask["draft_json"]}),
+            json!({"ticket": ticket, "form": "2551Q"}),
+            json!({"ticket": ticket, "form": "2551Q", "draft_json": ask["draft_json"], "period": "2026-Q3"}),
+            json!({"ticket": ticket, "form": "2551Q", "draft_json": ask["draft_json"], "path": "/tmp/x.html"}),
+            json!({"ticket": ticket, "form": "2551Q", "draft_json": "[1]"}),
+            json!({"ticket": ticket, "form": "0619E", "draft_id": id, "edits": {}}),
+            json!({"ticket": other, "form": "0619E", "draft_id": id}),
+            json!({"ticket": ticket, "form": "0619E", "draft_id": id + 1000}),
+        ] {
+            let refused = call_as(&mut server, app("forms"), app_tools::PRINT_PREVIEW, bad.clone());
+            assert_eq!(refused["isError"], true, "{bad}");
+        }
+        // a sent return's filing record: this one has none yet
+        let record = call_as(
+            &mut server,
+            app("forms"),
+            app_tools::PRINT_PREVIEW,
+            json!({"ticket": ticket, "form": "2551Q", "period": "2026-Q3"}),
+        );
+        assert_eq!(record["isError"], true);
+        assert!(record["content"][0]["text"].as_str().unwrap().contains("has no 2551Q return"), "{record}");
     }
 
     #[test]

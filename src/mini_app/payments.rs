@@ -1182,6 +1182,53 @@ pub(crate) fn filing_record(
     today: NaiveDate,
     out_dir: &Path,
 ) -> Result<Value, String> {
+    let record = filing_record_page(db, arguments, today)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    let path = out_dir.join(format!("{}-{stamp}.html", record.file));
+    std::fs::write(&path, &record.html).map_err(|error| error.to_string())?;
+    let title = record.title;
+    let path = path.display().to_string();
+    let mut out = json!({
+        "link": format!(
+            "rox://view?path={}&title={}",
+            resolve::encode_component(&path),
+            resolve::encode_component(&title)
+        ),
+        "path": path,
+        "title": title,
+    });
+    if let (Value::Object(out), Value::Object(facts)) = (&mut out, record.facts) {
+        out.extend(facts);
+    }
+    Ok(out)
+}
+
+/// A filing record, made in memory.
+pub(crate) struct RecordPage {
+    /// The printable page.
+    pub html: String,
+    /// The file name it is saved under, without the stamp and extension.
+    pub file: String,
+    /// "2551Q Q3 2026 · <branch> · filing record".
+    pub title: String,
+    pub form: &'static str,
+    /// The branch's name.
+    pub taxpayer: String,
+    /// `status`, `confirmed` and `payments`, as `bir_filing_record` reports them.
+    pub facts: Value,
+}
+
+/// The filing record of `{tin, form, period}` as one page: the filled
+/// return, BIR's confirmation and the payments. Writes nothing.
+pub(crate) fn filing_record_page(
+    db: &Database,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+) -> Result<RecordPage, String> {
     check_keys(arguments, &["tin", "form", "period"])?;
     let target = target(
         db,
@@ -1228,30 +1275,18 @@ pub(crate) fn filing_record(
     let html = crate::static_html::staticize(&crate::print_sheet::prepare_html_for(
         slug, &document, true,
     ));
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
-    let path = out_dir.join(format!(
-        "bir-{code}-{}-record-{stamp}.html",
-        target.period.canonical()
-    ));
-    std::fs::write(&path, html).map_err(|error| error.to_string())?;
-    let title = format!("{} · {} · filing record", target.label(), target.branch.name);
-    let path = path.display().to_string();
-    Ok(json!({
-        "link": format!(
-            "rox://view?path={}&title={}",
-            resolve::encode_component(&path),
-            resolve::encode_component(&title)
-        ),
-        "path": path,
-        "title": title,
-        "status": format!("{:?}", filing.status),
-        "confirmed": receipt.is_some() || matches!(filing.status, FilingStatus::Confirmed | FilingStatus::Paid),
-        "payments": payments.len(),
-    }))
+    Ok(RecordPage {
+        html,
+        file: format!("bir-{code}-{}-record", target.period.canonical()),
+        title: format!("{} · {} · filing record", target.label(), target.branch.name),
+        form: code,
+        taxpayer: target.branch.name.clone(),
+        facts: json!({
+            "status": format!("{:?}", filing.status),
+            "confirmed": receipt.is_some() || matches!(filing.status, FilingStatus::Confirmed | FilingStatus::Paid),
+            "payments": payments.len(),
+        }),
+    })
 }
 
 #[cfg(test)]
