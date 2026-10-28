@@ -530,6 +530,7 @@ type Toast = { id: number; text: string; tone: "info" | "danger" | "success"; un
 const toastSig = signal<Toast | null>(null);
 let toastId = 0;
 function toast(text: string, tone: Toast["tone"] = "info", undo?: () => void) {
+  if (!String(text || "").trim()) return;
   const id = ++toastId;
   toastSig.set({ id, text, tone, undo });
   setTimeout(() => {
@@ -3140,7 +3141,8 @@ function ToastView() {
       {(t) => (
         <View style={{ position: "absolute", left: 0, right: 0, bottom: 20, alignItems: "center" }} pointerEvents="box-none">
           <View class={`flex-row items-center gap-3 px-4 py-2.5 rounded-xl border ${C.line} ${C.card}`} style={{ maxWidth: 560 }}>
-            <Text class={`text-sm flex-1 ${t().tone === "danger" ? C.danger : C.fg}`}>{t().text}</Text>
+            {/* the box fits its message: flex-1 would start the text at zero width and show only × */}
+            <Text class={`text-sm ${t().tone === "danger" ? C.danger : C.fg}`} style={{ flexShrink: 1 }}>{t().text}</Text>
             <If when={Boolean(t().undo)}>
               <Btn label="Undo" variant="ghost" onPress={() => { const u = t().undo; toastSig.set(null); u?.(); }} />
             </If>
