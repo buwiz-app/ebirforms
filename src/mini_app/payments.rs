@@ -589,7 +589,18 @@ pub(crate) fn list(
     arguments: &Map<String, Value>,
     today: NaiveDate,
 ) -> Result<Value, String> {
-    check_keys(arguments, &["tin", "form", "period"])?;
+    check_keys(arguments, &["tin", "form", "period", "year"])?;
+    let year = match arguments.get("year") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))
+                .filter(|year| (2000..=2200).contains(year))
+                .ok_or_else(|| format!("`year` must be a year like 2026 (got {value})"))?
+                .to_string(),
+        ),
+    };
     let tin = optional_text(arguments, "tin")?
         .map(|tin| {
             taxform::tin_digits(&tin).ok_or_else(|| format!("`{tin}` is not a TIN (9 or 14 digits)"))
@@ -621,6 +632,11 @@ pub(crate) fn list(
         })
         .filter(|payment| form.is_none_or(|code| payment.form == code))
         .filter(|payment| period.as_ref().is_none_or(|period| payment.period == *period))
+        .filter(|payment| {
+            year.as_ref().is_none_or(|year| {
+                payment.paid_at.as_deref().unwrap_or(&payment.recorded_at).starts_with(year.as_str())
+            })
+        })
         .collect();
     payments.sort_by(|a, b| {
         let when = |payment: &Payment| {
@@ -631,12 +647,72 @@ pub(crate) fn list(
         };
         when(b).cmp(&when(a))
     });
+    // The sums of what was paid (the tax and the fees).
+    let mut by_form: Vec<(String, f64)> = Vec::new();
+    let mut by_month: Vec<(String, f64)> = Vec::new();
+    let mut total = 0.0;
+    for payment in &payments {
+        let paid = payment.total().unwrap_or(0.0);
+        total += paid;
+        let month: String = payment.paid_at.as_deref().unwrap_or(&payment.recorded_at).chars().take(7).collect();
+        for (list, key) in [(&mut by_form, payment.form.clone()), (&mut by_month, month)] {
+            match list.iter_mut().find(|(known, _)| *known == key) {
+                Some(entry) => entry.1 += paid,
+                None => list.push((key, paid)),
+            }
+        }
+    }
+    by_form.sort_by(|a, b| b.1.total_cmp(&a.1));
+    by_month.sort_by(|a, b| a.0.cmp(&b.0));
+    let sums = |list: Vec<(String, f64)>, key: &str| -> Vec<Value> {
+        list.into_iter().map(|(name, amount)| json!({ key: name, "amount": cents(amount) })).collect()
+    };
     Ok(json!({
+        "year": year,
+        "taxpayer": tin.as_deref().and_then(|tin| {
+            names.iter().find(|branch| branch.tin.starts_with(tin)).map(|branch| branch.name.clone())
+        }),
+        "totals": {
+            "count": payments.len(),
+            "all": cents(total),
+            "by_form": sums(by_form, "form"),
+            "by_month": sums(by_month, "month"),
+        },
         "payments": payments
             .iter()
             .map(|payment| payment.json(name_of(&payment.tin).as_deref()))
             .collect::<Vec<_>>(),
     }))
+}
+
+/// The returns (`<tin>/<FORM>-<period>`) that have a payment recorded.
+pub(crate) fn keys(db: &Database) -> Result<Vec<String>, String> {
+    Ok(load(db)?.into_iter().map(|payment| payment.key).collect())
+}
+
+/// The payments recorded on or after `since` (YYYY-MM-DD), newest first.
+pub(crate) fn recorded_since(db: &Database, since: &str) -> Result<Vec<Value>, String> {
+    let mut found: Vec<Payment> = load(db)?.into_iter().filter(|payment| payment.recorded_at.as_str() >= since).collect();
+    found.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at));
+    Ok(found
+        .iter()
+        .map(|payment| {
+            json!({
+                "tin": payment.tin,
+                "form": payment.form,
+                "period": payment.period,
+                "label": format!("{} · {}", payment.form, period_label(&payment.form, &payment.period)),
+                "detail": format!(
+                    "{} paid{}{}",
+                    payment.channel,
+                    payment.total().map(|total| format!(" ₱{total:.2}")).unwrap_or_default(),
+                    if payment.message_id.is_some() { " · from a payment email" } else { "" }
+                ),
+                "paid": true,
+                "key": payment.key,
+            })
+        })
+        .collect())
 }
 
 /// `bir_payment_search {tins?}`: the Gmail search for payment emails about

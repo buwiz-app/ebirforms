@@ -1,5 +1,5 @@
-// BIR answer cards about deadlines (spec 9.8): what's due next (dues), one
-// month (month), returns already late (overdue) and what filing late costs
+// BIR answer cards about deadlines (spec 9.8): what's due next (dues), the
+// next seven days for every taxpayer (week), one month (month), returns already late (overdue) and what filing late costs
 // (penalty, recomputed as the user types, from BIR's own penalty engine).
 // Buttons open the return in BIR Forms or the full Calendar; nothing here
 // changes BIR's data.
@@ -142,7 +142,10 @@ function Btn(p: { label: string; onPress: () => void; primary?: boolean; disable
   );
 }
 
-/** The card's frame: title and subtitle, the body, and its notes. */
+/** The card's frame: title and subtitle, the body, and its notes. The
+ *  body takes the height it needs (it scrolls only past the card's), so
+ *  the buttons sit right under it and a short card leaves no gap above
+ *  them; each card app declares a height that fits its cards. */
 function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
   return (
     <View style={{ flex: 1 }} class={`${K.pane} p-3 gap-2`}>
@@ -165,7 +168,7 @@ function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
       <If when={Boolean(note())}>
         <Text class={`text-xs ${K.ok}`}>{note()}</Text>
       </If>
-      <Scroll class="flex-1">
+      <Scroll style={{ flexGrow: 0, flexShrink: 1 }}>
         <View class="gap-1.5">{p.children}</View>
       </Scroll>
       <If when={Boolean(p.foot)}>
@@ -195,6 +198,18 @@ function Row(p: { title: string; sub?: string; right?: any; onPress?: () => void
   );
 }
 
+/** A label and its value on one line (a fact sheet). */
+function Fact(p: { label: string; value: any; strong?: boolean }) {
+  return (
+    <View class="flex-row items-start gap-3 py-0.5">
+      <Text class={`text-xs ${K.fg2}`} style={{ width: 110 }}>{p.label}</Text>
+      <View class="flex-1">
+        {typeof p.value === "string" || typeof p.value === "number" ? <Text class={`text-sm ${p.strong ? "font-semibold" : ""} ${K.fg}`}>{String(p.value)}</Text> : p.value}
+      </View>
+    </View>
+  );
+}
+
 function Empty(p: { text: string }) {
   return <Text class={`text-sm py-3 ${K.fg2}`}>{p.text}</Text>;
 }
@@ -216,8 +231,11 @@ function Field(p: { label: string; value: string; onChange: (v: string) => void;
 }
 
 /** A picked receipt sent in chunks for bir_mark_paid's `proof_upload`. */
-async function uploadReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await rox.pickFile({ extensions: [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"], multiple: false });
+const uploadReceipt = () => uploadFile([".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]);
+
+/** A picked file sent in chunks (bir_app_upload), for a tool's `upload`. */
+async function uploadFile(extensions: string[]): Promise<{ upload: string; name: string } | null> {
+  const files = await rox.pickFile({ extensions, multiple: false });
   const file = files[0];
   if (!file) return null;
   const bytes = await file.read();
@@ -383,7 +401,47 @@ function Penalty() {
   );
 }
 
+// ------------------------------------------------------------ week
+
+function Week() {
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const open = () => events().sort((a, b) => String(a.due).localeCompare(String(b.due)) || String(a.taxpayer).localeCompare(String(b.taxpayer)));
+  const days = () => [...new Set(open().map((e) => String(e.due)))];
+  const left = () => open().filter((e) => !DONE.includes(e.status));
+  const who = () => new Set(left().map((e) => e.tin)).size;
+  const label = (day: string) => {
+    const [y, m, d] = day.split("-").map(Number);
+    const n = daysTo(day);
+    return `${DAYS[new Date(y, m - 1, d).getDay()]}, ${shortDate(day)}${n === 0 ? " · today" : n === 1 ? " · tomorrow" : ""}`;
+  };
+  return (
+    <Card title="This week" sub={`${left().length} to file · ${who()} taxpayer${who() === 1 ? "" : "s"}`}
+      foot={<Btn label="Open the Calendar" onPress={() => openApp("calendar", P.ticket)} />}>
+      <If when={open().length === 0}><Empty text="Nothing is due in the next seven days." /></If>
+      <Each of={days()} key={(d) => d}>
+        {(d) => (
+          <View class="gap-1">
+            <Text class={`text-xs font-semibold pt-1 ${K.fg2}`}>{label(d())}</Text>
+            <Each of={open().filter((e) => String(e.due) === d())} key={(e) => e.key}>
+              {(e) => (
+                <Row title={`${e().form} · ${e().taxpayer}`} sub={String(e().label || "").replace(`${e().form} · `, "")}
+                  right={
+                    <View class="flex-row gap-2 items-center">
+                      <Chip text={statusChip(e().status)[0]} tone={statusChip(e().status)[1]} />
+                      <If when={!DONE.includes(e().status)}><Btn label="Open" onPress={() => openApp("forms", e().key, { form: e().form, period: e().period, action: "file" })} /></If>
+                    </View>
+                  } />
+              )}
+            </Each>
+          </View>
+        )}
+      </Each>
+    </Card>
+  );
+}
+
 export default function DatesCard() {
+  if (P.card === "week") return <Week />;
   if (P.card === "month") return <Month />;
   if (P.card === "overdue") return <Overdue />;
   if (P.card === "penalty") return <Penalty />;

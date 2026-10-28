@@ -1,8 +1,9 @@
 // BIR answer cards about returns (spec 9.8): a taxpayer's forms (forms),
 // the year at a glance (matrix), one return's path (status), what blocks a
-// return (needs) and the approval before the assistant sends (approve).
-// Buttons open BIR Forms on the return's ticket; "Allow this once" and
-// "Mark paid" run only when the user presses them (origin app).
+// return (needs), what a form is (explain), unfinished drafts (drafts), the
+// sending queue (outbox) and one form across every taxpayer (bulk).
+// Buttons open BIR Forms on the return's ticket; "Mark paid" and the
+// queue's Cancel run only when the user presses them (origin app).
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { rox } from "rox";
@@ -142,7 +143,10 @@ function Btn(p: { label: string; onPress: () => void; primary?: boolean; disable
   );
 }
 
-/** The card's frame: title and subtitle, the body, and its notes. */
+/** The card's frame: title and subtitle, the body, and its notes. The
+ *  body takes the height it needs (it scrolls only past the card's), so
+ *  the buttons sit right under it and a short card leaves no gap above
+ *  them; each card app declares a height that fits its cards. */
 function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
   return (
     <View style={{ flex: 1 }} class={`${K.pane} p-3 gap-2`}>
@@ -165,7 +169,7 @@ function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
       <If when={Boolean(note())}>
         <Text class={`text-xs ${K.ok}`}>{note()}</Text>
       </If>
-      <Scroll class="flex-1">
+      <Scroll style={{ flexGrow: 0, flexShrink: 1 }}>
         <View class="gap-1.5">{p.children}</View>
       </Scroll>
       <If when={Boolean(p.foot)}>
@@ -195,6 +199,18 @@ function Row(p: { title: string; sub?: string; right?: any; onPress?: () => void
   );
 }
 
+/** A label and its value on one line (a fact sheet). */
+function Fact(p: { label: string; value: any; strong?: boolean }) {
+  return (
+    <View class="flex-row items-start gap-3 py-0.5">
+      <Text class={`text-xs ${K.fg2}`} style={{ width: 110 }}>{p.label}</Text>
+      <View class="flex-1">
+        {typeof p.value === "string" || typeof p.value === "number" ? <Text class={`text-sm ${p.strong ? "font-semibold" : ""} ${K.fg}`}>{String(p.value)}</Text> : p.value}
+      </View>
+    </View>
+  );
+}
+
 function Empty(p: { text: string }) {
   return <Text class={`text-sm py-3 ${K.fg2}`}>{p.text}</Text>;
 }
@@ -216,8 +232,11 @@ function Field(p: { label: string; value: string; onChange: (v: string) => void;
 }
 
 /** A picked receipt sent in chunks for bir_mark_paid's `proof_upload`. */
-async function uploadReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await rox.pickFile({ extensions: [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"], multiple: false });
+const uploadReceipt = () => uploadFile([".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]);
+
+/** A picked file sent in chunks (bir_app_upload), for a tool's `upload`. */
+async function uploadFile(extensions: string[]): Promise<{ upload: string; name: string } | null> {
+  const files = await rox.pickFile({ extensions, multiple: false });
   const file = files[0];
   if (!file) return null;
   const bytes = await file.read();
@@ -431,36 +450,116 @@ function Needs() {
   );
 }
 
-// ------------------------------------------------------------ approve
+// ------------------------------------------------------------ explain
 
-function Approve() {
+function Explain() {
   const s = () => snap() || {};
-  const done = signal<"" | "allowed" | "later">("");
-  const allow = () =>
-    act(() => rox.call("bir_card_allow_send", { tin: s().tin || "", form: s().form || "" })).then(() => {
-      if (!failure()) done.set("allowed");
-    });
+  const tp = () => s().taxpayer || null;
+  const attach = () => (s().attachments || []) as any[];
+  const freq = () => String(s().frequency || "").replace(/^./, (c: string) => c.toUpperCase());
   return (
     <Card
-      title={`Send ${s().form || "this return"} to BIR?`}
-      sub="The assistant can't send it without you."
+      title={`${s().form || ""} · ${s().title || ""}`}
+      sub={[s().category, freq()].filter(Boolean).join(" · ")}
       foot={
-        done() === ""
-          ? [
-              <Btn label="Allow this once" primary onPress={allow} />,
-              <Btn label="Review in Forms" onPress={() => openApp("forms", s().tin, s().form ? { form_code: s().form } : {})} />,
-              <Btn label="Not now" onPress={() => done.set("later")} />,
-            ]
+        tp() && P.ticket
+          ? <Btn label={`Start ${s().form}${tp().period_label ? ` ${tp().period_label}` : ""} for ${tp().name}`} primary
+              onPress={() => openApp("forms", P.ticket, tp().period ? { form: s().form, period: tp().period, action: "file" } : { form_code: s().form })} />
           : undefined
       }
     >
-      <Text class={`text-sm ${K.fg}`}>
-        {done() === "allowed"
-          ? "Allowed once. Ask the assistant to send it again; the permission ends with that send."
-          : done() === "later"
-            ? "Not sent. The return stays a draft."
-            : "Allow this once lets the assistant queue this return for BIR on its next try. Review it in Forms first if you're not sure."}
-      </Text>
+      <Fact label="Who files it" value={String(s().who || "")} />
+      <If when={Boolean(s().rate)}><Fact label="Rate" value={String(s().rate || "")} /></If>
+      <Fact label="Due" value={((s().due || []) as string[])[0] || "As the form's event requires"} />
+      <Fact label="Attach" value={attach().length ? attach().slice(0, 3).map((a) => a.label).join("; ") + (attach().length > 3 ? `; and ${attach().length - 3} more` : "") : "Nothing listed"} />
+      <If when={Boolean(tp())}>
+        <Text class={`text-xs ${tp()?.files_it ? K.ok : K.warn}`}>{tp()?.files_it ? `On ${tp()?.name}'s forms this year.` : `Not on ${tp()?.name}'s forms this year.`}</Text>
+      </If>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------ drafts
+
+function ago(at: unknown) {
+  const t = Date.parse(String(at || "").replace(" ", "T"));
+  if (!t) return "";
+  const h = Math.round((Date.now() - t) / 3_600_000);
+  if (h < 1) return "edited just now";
+  if (h < 24) return `edited ${h} h ago`;
+  if (h < 48) return "edited yesterday";
+  return `edited ${shortDate(String(at).slice(0, 10))}`;
+}
+
+function Drafts() {
+  const s = () => snap() || {};
+  const rows = () => (s().drafts || []) as any[];
+  return (
+    <Card title="Drafts" sub={`${rows().length} not sent yet${s().taxpayer ? ` · ${s().taxpayer}` : ""}`}>
+      <If when={rows().length === 0}><Empty text="Nothing half done: every saved return has been sent." /></If>
+      <Each of={rows()} key={(r) => String(r.id)}>
+        {(r, i) => (
+          <Row title={String(r().label || `${r().form} · ${r().period}`)} sub={ago(r().updated_at)}
+            right={<Btn label="Resume" primary={i() === 0} onPress={() => openApp("forms", ticketOf(r().token))} />} />
+        )}
+      </Each>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------ outbox
+
+function Outbox() {
+  const s = () => snap() || {};
+  const queued = () => (s().queued || []) as any[];
+  const sent = () => (s().sent || []) as any[];
+  const gone = signal<string[]>([]);
+  const cancel = (r: any) =>
+    act(() => rox.call("bir_card_cancel_send", { ticket: r.key }), `${r.label} is back to a draft.`).then(() => !failure() && gone.set([...gone(), r.key]));
+  return (
+    <Card title="Sending queue" sub={`${queued().length} waiting to send · ${sent().length} sent, waiting for BIR`}>
+      <If when={queued().length + sent().length === 0}><Empty text="Nothing is waiting: every return has been sent and confirmed." /></If>
+      <Each of={queued()} key={(r) => r.key}>
+        {(r) => (
+          <Row title={`${r().label} · ${r().taxpayer}`} sub={gone().includes(r().key) ? "Cancelled: back to a draft" : `Waiting to send since ${shortDate(String(r().since).slice(0, 10))}`}
+            right={gone().includes(r().key) ? undefined : <View class="flex-row gap-2 items-center"><Chip text="Waiting" tone="info" /><Btn label="Cancel" onPress={() => cancel(r())} /></View>} />
+        )}
+      </Each>
+      <Each of={sent()} key={(r) => r.key}>
+        {(r) => (
+          <Row title={`${r().label} · ${r().taxpayer}`} sub={`Sent ${shortDate(String(r().since).slice(0, 10))} · waiting for BIR's confirmation email`}
+            right={<Btn label="Open" onPress={() => openApp("forms", r().key)} />} />
+        )}
+      </Each>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------ bulk
+
+function Bulk() {
+  const s = () => snap() || {};
+  const rows = () => (s().rows || []) as any[];
+  const next = () => rows().find((r) => !DONE.includes(r.status));
+  const open = (r: any) => openApp("forms", r.key, { form: s().form, period: s().period, action: "file" });
+  return (
+    <Card title={String(s().label || "")} sub={`${s().left ?? 0} of ${s().total ?? 0} left`}
+      foot={next() ? <Btn label={`Open the next one: ${next()!.taxpayer}`} primary onPress={() => open(next())} /> : undefined}>
+      <If when={rows().length === 0}><Empty text="No taxpayer has this form on their forms that year." /></If>
+      <Each of={rows()} key={(r) => r.key}>
+        {(r) => {
+          const [word, tone] = statusChip(r().status);
+          return (
+            <Row title={r().taxpayer} sub={r().due ? `due ${shortDate(r().due)}${r().late ? " · late" : ""}` : ""}
+              right={
+                <View class="flex-row gap-2 items-center">
+                  <Chip text={r().late ? "Late" : word} tone={r().late ? "danger" : tone} />
+                  <If when={!DONE.includes(r().status)}><Btn label="Open" onPress={() => open(r())} /></If>
+                </View>
+              } />
+          );
+        }}
+      </Each>
     </Card>
   );
 }
@@ -469,6 +568,9 @@ export default function FormsCard() {
   if (P.card === "matrix") return <Matrix />;
   if (P.card === "status") return <Status />;
   if (P.card === "needs") return <Needs />;
-  if (P.card === "approve") return <Approve />;
+  if (P.card === "explain") return <Explain />;
+  if (P.card === "drafts") return <Drafts />;
+  if (P.card === "outbox") return <Outbox />;
+  if (P.card === "bulk") return <Bulk />;
   return <Forms />;
 }

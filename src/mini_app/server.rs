@@ -27,7 +27,7 @@ use serde_json::{Map, Value, json};
 use super::apps::{self, Catalog};
 use super::bridge::{Bridge, Call};
 use super::v1::{self, Caller, Origin, app_tools, manifest as v1_manifest};
-use super::{answers, calendar, cards, confirm, payments, plain, resolve, scope, taxpayer};
+use super::{answers, calendar, cards, confirm, lookup, payments, plain, resolve, return_view, scope, taxpayer};
 use crate::agent::{Session, UiQueue};
 
 pub(crate) const SERVER_NAME: &str = "bir-mini-app";
@@ -160,6 +160,8 @@ pub(crate) struct MiniServer {
     v1: v1::Host,
     /// Send grants the user gave on an approve card, for the next send only.
     once_grants: Vec<(String, String)>,
+    /// Spreadsheets an import card read, by import id, until it fills.
+    imports: Vec<(String, return_view::Imported)>,
 }
 
 impl MiniServer {
@@ -189,6 +191,7 @@ impl MiniServer {
             gate,
             v1: v1::Host::new(rox),
             once_grants: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -403,6 +406,68 @@ impl MiniServer {
         Ok(json!({ "allowed": true, "form": form, "once": true }))
     }
 
+    /// The outbox card's Cancel (`bir_card_cancel_send {ticket}`): the
+    /// queued return taken out of the sending queue, back to Draft, the way
+    /// BIR Forms cancels it (`cancel_queued`).
+    fn cancel_send(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
+        let today = taxform::today();
+        let args = database(|db| answers::queued_row(db, arguments, today))?;
+        match self.bridge.call("cancel_queued", args, None) {
+            Call::Ready(result) => result?,
+            Call::Pending(run) => run()?,
+        };
+        Ok(json!({ "cancelled": true }))
+    }
+
+    /// The attach card's Upload (`bir_card_attach`): the uploaded bytes
+    /// kept as one of the return's attachments, next to the receipts.
+    fn card_attach(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
+        let upload = arguments.get("upload").and_then(Value::as_str).ok_or("`upload` is required")?;
+        let bytes = self.v1.uploads.take(upload).ok_or("`upload` is not an upload in progress")?;
+        let dir = payments::receipts_dir().parent().map(|dir| dir.join("attachments")).unwrap_or_else(|| "attachments".into());
+        let mut rest = arguments.clone();
+        rest.remove("upload");
+        let today = taxform::today();
+        database(|db| return_view::attach(db, &rest, &bytes, &dir, today))
+    }
+
+    /// The import card's read (`bir_card_import`): rows read and skipped;
+    /// the total is kept for its Fill under a new import id.
+    fn card_import(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
+        let upload = arguments.get("upload").and_then(Value::as_str).ok_or("`upload` is required")?;
+        let bytes = self.v1.uploads.take(upload).ok_or("`upload` is not an upload in progress")?;
+        let mut rest = arguments.clone();
+        rest.remove("upload");
+        let today = taxform::today();
+        let (mut answer, imported) = database(|db| return_view::import_read(db, &rest, &bytes, today))?;
+        let mut stamp = [0u8; 8];
+        getrandom::fill(&mut stamp).map_err(|error| error.to_string())?;
+        let id = format!("imp_{}", hex::encode(stamp));
+        if self.imports.len() >= 4 {
+            self.imports.remove(0);
+        }
+        self.imports.push((id.clone(), imported));
+        answer["import"] = json!(id);
+        Ok(answer)
+    }
+
+    /// The import card's Fill (`bir_card_import_fill {ticket, import}`).
+    fn card_import_fill(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
+        let id = arguments.get("import").and_then(Value::as_str).ok_or("`import` is required")?;
+        let today = taxform::today();
+        let mut target_args = arguments.clone();
+        target_args.remove("import");
+        let value = database(|db| return_view::target(db, &target_args, today).map(|target| target.value()))?;
+        let at = self
+            .imports
+            .iter()
+            .position(|(known, imported)| known == id && imported.value == value)
+            .ok_or("this import is gone: pick the file again")?;
+        let filled = database(|db| return_view::import_fill(db, &self.imports[at].1, today))?;
+        self.imports.remove(at);
+        Ok(filled)
+    }
+
     /// Take back the "allow this once" grants.
     fn end_once_grants(&mut self) {
         let grants = std::mem::take(&mut self.once_grants);
@@ -466,6 +531,11 @@ impl MiniServer {
             }))),
             app_tools::UPLOAD => now(call_result(self.v1.uploads.append(arguments))),
             app_tools::ALLOW_SEND => now(call_result(self.allow_send_once(arguments))),
+            answers::ADD_TAXPAYER => now(call_result(database(|db| answers::add_taxpayer(db, arguments)))),
+            answers::CANCEL_SEND => now(call_result(self.cancel_send(arguments))),
+            return_view::ATTACH => now(call_result(self.card_attach(arguments))),
+            return_view::IMPORT => now(call_result(self.card_import(arguments))),
+            return_view::IMPORT_FILL => now(call_result(self.card_import_fill(arguments))),
             _ => {
                 let request = match app_tools::request(name, arguments) {
                     Ok(request) => request,
@@ -551,6 +621,13 @@ impl MiniServer {
             answers::PENALTY => Ok(now(self.on_database(name, arguments, answers::penalty))),
             answers::UNPAID => Ok(now(self.on_database(name, arguments, answers::unpaid))),
             answers::BOARD => Ok(now(self.on_database(name, arguments, answers::board))),
+            answers::QUICK_ADD => Ok(now(self.on_database(name, arguments, answers::quick_add))),
+            answers::OUTBOX => Ok(now(self.on_database(name, arguments, answers::outbox))),
+            answers::DIGEST => Ok(now(self.on_database(name, arguments, answers::digest))),
+            lookup::FORM_INFO => Ok(now(self.on_database(name, arguments, lookup::form_info))),
+            lookup::LOOKUP => Ok(now(self.on_database(name, arguments, lookup::lookup))),
+            return_view::RETURN => Ok(now(self.on_database(name, arguments, return_view::view))),
+            calendar::DEADLINE => Ok(now(self.on_database(name, arguments, calendar::deadline))),
             taxpayer::RETURNS_LIST => Ok(now(self.on_database(name, arguments, taxpayer::returns_list))),
             BIR_CALENDAR_SET => Ok(now(self.on_database(name, arguments, |db, arguments, _| {
                 calendar::set(db, arguments)
@@ -658,9 +735,26 @@ impl MiniServer {
             "database": crate::agent::database_kind(),
             "signed_in": signed_in,
             "version": env!("CARGO_PKG_VERSION"),
+            "plugin_version": v1_manifest::VERSION,
         });
         if let Some(reason) = reason {
             status["reason"] = json!(reason);
+        }
+        // For the health card: the Buwiz server it signs in with, and (once
+        // the database is open) the taxpayers and the sending queue.
+        if let Ok((origin, _)) = signin::configured_origins() {
+            status["server"] = json!(origin.trim_start_matches("https://").trim_start_matches("http://"));
+        }
+        if signed_in {
+            let _ = database(|db| {
+                let queue = db.list_all_queued_submissions().map_err(|error| error.to_string())?;
+                status["queue"] = json!({
+                    "waiting": queue.iter().filter(|row| row.status == bir_core::forms::FilingStatus::Queued).count(),
+                    "sent_unconfirmed": queue.iter().filter(|row| row.status == bir_core::forms::FilingStatus::Submitted).count(),
+                });
+                status["taxpayers"] = json!(resolve::branches(db, None)?.iter().filter(|branch| branch.is_head_office).count());
+                Ok(())
+            });
         }
         tool_text(&status)
     }
@@ -971,7 +1065,18 @@ fn now(result: Value) -> Reply {
 fn is_app_only(name: &str) -> bool {
     app_tools::function_of(name).is_some()
         || [app_tools::TICKET_SUBJECT, app_tools::TICKET_ISSUE, app_tools::UPLOAD, app_tools::ALLOW_SEND].contains(&name)
+        || CARD_TOOLS.contains(&name)
 }
+
+/// The answer cards' own app-only tools (spec 9.8): the buttons the user
+/// presses that change something, and the import card's read.
+const CARD_TOOLS: [&str; 5] = [
+    answers::ADD_TAXPAYER,
+    answers::CANCEL_SEND,
+    return_view::ATTACH,
+    return_view::IMPORT,
+    return_view::IMPORT_FILL,
+];
 
 /// This server's tools that change nothing (`readOnlyHint`, P8): the ones a
 /// routine or resolve call may run, and the reads a routine may name.
@@ -996,7 +1101,11 @@ const READ_ONLY: [&str; 17] = [
 ];
 
 fn read_only(name: &str) -> bool {
-    READ_ONLY.contains(&name) || answers::TOOLS.contains(&name) || app_tools::read_only(name)
+    READ_ONLY.contains(&name)
+        || answers::TOOLS.contains(&name)
+        || lookup::TOOLS.contains(&name)
+        || [return_view::RETURN, return_view::IMPORT, calendar::DEADLINE].contains(&name)
+        || app_tools::read_only(name)
 }
 
 /// The manifest's `resources/list` entry.
@@ -1059,7 +1168,7 @@ fn tool_list() -> Value {
     let mut list = vec![
         json!({
             "name": BIR_STATUS,
-            "description": "Report this BIR host: headless mode, whether it uses a test or the REAL taxpayer database, and whether this computer is signed in to Buwiz.",
+            "description": "Report this BIR host: headless mode, whether it uses a test or the REAL taxpayer database, whether this computer is signed in to Buwiz (and the Buwiz server), how many taxpayers are saved and what waits in the sending queue. Use it for \"is BIR working?\".",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         }),
         json!({
@@ -1205,7 +1314,48 @@ fn tool_list() -> Value {
     }));
     list.extend(taxpayer::descriptors());
     list.extend(answers::descriptors());
+    list.extend(lookup::descriptors());
+    list.push(return_view::descriptor());
+    list.push(json!({
+        "name": calendar::DEADLINE,
+        "description": "One deadline explained: the date BIR's rule gives (`official`), the date that applies (`applies`) and why they differ (a weekend or holiday moves it to the next working day; a BIR advisory or the user moved it), and a move saved in BIR (`saved_move`). Use it for \"is the 2551Q deadline really Sunday?\". `form`, `period` (default the latest one closed), `tin` (a taxpayer's ticket, for their own rules). Rox shows a card where the user can move it or put it back.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "form": { "type": "string", "description": "Form code, e.g. 2551Q." },
+                "period": { "type": "string", "description": "e.g. 2026-Q3, 2026-09." },
+                "tin": { "type": "string", "description": "The taxpayer's ticket." }
+            },
+            "required": ["form"],
+            "additionalProperties": false
+        },
+    }));
     list.extend(app_tools::descriptors());
+    list.extend(return_view::app_descriptors());
+    list.push(json!({
+        "name": answers::ADD_TAXPAYER,
+        "description": "Mini apps only (refused for the assistant): the quickadd card's Save, adding the taxpayer whose TIN the card's ticket names.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "ticket": { "type": "string" }, "name": { "type": "string" }, "type": { "type": "string" }, "rdo": { "type": "string" } },
+            "required": ["ticket", "name"],
+            "additionalProperties": false
+        },
+        "annotations": { "readOnlyHint": false },
+        "_meta": { "rox/audience": ["app"] },
+    }));
+    list.push(json!({
+        "name": answers::CANCEL_SEND,
+        "description": "Mini apps only (refused for the assistant): the outbox card's Cancel, taking a queued return out of the sending queue before it is sent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "ticket": { "type": "string" } },
+            "required": ["ticket"],
+            "additionalProperties": false
+        },
+        "annotations": { "readOnlyHint": false },
+        "_meta": { "rox/audience": ["app"] },
+    }));
     for name in v1::RESERVED {
         list.push(json!({
             "name": name,
@@ -1339,11 +1489,12 @@ fn payment_tools() -> Vec<Value> {
         }),
         json!({
             "name": BIR_PAYMENTS_LIST,
-            "description": "The recorded payments, newest first: channel, reference, amount, fee, total, paid_at, proof (email, file or none), source, token. `tin` (a 9-digit root covers every branch), `form` and `period` (needs `form`) narrow the list.",
+            "description": "The recorded payments, newest first: channel, reference, amount, fee, total, paid_at, proof (email, file or none), source, token; and their sums (`totals`: all, by form, by month). `tin` (a 9-digit root covers every branch), `year` (paid in that year), `form` and `period` (needs `form`) narrow the list. For \"how much tax has she paid this year?\" pass `tin` and `year`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tin": { "type": "string", "description": "Taxpayer TIN." },
+                    "year": { "type": "integer", "description": "Paid in this year, e.g. 2026." },
                     "form": { "type": "string", "description": "Form code." },
                     "period": { "type": "string", "description": "The return's period." }
                 },
@@ -1486,7 +1637,8 @@ mod tests {
             let name = tool["name"].as_str().unwrap();
             let app_only = is_app_only(name);
             assert_eq!(app_only, name.starts_with(app_tools::PREFIX) && name != BIR_APP_OPEN
-                || name == app_tools::TICKET_SUBJECT || name == app_tools::TICKET_ISSUE || name == app_tools::ALLOW_SEND, "{name}");
+                || name == app_tools::TICKET_SUBJECT || name == app_tools::TICKET_ISSUE || name == app_tools::ALLOW_SEND
+                || name.starts_with("bir_card_"), "{name}");
             let audience = &tool["_meta"]["rox/audience"];
             if app_only {
                 assert_eq!(audience, &json!(["app"]), "{name}");
@@ -1859,6 +2011,133 @@ mod tests {
         // apps get no card: they draw their own
         let from_app = call_as(&mut server, app("card-forms"), "bir_profile_forms", json!({"ticket": ticket}));
         assert!(from_app["_meta"]["rox/open"].is_null());
+    }
+
+    /// One card answer's checks (spec 9.8): inline, the expected card, a
+    /// snapshot under 8 KiB that names no TIN, and a Refresh its app may run.
+    fn assert_card(result: &Value, tool: &str, card: &str) {
+        assert_eq!(result["isError"], false, "{tool}: {result}");
+        let open = &result["_meta"]["rox/open"];
+        assert_eq!(open["placement"], "inline", "{tool}: {open}");
+        assert_eq!(open["props"]["card"], card, "{tool}: {open}");
+        let app = open["app"].as_str().unwrap();
+        let (_, kind_app, small) = cards::KINDS.iter().find(|(id, ..)| *id == card).unwrap();
+        assert_eq!(app, *kind_app, "{card}");
+        assert_eq!(open["size"] == "small", *small, "{card}");
+        assert!(open["props"]["snapshot"].is_object(), "{tool}");
+        assert_eq!(open["props"]["as_of"].is_i64(), !open["props"]["tool"].is_null(), "{tool}");
+        let granted = v1_manifest::served_app(&Catalog::Embedded, app).unwrap().unwrap();
+        if !open["props"]["tool"].is_null() {
+            assert!(
+                granted["permissions"]["tools"].as_array().unwrap().iter().any(|t| *t == open["props"]["tool"]),
+                "{app} cannot refresh with {}", open["props"]["tool"]
+            );
+        }
+        let props = open["props"].to_string();
+        assert!(props.len() <= 8 * 1024, "{tool}: {} bytes", props.len());
+        for tin in [ROOT, "123-456-788"] {
+            assert!(!props.contains(tin) && !result["content"].to_string().contains(tin), "{tool} names the TIN: {props}");
+        }
+        if let Some(chips) = result["_meta"]["rox/suggest"].as_array() {
+            assert!(chips.len() <= 3);
+        }
+    }
+
+    #[test]
+    fn wave_two_answers_carry_their_cards() {
+        use base64::Engine as _;
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Dela Cruz Jane");
+        crate::bir_module::with_database(|db| {
+            db.set_yearly_forms(TIN, 2026, &["2551Q", "1601C", "0619E"]).map_err(|error| HostError::new(error.to_string()))?;
+            Ok(())
+        })
+        .unwrap();
+        let ticket = ticket_of(ROOT);
+        // a saved 2551Q Q3 draft to read
+        let opened = call_as(&mut server, agent(), "bir_form_open", json!({"tin": ticket, "code": "2551Q-2026-Q3"}));
+        assert_eq!(opened["isError"], false, "{opened}");
+        let cases = [
+            ("bir_taxpayer", json!({"ticket": ticket, "view": "branches"}), "branches"),
+            ("bir_quick_add", json!({"name": "Reyes Mario", "tin": "111-222-333", "rdo": "40"}), "quickadd"),
+            ("bir_board", json!({"view": "on_time"}), "streak"),
+            ("bir_board", json!({"form": "0619E", "period": "2026-10"}), "bulk"),
+            ("bir_form_info", json!({"form": "2551Q", "ticket": ticket}), "explain"),
+            (BIR_DRAFTS_LIST, json!({"tin": ticket}), "drafts"),
+            ("bir_outbox", json!({}), "outbox"),
+            (BIR_CALENDAR_GET, json!({"from": "2026-11-01", "to": "2026-11-07"}), "week"),
+            ("bir_penalty", json!({"form": "0619E", "due": "2026-09-10", "tax_due": 100}), "penalty"),
+            ("bir_deadline", json!({"form": "2551Q", "period": "2026-Q3", "tin": ticket}), "shift"),
+            ("bir_return", json!({"ticket": ticket, "form": "2551Q", "period": "2026-Q3", "view": "summary"}), "summary"),
+            ("bir_return", json!({"ticket": ticket, "form": "2551Q", "period": "2026-Q3", "view": "paper"}), "preview"),
+            ("bir_return", json!({"ticket": ticket, "form": "2551Q", "period": "2026-Q3", "view": "amend"}), "amend"),
+            ("bir_return", json!({"ticket": ticket, "form": "1701Q", "period": "2026-Q2", "view": "attachments"}), "attach"),
+            ("bir_return", json!({"ticket": ticket, "form": "2551Q", "period": "2026-Q3", "view": "import"}), "import"),
+            (BIR_PAYMENTS_LIST, json!({"tin": ticket, "year": 2026}), "paidsum"),
+            (BIR_STATUS, json!({}), "health"),
+            ("bir_lookup", json!({"atc": "WC158"}), "atc"),
+            ("bir_lookup", json!({"rdo": "040"}), "rdo"),
+            ("bir_lookup", json!({"amount": "186,000", "rate": 3}), "rate"),
+            ("bir_digest", json!({}), "digest"),
+            (BIR_CALENDAR_SET, json!({"tin": ticket, "reminder_days": [3, 1]}), "remind"),
+        ];
+        for (tool, args, card) in cases {
+            let result = call_as(&mut server, agent(), tool, args.clone());
+            assert_card(&result, tool, card);
+        }
+        // the rate card's sum and the ATC's forms come from BIR's tables
+        let rate = call_as(&mut server, agent(), "bir_lookup", json!({"amount": 186000, "rate": "3%"}));
+        assert_eq!(rate["structuredContent"]["result"]["tax"], 5580.0, "{rate}");
+        let deadline = call_as(&mut server, agent(), "bir_deadline", json!({"form": "2551Q", "period": "2026-Q3"}));
+        let deadline = &deadline["structuredContent"]["result"];
+        assert_eq!((deadline["official"].as_str(), deadline["applies"].as_str()), (Some("2026-10-25"), Some("2026-10-26")), "{deadline}");
+        assert_eq!(deadline["kind"], "weekend");
+        // a ticket BIR did not issue
+        let forged = format!("tkt_{}", "0".repeat(26));
+        for (tool, args) in [
+            ("bir_taxpayer", json!({"ticket": forged, "view": "branches"})),
+            ("bir_form_info", json!({"form": "2551Q", "ticket": forged})),
+            ("bir_return", json!({"ticket": forged, "view": "summary"})),
+            ("bir_deadline", json!({"form": "2551Q", "tin": forged})),
+            (BIR_PAYMENTS_LIST, json!({"tin": forged})),
+        ] {
+            let refused = call_as(&mut server, agent(), tool, args);
+            assert_eq!(refused["isError"], true, "{tool}: {refused}");
+        }
+        // the quickadd card saves nothing; its Save is the user's, through
+        // an app-only tool the assistant cannot call
+        let offered = call_as(&mut server, agent(), "bir_quick_add", json!({"name": "Reyes Mario", "tin": "111222333"}));
+        let new_ticket = offered["structuredContent"]["result"]["ticket"].as_str().unwrap().to_string();
+        let save = json!({"ticket": new_ticket, "name": "Reyes Mario", "type": "individual", "rdo": "040"});
+        for tool in [answers::ADD_TAXPAYER, answers::CANCEL_SEND, return_view::ATTACH, return_view::IMPORT, return_view::IMPORT_FILL] {
+            let refused = call_as(&mut server, agent(), tool, save.clone());
+            assert_eq!(refused["isError"], true, "{tool} answers the assistant: {refused}");
+        }
+        let still = call_as(&mut server, agent(), "bir_find_taxpayer", json!({"name": "reyes mario"}));
+        assert_eq!(still["structuredContent"]["result"]["matches"], json!([]), "{still}");
+        let added = call_as(&mut server, app("card-people"), answers::ADD_TAXPAYER, save);
+        assert_eq!(added["isError"], false, "{added}");
+        let found = call_as(&mut server, agent(), "bir_find_taxpayer", json!({"name": "reyes mario"}));
+        assert_eq!(found["structuredContent"]["result"]["matches"].as_array().unwrap().len(), 1, "{found}");
+        // the import card: read a sheet, then Fill puts the total on the draft
+        let return_ticket = crate::bir_module::with_database(|db| {
+            tickets::issue(db, &tickets::Subject::Return(format!("{ROOT}/2551Q-2026-Q3"))).map_err(HostError::new)
+        })
+        .unwrap();
+        let csv = "Date,Amount\n2026-07-02,\"100,000.00\"\n2026-08-15,86000\n2026-08-16,\"12,4OO.00\"\n2026-10-02,500\n";
+        let up = call_as(&mut server, app("card-return"), app_tools::UPLOAD, json!({"data": base64::engine::general_purpose::STANDARD.encode(csv)}));
+        let upload = up["structuredContent"]["result"]["upload"].as_str().map(str::to_string).unwrap_or_else(|| {
+            serde_json::from_str::<Value>(up["content"][0]["text"].as_str().unwrap()).unwrap()["upload"].as_str().unwrap().to_string()
+        });
+        let read = call_as(&mut server, app("card-return"), return_view::IMPORT, json!({"ticket": return_ticket, "upload": upload, "name": "sales-q3.csv"}));
+        assert_eq!(read["isError"], false, "{read}");
+        let read = &read["structuredContent"]["result"];
+        assert_eq!((read["rows"].as_u64(), read["total"].as_f64()), (Some(2), Some(186000.0)), "{read}");
+        assert_eq!(read["skipped"].as_array().unwrap().len(), 2, "{read}");
+        let fill = call_as(&mut server, app("card-return"), return_view::IMPORT_FILL, json!({"ticket": return_ticket, "import": read["import"]}));
+        assert_eq!(fill["isError"], false, "{fill}");
+        let paper = call_as(&mut server, agent(), "bir_return", json!({"ticket": return_ticket, "view": "paper"}));
+        assert!(paper["structuredContent"]["result"].to_string().contains("186,000") || paper["structuredContent"]["result"].to_string().contains("186000"), "{paper}");
     }
 
     #[test]

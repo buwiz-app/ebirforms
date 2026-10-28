@@ -29,6 +29,9 @@ use serde_json::{Map, Value, json};
 
 use super::resolve::{self, Branch};
 
+/// The assistant's deadline tool (the shift card).
+pub(crate) const DEADLINE: &str = "bir_deadline";
+
 /// Settings key of the sync record: event key -> what was last reported.
 const SYNC_KEY: &str = "mini_app.calendar.sync";
 /// Settings key prefix of a branch's reminder days.
@@ -150,7 +153,7 @@ impl Event {
 }
 
 /// The period a calendar rule's deadline is for.
-fn period_of(period: &DeadlinePeriod) -> Option<TaxPeriod> {
+pub(crate) fn period_of(period: &DeadlinePeriod) -> Option<TaxPeriod> {
     Some(match *period {
         DeadlinePeriod::Monthly {
             taxable_year,
@@ -171,7 +174,7 @@ fn period_of(period: &DeadlinePeriod) -> Option<TaxPeriod> {
     })
 }
 
-fn status_word(status: Option<&FilingStatus>) -> &'static str {
+pub(crate) fn status_word(status: Option<&FilingStatus>) -> &'static str {
     match status {
         None => "not_started",
         Some(FilingStatus::Draft) => "draft",
@@ -207,6 +210,78 @@ pub(crate) fn due_date(db: &Database, tin: &str, code: &str, period: TaxPeriod) 
         .into_iter()
         .find(|deadline| period_of(&deadline.period) == Some(period))
         .and_then(|deadline| deadline.final_deadline_date())
+}
+
+/// `bir_deadline {form, period?, ticket?}`: one deadline as BIR's rule
+/// dates it, the date that applies and why they differ (a weekend or
+/// holiday, or a deadline moved by an advisory or by the user), and whether
+/// a move saved in BIR can be taken back. `ticket` (already a TIN here)
+/// applies that taxpayer's overrides.
+pub(crate) fn deadline(db: &Database, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
+    check_keys(arguments, &["form", "period", "tin"])?;
+    let raw = text(arguments, "form")?.ok_or("`form` is required: a form code such as 2551Q")?;
+    let code = taxform::form_code_of(raw).ok_or_else(|| format!("`form` `{raw}` is not a BIR form code"))?;
+    let period = match text(arguments, "period")? {
+        Some(raw) => taxform::parse(raw, today)
+            .period
+            .ok_or_else(|| format!("`period` `{raw}` is not a period (e.g. 2026-Q3, 2026-09, 2025)"))?
+            .for_form(code, today)
+            .map_err(|ask| ask.to_string())?,
+        None => DeadlineResolver::last_closed_period(code, today)
+            .and_then(|period| period_of(&period))
+            .ok_or_else(|| format!("{code} is filed as needed: it has no fixed deadline"))?,
+    };
+    let year = i32::from(period.year());
+    let find = |overrides: &[bir_core::calendar_rules::DeadlineOverride]| {
+        DeadlineResolver::deadlines_for_forms(&[code.to_string()], year, overrides)
+            .into_iter()
+            .find(|deadline| period_of(&deadline.period) == Some(period))
+    };
+    let rule = find(&[]).ok_or_else(|| format!("BIR's calendar has no {code} deadline for {}", period.label()))?;
+    let global = db.get_deadline_overrides();
+    let overrides = match text(arguments, "tin")?.and_then(|tin| db.get_profile(tin).ok().flatten()) {
+        Some(profile) => bir_core::forms::event_trigger::periodic_overrides(&global, &profile, Some(period.year())),
+        None => global.clone(),
+    };
+    let applied = find(&overrides).unwrap_or_else(|| rule.clone());
+    let official = rule.original_deadline_date().ok_or("this deadline is not dated")?;
+    let weekday_moved = rule.final_deadline_date().unwrap_or(official);
+    let applies = applied.final_deadline_date().unwrap_or(weekday_moved);
+    use bir_core::calendar_rules::DeadlineStatus;
+    let (kind, reason) = match applied.status {
+        DeadlineStatus::Normal => ("normal", String::new()),
+        DeadlineStatus::WeekendAdjusted => ("weekend", "It falls on a weekend, so BIR's rule moves it to the next working day.".to_string()),
+        DeadlineStatus::HolidayAdjusted | DeadlineStatus::NonWorkingDayAdjusted => (
+            "holiday",
+            format!("It falls on a holiday or non-working day{}.", applied.source_reference.as_deref().map(|r| format!(" ({r})")).unwrap_or_default()),
+        ),
+        DeadlineStatus::Extended => (
+            "moved",
+            format!("Moved{}.", applied.source_reference.as_deref().filter(|r| !r.is_empty()).map(|r| format!(": {r}")).unwrap_or_default()),
+        ),
+        DeadlineStatus::EventBased => ("event", String::new()),
+    };
+    // A move saved in BIR (not a shipped holiday) is one the user can undo.
+    let saved = global.iter().find(|entry| {
+        !entry.id.starts_with(bir_core::official_holidays::SEED_ID_PREFIX)
+            && entry.affected_form_codes.iter().any(|form| taxform::form_code_of(form) == Some(code))
+            && (entry.original_deadline == official || entry.original_deadline == weekday_moved)
+    });
+    let day = |date: NaiveDate| date.format("%Y-%m-%d").to_string();
+    Ok(json!({
+        "form": code,
+        "form_name": rule.form_name,
+        "period": period.canonical(),
+        "label": format!("{code} · {}", period.label()),
+        "official": day(official),
+        "official_weekday": official.format("%A").to_string(),
+        "applies": day(applies),
+        "applies_weekday": applies.format("%A").to_string(),
+        "kind": kind,
+        "reason": reason,
+        "saved_move": saved.map(|entry| json!({ "to": day(entry.adjusted_deadline), "reason": entry.source_reference })),
+        "note": "official: the date BIR's rule gives; applies: the date that counts after weekends, holidays and moved deadlines. A saved move is undone with bir_deadline_override_remove (form, period), only when the user asks.",
+    }))
 }
 
 /// Every dated return of `branch`'s Forms Sets due between `from` and `to`.

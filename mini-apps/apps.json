@@ -22,27 +22,42 @@
   {
     "id": "card-people",
     "title": "BIR answer: taxpayers",
-    "description": "Answer cards about taxpayers: which one you mean, one taxpayer at a glance, and how every taxpayer stands."
+    "description": "Answer cards about taxpayers: which one you mean, one taxpayer at a glance, their branches, adding a new one, how every taxpayer stands and who files on time."
   },
   {
     "id": "card-forms",
     "title": "BIR answer: returns",
-    "description": "Answer cards about returns: a taxpayer's forms, the year at a glance, one return's progress, what blocks it, and the approval before sending."
+    "description": "Answer cards about returns: a taxpayer's forms, the year at a glance, one return's progress, what blocks it, what a form is, unfinished drafts, the sending queue and one form across every taxpayer."
   },
   {
     "id": "card-dates",
     "title": "BIR answer: deadlines",
-    "description": "Answer cards about deadlines: what's due next, a month, late returns and a penalty estimate."
+    "description": "Answer cards about deadlines: what's due next, this week, a month, late returns and a penalty estimate."
   },
   {
     "id": "card-money",
     "title": "BIR answer: payments",
-    "description": "Answer cards about payments: returns not paid, a payment email matched to its return, marking a return paid, and BIR's confirmations."
+    "description": "Answer cards about payments: returns not paid, what was paid this year, and what the routines recorded overnight."
   },
   {
     "id": "card-help",
     "title": "BIR answer: help",
-    "description": "Answer cards that get you unstuck, like signing in to Buwiz again."
+    "description": "Answer cards about BIR itself: whether sign-in, the database and the sending queue are working."
+  },
+  {
+    "id": "card-return",
+    "title": "BIR answer: one return",
+    "description": "Answer cards about one return: its computation, a paper view of the filled form, what an amendment changes, its attachments, and filling it from a spreadsheet."
+  },
+  {
+    "id": "card-quick",
+    "title": "BIR answer: quick actions",
+    "description": "Short answer cards with one decision: allow a send, a payment found in mail, marking a return paid, BIR's confirmation, signing in, a moved deadline and reminders."
+  },
+  {
+    "id": "card-calc",
+    "title": "BIR answer: lookups",
+    "description": "Answer cards for quick lookups: an ATC, an RDO, and a tax on an amount."
   },
   {
     "id": "register",

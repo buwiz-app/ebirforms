@@ -169,7 +169,7 @@ mod tests {
                 result["content"][0]["text"],
                 "You're signed out of Buwiz, so BIR can't read this computer's taxpayers and their returns. Open Buwiz Sign-in to sign in again."
             );
-            assert_eq!(result["_meta"]["rox/open"]["app"], "card-help");
+            assert_eq!(result["_meta"]["rox/open"]["app"], "card-quick");
             assert_eq!(result["_meta"]["rox/open"]["props"]["card"], "signin");
             assert_eq!(result["_meta"]["rox/open"]["placement"], "inline");
         }

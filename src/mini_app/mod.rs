@@ -25,6 +25,7 @@ mod bridge;
 mod calendar;
 mod cards;
 mod confirm;
+mod lookup;
 mod payments;
 mod plain;
 #[cfg(test)]
@@ -32,6 +33,7 @@ mod demo_tests;
 #[cfg(test)]
 mod e2e_seed;
 mod resolve;
+mod return_view;
 mod scope;
 mod server;
 mod taxpayer;

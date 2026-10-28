@@ -1,8 +1,8 @@
-// BIR answer cards about payments and confirmations (spec 9.8): returns not
-// paid (unpaid), a payment email matched to its return (match), a payment
-// to confirm (markpaid) and BIR's confirmation email (confirm). Every
-// button that records something runs only when the user presses it
-// (`rox.call`, origin app); the assistant can't press them.
+// BIR answer cards about payments (spec 9.8): returns not paid (unpaid),
+// what was paid this year (paidsum) and what the routines recorded since
+// yesterday (digest). Every button that records something runs only when
+// the user presses it (`rox.call`, origin app); the assistant can't press
+// them. (match, markpaid and confirm moved to the short card-quick app.)
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { rox } from "rox";
@@ -142,7 +142,10 @@ function Btn(p: { label: string; onPress: () => void; primary?: boolean; disable
   );
 }
 
-/** The card's frame: title and subtitle, the body, and its notes. */
+/** The card's frame: title and subtitle, the body, and its notes. The
+ *  body takes the height it needs (it scrolls only past the card's), so
+ *  the buttons sit right under it and a short card leaves no gap above
+ *  them; each card app declares a height that fits its cards. */
 function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
   return (
     <View style={{ flex: 1 }} class={`${K.pane} p-3 gap-2`}>
@@ -165,7 +168,7 @@ function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
       <If when={Boolean(note())}>
         <Text class={`text-xs ${K.ok}`}>{note()}</Text>
       </If>
-      <Scroll class="flex-1">
+      <Scroll style={{ flexGrow: 0, flexShrink: 1 }}>
         <View class="gap-1.5">{p.children}</View>
       </Scroll>
       <If when={Boolean(p.foot)}>
@@ -195,6 +198,18 @@ function Row(p: { title: string; sub?: string; right?: any; onPress?: () => void
   );
 }
 
+/** A label and its value on one line (a fact sheet). */
+function Fact(p: { label: string; value: any; strong?: boolean }) {
+  return (
+    <View class="flex-row items-start gap-3 py-0.5">
+      <Text class={`text-xs ${K.fg2}`} style={{ width: 110 }}>{p.label}</Text>
+      <View class="flex-1">
+        {typeof p.value === "string" || typeof p.value === "number" ? <Text class={`text-sm ${p.strong ? "font-semibold" : ""} ${K.fg}`}>{String(p.value)}</Text> : p.value}
+      </View>
+    </View>
+  );
+}
+
 function Empty(p: { text: string }) {
   return <Text class={`text-sm py-3 ${K.fg2}`}>{p.text}</Text>;
 }
@@ -216,8 +231,11 @@ function Field(p: { label: string; value: string; onChange: (v: string) => void;
 }
 
 /** A picked receipt sent in chunks for bir_mark_paid's `proof_upload`. */
-async function uploadReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await rox.pickFile({ extensions: [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"], multiple: false });
+const uploadReceipt = () => uploadFile([".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]);
+
+/** A picked file sent in chunks (bir_app_upload), for a tool's `upload`. */
+async function uploadFile(extensions: string[]): Promise<{ upload: string; name: string } | null> {
+  const files = await rox.pickFile({ extensions, multiple: false });
   const file = files[0];
   if (!file) return null;
   const bytes = await file.read();
@@ -290,70 +308,68 @@ function Unpaid() {
   );
 }
 
-// ------------------------------------------------------------ match
+// ------------------------------------------------------------ paidsum
 
-function Match() {
+function PaidSum() {
   const s = () => snap() || {};
-  const record = () => (s().record || {}) as Record<string, unknown>;
-  const state = signal<"" | "recorded" | "no">("");
-  const yes = () => act(() => rox.call("bir_record_payment", record() as any)).then(() => !failure() && state.set("recorded"));
+  const t = () => s().totals || {};
+  const months = () => {
+    const year = String(s().year || new Date().getFullYear());
+    const by = new Map(((t().by_month || []) as any[]).map((m) => [String(m.month), Number(m.amount) || 0]));
+    return MONTHS.map((name, i) => ({ name, amount: by.get(`${year}-${String(i + 1).padStart(2, "0")}`) || 0 }));
+  };
+  const top = () => Math.max(1, ...months().map((m) => m.amount));
   return (
-    <Card title={`${s().channel || "Payment"} · ${peso(s().total ?? s().amount)}`} sub={`${s().form || ""} · ${s().period || ""}${s().reference ? ` · ref ${s().reference}` : ""}`}
-      foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={() => state.set("no")} />] : undefined}>
-      <Row title="Paid on" sub={String(s().paid_at || "").replace("T", " ").slice(0, 16)} />
-      <Row title="Tax and fee" sub={`${peso(s().amount)} tax · ${peso(s().fee)} fee`} />
-      <If when={state() !== ""}>
-        <Text class={`text-sm ${state() === "recorded" ? K.ok : K.fg2}`}>{state() === "recorded" ? "Recorded on the return." : "Left alone. Tell the assistant which return it pays."}</Text>
-      </If>
-    </Card>
-  );
-}
-
-// ------------------------------------------------------------ markpaid
-
-function MarkPaid() {
-  const s = () => snap() || {};
-  const ret = () => ({ tin: String(s().tin || ""), form: String(s().form || ""), period: String(s().period || "") });
-  const d = { paid_at: signal(today()), amount: signal(""), channel: signal(""), reference: signal("") };
-  const saved = signal(false);
-  const save = () =>
-    act(() => pay(ret(), { paid_at: d.paid_at(), amount: d.amount(), channel: d.channel(), reference: d.reference() }), "Payment recorded.").then(
-      () => !failure() && saved.set(true),
-    );
-  return (
-    <Card title={`Mark ${ret().form} ${ret().period} paid`} sub="Nothing is recorded until you press Save."
-      foot={saved() ? undefined : [<Btn label="Save" primary onPress={save} />, <Btn label="Attach receipt" onPress={() => act(() => attachProof(ret()), "Receipt attached.")} />]}>
-      <View class="flex-row flex-wrap gap-2">
-        <Field label="Paid on" value={d.paid_at()} onChange={(v) => d.paid_at.set(v)} width={120} />
-        <Field label="Amount (₱)" value={d.amount()} onChange={(v) => d.amount.set(v)} placeholder="1,629.94" width={120} />
-        <Field label="Paid through" value={d.channel()} onChange={(v) => d.channel.set(v)} placeholder="MyEG, GCash, a bank" width={150} />
-        <Field label="Reference" value={d.reference()} onChange={(v) => d.reference.set(v)} placeholder="optional" width={140} />
+    <Card title={`Paid${s().year ? ` in ${s().year}` : ""}${s().taxpayer ? ` · ${s().taxpayer}` : ""}`} sub={`${t().count || 0} payment${t().count === 1 ? "" : "s"} recorded`}>
+      <Text class={`text-2xl font-semibold ${K.fg}`}>{peso(t().all || 0)}</Text>
+      <View class="flex-row items-end gap-1 py-1" style={{ height: 52 }}>
+        <Each of={months()}>
+          {(m) => (
+            <View class="items-center gap-0.5">
+              <View class={`rounded-sm ${m().amount ? K.accentBg : "bg-black/5 dark:bg-white/10"}`} style={{ width: 22, height: Math.max(3, Math.round((m().amount / top()) * 36)) }} />
+              <Text class={`text-xs text-center ${K.fg3}`} style={{ width: 22 }}>{m().name.slice(0, 1)}</Text>
+            </View>
+          )}
+        </Each>
       </View>
-      <Text class={`text-xs ${K.fg3}`}>Leave the amount and channel empty to mark it paid without details.</Text>
+      <Each of={((t().by_form || []) as any[]).slice(0, 5)} key={(f) => f.form}>
+        {(f) => <Fact label={String(f().form)} value={peso(f().amount)} />}
+      </Each>
     </Card>
   );
 }
 
-// ------------------------------------------------------------ confirm
+// ------------------------------------------------------------ digest
 
-function Confirm() {
+function Digest() {
   const s = () => snap() || {};
-  const retry = () => act(async () => snap.set(answerOf(await rox.call("bir_confirm_filing", (P.args || {}) as any))));
+  const items = () => (s().items || []) as any[];
+  const done = signal<string[]>([]);
+  const chip: Record<string, [string, Tone]> = { confirmed: ["Confirmed", "ok"], payment: ["Paid", "info"], waiting: ["Look", "warn"] };
+  const markPaid = (r: any) =>
+    act(() => rox.call("bir_mark_paid", { tin: r.tin, form: r.form, period: r.period }), `${r.label} marked paid.`).then(() => !failure() && done.set([...done(), r.key]));
   return (
-    <Card title={s().confirmed ? "Confirmed by BIR" : "Not confirmed yet"} sub={`${s().form || ""} · ${s().period || ""}${s().taxpayer ? ` · ${s().taxpayer}` : ""}`}
-      foot={[
-        <If when={!s().confirmed && /submitted|sent|filed/i.test(String(s().status || ""))}><Btn label="Mark confirmed" primary onPress={retry} /></If>,
-        <If when={Boolean(s().token)}><Btn label="Open the return" onPress={() => openApp("forms", ticketOf(s().token))} /></If>,
-      ]}>
-      <Row title="Status" sub={String(s().status || "")} right={<Chip text={s().confirmed ? "Confirmed" : "Waiting"} tone={s().confirmed ? "ok" : "warn"} />} />
-      <If when={Boolean(s().reason)}><Text class={`text-sm ${K.fg2}`}>{String(s().reason || "")}</Text></If>
+    <Card title="Since yesterday" sub={`${items().length} thing${items().length === 1 ? "" : "s"} since ${shortDate(s().since)}`}>
+      <If when={items().length === 0}><Empty text="Nothing new: no confirmations or payments were recorded." /></If>
+      <Each of={items()} key={(r) => `${r.kind}/${r.key}`}>
+        {(r) => (
+          <Row title={`${r().label} · ${r().taxpayer}`} sub={done().includes(r().key) ? "Marked paid" : String(r().detail || "")}
+            right={
+              <View class="flex-row gap-2 items-center">
+                <Chip text={(chip[r().kind] || ["", "plain"])[0]} tone={(chip[r().kind] || ["", "plain"])[1]} />
+                {r().kind === "confirmed" && !r().paid && !done().includes(r().key)
+                  ? <Btn label="Mark paid" primary onPress={() => markPaid(r())} />
+                  : <Btn label="Open" onPress={() => openApp("forms", r().key)} />}
+              </View>
+            } />
+        )}
+      </Each>
     </Card>
   );
 }
 
 export default function MoneyCard() {
-  if (P.card === "match") return <Match />;
-  if (P.card === "markpaid") return <MarkPaid />;
-  if (P.card === "confirm") return <Confirm />;
+  if (P.card === "paidsum") return <PaidSum />;
+  if (P.card === "digest") return <Digest />;
   return <Unpaid />;
 }

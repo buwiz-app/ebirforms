@@ -27,7 +27,7 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.2.0";
+pub(crate) const VERSION: &str = "2.3.0";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -39,6 +39,8 @@ pub(crate) const TICKET_PROP: &str = "ticket";
 /// A receipt scan or photo, up to 25 MB (`bir_mark_paid`'s own limit).
 const RECEIPT_EXTENSIONS: [&str; 7] = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
 const RECEIPT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// A return's attachment (a scan or a PDF) or a sales sheet to import.
+const RETURN_FILE_EXTENSIONS: [&str; 7] = [".pdf", ".png", ".jpg", ".jpeg", ".heic", ".xlsx", ".csv"];
 
 /// `sha256:<hex>` of an app source as served.
 pub(crate) fn fingerprint(source: &str) -> String {
@@ -70,7 +72,7 @@ fn card(id: &'static str, permissions: Value) -> AppSpec {
     AppSpec {
         id,
         placement: &["inline"],
-        inline: Some(super::super::cards::inline()),
+        inline: Some(super::super::cards::inline(id)),
         props: json!({
             "type": "object",
             "properties": {
@@ -166,12 +168,15 @@ fn specs() -> Vec<AppSpec> {
             }),
         },
         card("card-people", json!({
-            "tools": ["bir_find_taxpayer", "bir_taxpayer", "bir_board"],
+            "tools": ["bir_find_taxpayer", "bir_taxpayer", "bir_board", "bir_quick_add", "bir_card_add_taxpayer"],
             "open": { "apps": ["tax-profile", "forms", "register", "deadlines"] },
             "attach": ["taxprofile"],
         })),
         card("card-forms", json!({
-            "tools": ["bir_profile_forms", "bir_returns_list", "bir_form_needs_you", "bir_card_allow_send", "bir_mark_paid"],
+            "tools": [
+                "bir_profile_forms", "bir_returns_list", "bir_form_needs_you", "bir_mark_paid", "bir_form_info",
+                "bir_drafts_list", "bir_outbox", "bir_card_cancel_send", "bir_board",
+            ],
             "open": { "apps": ["forms", "calendar", "tax-profile"] },
         })),
         card("card-dates", json!({
@@ -179,13 +184,29 @@ fn specs() -> Vec<AppSpec> {
             "open": { "apps": ["forms", "calendar"] },
         })),
         card("card-money", json!({
-            "tools": ["bir_unpaid", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_confirm_filing"],
+            "tools": ["bir_unpaid", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_payments_list", "bir_digest"],
             "open": { "apps": ["forms"] },
             "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
         })),
         card("card-help", json!({
             "tools": ["bir_status"],
-            "open": { "apps": ["register"] },
+            "open": { "apps": ["register", "forms"] },
+        })),
+        card("card-return", json!({
+            "tools": ["bir_return", "bir_app_upload", "bir_card_attach", "bir_card_import", "bir_card_import_fill"],
+            "open": { "apps": ["forms"] },
+            "pick_file": { "extensions": RETURN_FILE_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
+        })),
+        card("card-quick", json!({
+            "tools": [
+                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_confirm_filing",
+                "bir_status", "bir_deadline", "bir_deadline_override_set", "bir_deadline_override_remove", "bir_calendar_set",
+            ],
+            "open": { "apps": ["forms", "register", "calendar"] },
+            "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
+        })),
+        card("card-calc", json!({
+            "tools": ["bir_lookup"],
         })),
         AppSpec {
             id: "register",
@@ -436,7 +457,10 @@ mod tests {
         let ids: Vec<&str> = apps.iter().map(|app| app["id"].as_str().unwrap()).collect();
         assert_eq!(
             ids,
-            ["forms", "tax-profile", "calendar", "deadlines", "card-people", "card-forms", "card-dates", "card-money", "card-help", "register"]
+            [
+                "forms", "tax-profile", "calendar", "deadlines", "card-people", "card-forms", "card-dates", "card-money", "card-help",
+                "card-return", "card-quick", "card-calc", "register"
+            ]
         );
         for app in apps {
             let id = app["id"].as_str().unwrap();

@@ -10,20 +10,32 @@
 //! TIN in the props into a ticket and [`fit`]s them under the 8 KiB props
 //! limit.
 //!
-//! The cards are five apps, each drawing a family of cards so the
-//! manifest stays within its 16 apps and each app's permissions stay
-//! narrow: `card-people` (who), `card-forms` (returns), `card-dates`
-//! (deadlines and penalties), `card-money` (payments and confirmations)
-//! and `card-help` (sign-in). `props.card` says which card.
+//! The cards are eight apps, each drawing a family of cards of about one
+//! height (an app declares one inline size), so the manifest stays within
+//! its 16 apps and each app's permissions stay narrow: `card-people` (who),
+//! `card-forms` (returns and the queue), `card-dates` (deadlines and
+//! penalties), `card-money` (payments), `card-help` (BIR's health),
+//! `card-return` (one return read closely), `card-quick` (short cards with
+//! one decision) and `card-calc` (lookups). `props.card` says which card.
 
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
-use super::{answers, taxpayer};
+use super::{answers, calendar, lookup, return_view, taxpayer};
 
-/// The inline size every card app declares (the host clamps it).
-pub(crate) fn inline() -> Value {
-    json!({ "width": 560, "height": 380, "min_width": 320, "resizable": true })
+/// The inline size a card app declares (the host clamps it): each app
+/// draws cards of about one height, so its card fits what it shows. The
+/// short ones (a question, a few facts and a button or two) are their own
+/// apps rather than leaving a tall frame half empty.
+pub(crate) fn inline(app: &str) -> Value {
+    let height = match app {
+        "card-quick" => 230,
+        "card-calc" => 215,
+        "card-help" => 240,
+        "card-money" | "card-people" | "card-forms" => 320,
+        _ => 360,
+    };
+    json!({ "width": 560, "height": height, "min_width": 320, "resizable": true })
 }
 
 /// Card kinds: id, app, small.
@@ -31,25 +43,47 @@ pub(crate) const KINDS: &[(&str, &str, bool)] = &[
     ("pick", "card-people", false),
     ("taxpayer", "card-people", false),
     ("board", "card-people", false),
+    ("branches", "card-people", false),
+    ("quickadd", "card-people", false),
+    ("streak", "card-people", false),
     ("forms", "card-forms", false),
     ("matrix", "card-forms", false),
     ("status", "card-forms", false),
     ("needs", "card-forms", false),
-    ("approve", "card-forms", true),
+    ("explain", "card-forms", false),
+    ("drafts", "card-forms", false),
+    ("outbox", "card-forms", false),
+    ("bulk", "card-forms", false),
     ("dues", "card-dates", false),
     ("month", "card-dates", false),
     ("overdue", "card-dates", false),
     ("penalty", "card-dates", false),
+    ("week", "card-dates", false),
     ("unpaid", "card-money", false),
-    ("match", "card-money", true),
-    ("markpaid", "card-money", true),
-    ("confirm", "card-money", true),
-    ("signin", "card-help", true),
+    ("paidsum", "card-money", false),
+    ("digest", "card-money", false),
+    ("health", "card-help", false),
+    ("summary", "card-return", false),
+    ("preview", "card-return", false),
+    ("amend", "card-return", false),
+    ("attach", "card-return", false),
+    ("import", "card-return", false),
+    ("approve", "card-quick", true),
+    ("match", "card-quick", true),
+    ("markpaid", "card-quick", true),
+    ("confirm", "card-quick", true),
+    ("signin", "card-quick", true),
+    ("shift", "card-quick", true),
+    ("remind", "card-quick", true),
+    ("atc", "card-calc", true),
+    ("rdo", "card-calc", true),
+    ("rate", "card-calc", true),
 ];
 
 /// The card apps, in manifest order.
 #[cfg(test)]
-pub(crate) const APPS: [&str; 5] = ["card-people", "card-forms", "card-dates", "card-money", "card-help"];
+pub(crate) const APPS: [&str; 8] =
+    ["card-people", "card-forms", "card-dates", "card-money", "card-help", "card-return", "card-quick", "card-calc"];
 
 /// Props a card's snapshot may fill: a little under 8 KiB, so the host's
 /// limit holds after encoding.
@@ -113,6 +147,12 @@ fn ticket_arg(args: &Map<String, Value>) -> Option<String> {
     args.get("ticket").or_else(|| args.get("tin")).and_then(Value::as_str).map(str::to_string)
 }
 
+/// Whether `from`..`to` is a week or less.
+fn one_week(args: &Map<String, Value>) -> bool {
+    let day = |key: &str| args.get(key).and_then(Value::as_str).and_then(|raw| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok());
+    matches!((day("from"), day("to")), (Some(from), Some(to)) if (to - from).num_days() <= 7)
+}
+
 /// Whether `from`..`to` is one calendar month.
 fn one_month(args: &Map<String, Value>) -> bool {
     let day = |key: &str| args.get(key).and_then(Value::as_str).and_then(|raw| NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok());
@@ -153,6 +193,10 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
                 ("What's unpaid?", format!("What hasn't {} paid?", token(&ticket))),
             ],
         ),
+        "bir_calendar_get" if one_week(args) => (
+            open("week", "This week", ticket.as_deref(), data.clone(), tool, args_value),
+            vec![("Anything late?", "Is anything late?".into())],
+        ),
         "bir_calendar_get" if one_month(args) => (
             open("month", "Calendar", ticket.as_deref(), data.clone(), tool, args_value),
             vec![("Anything late?", "Is anything late?".into())],
@@ -163,6 +207,10 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
                 ("Anything late?", "Is anything late?".into()),
                 ("How are my clients?", "How are my clients doing?".into()),
             ],
+        ),
+        answers::TAXPAYER if data["view"] == "branches" => (
+            open("branches", &who, ticket.as_deref(), data.clone(), tool, args_value),
+            vec![("Who is this?", format!("Who is {}?", token(&ticket)))],
         ),
         answers::TAXPAYER => (
             open("taxpayer", &who, ticket.as_deref(), data.clone(), tool, args_value),
@@ -187,9 +235,80 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             open("unpaid", "Not paid yet", ticket.as_deref(), data.clone(), tool, args_value),
             vec![],
         ),
+        answers::BOARD if data["mode"] == "bulk" => (
+            open("bulk", data["label"].as_str().unwrap_or("One form, every taxpayer"), None, data.clone(), tool, args_value),
+            vec![],
+        ),
+        answers::BOARD if data["mode"] == "on_time" => (
+            open("streak", &format!("On time · {}", data["year"]), None, data.clone(), tool, args_value),
+            vec![("Who is late now?", "Which returns are late?".into())],
+        ),
         answers::BOARD => (
             open("board", "My taxpayers", None, data.clone(), tool, args_value),
             vec![("Only the late ones", "Which returns are late?".into())],
+        ),
+        answers::QUICK_ADD => (
+            open("quickadd", if data["exists"] == true { "Already in BIR" } else { "New taxpayer" }, None, data.clone(), "", args_value),
+            vec![],
+        ),
+        answers::OUTBOX => (
+            open("outbox", "Sending queue", None, data.clone(), tool, args_value),
+            vec![],
+        ),
+        answers::DIGEST => (
+            open("digest", "Since yesterday", None, data.clone(), tool, args_value),
+            vec![("What's unpaid?", "What haven't I paid?".into())],
+        ),
+        lookup::FORM_INFO => (
+            open("explain", &format!("{} · {}", data["form"].as_str().unwrap_or(""), data["title"].as_str().unwrap_or("")), ticket.as_deref(), data.clone(), tool, args_value),
+            vec![("What's due for it?", format!("When is {} due?", data["form"].as_str().unwrap_or("it")))],
+        ),
+        lookup::LOOKUP => {
+            let (card, title) = match data["mode"].as_str() {
+                Some("atc") => ("atc", format!("ATC {}", data["code"].as_str().unwrap_or(""))),
+                Some("rdo") => ("rdo", "Revenue district office".to_string()),
+                _ => ("rate", "Quick tax".to_string()),
+            };
+            (open(card, &title, None, data.clone(), tool, args_value), vec![])
+        }
+        calendar::DEADLINE => (
+            open("shift", &format!("{} deadline", data["label"].as_str().unwrap_or("The")), ticket.as_deref(), data.clone(), tool, args_value),
+            vec![],
+        ),
+        return_view::RETURN => {
+            let card = match data["view"].as_str() {
+                Some("paper") => "preview",
+                Some("amend") => "amend",
+                Some("attachments") => "attach",
+                Some("import") => "import",
+                _ => "summary",
+            };
+            let label = data["label"].as_str().unwrap_or("Return");
+            let chips = match card {
+                "summary" => vec![("Show the form", format!("Show me {label} before I send it"))],
+                "preview" => vec![("What does it need?", format!("Can I send {label}?"))],
+                _ => vec![],
+            };
+            // The import card changes the draft only when the user presses
+            // Fill; it has nothing to refresh.
+            let read = if card == "import" { "" } else { tool };
+            (open(card, &format!("{label} · {}", data["taxpayer"].as_str().unwrap_or("")), ticket.as_deref(), data.clone(), read, args_value), chips)
+        }
+        "bir_drafts_list" => (
+            open("drafts", "Drafts", ticket.as_deref(), data.clone(), tool, args_value),
+            vec![],
+        ),
+        "bir_payments_list" if !args.contains_key("form") => (
+            open("paidsum", &format!("Paid{}", data["year"].as_str().map(|year| format!(" in {year}")).unwrap_or_default()), ticket.as_deref(), data.clone(), tool, args_value),
+            vec![("What's unpaid?", format!("What hasn't {} paid?", token(&ticket)))],
+        ),
+        "bir_status" => (
+            open("health", "BIR", None, data.clone(), tool, args_value),
+            vec![],
+        ),
+        "bir_calendar_set" if args.contains_key("reminder_days") => (
+            open("remind", &format!("Reminders · {}", data["taxpayer"].as_str().unwrap_or("")), ticket.as_deref(), data.clone(), "", args_value),
+            vec![],
         ),
         "bir_form_needs_you" if data["ok"] != true => (
             open("needs", &format!("What {} needs", data["form"].as_str().unwrap_or("the return")), None, data.clone(), tool, args_value),

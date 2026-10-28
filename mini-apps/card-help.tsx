@@ -1,6 +1,7 @@
-// BIR answer cards that help the user out of a problem (spec 9.8): signed
-// out of Buwiz (signin), in place of the cryptic error, with the one button
-// that fixes it.
+// BIR answer cards about BIR itself (spec 9.8): whether it is working
+// (health: Buwiz sign-in, the database, the sending queue, each with its
+// fix). The sign-in card moved to card-quick; an older chat's signin card
+// still draws here.
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { rox } from "rox";
@@ -140,7 +141,10 @@ function Btn(p: { label: string; onPress: () => void; primary?: boolean; disable
   );
 }
 
-/** The card's frame: title and subtitle, the body, and its notes. */
+/** The card's frame: title and subtitle, the body, and its notes. The
+ *  body takes the height it needs (it scrolls only past the card's), so
+ *  the buttons sit right under it and a short card leaves no gap above
+ *  them; each card app declares a height that fits its cards. */
 function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
   return (
     <View style={{ flex: 1 }} class={`${K.pane} p-3 gap-2`}>
@@ -163,7 +167,7 @@ function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
       <If when={Boolean(note())}>
         <Text class={`text-xs ${K.ok}`}>{note()}</Text>
       </If>
-      <Scroll class="flex-1">
+      <Scroll style={{ flexGrow: 0, flexShrink: 1 }}>
         <View class="gap-1.5">{p.children}</View>
       </Scroll>
       <If when={Boolean(p.foot)}>
@@ -193,6 +197,18 @@ function Row(p: { title: string; sub?: string; right?: any; onPress?: () => void
   );
 }
 
+/** A label and its value on one line (a fact sheet). */
+function Fact(p: { label: string; value: any; strong?: boolean }) {
+  return (
+    <View class="flex-row items-start gap-3 py-0.5">
+      <Text class={`text-xs ${K.fg2}`} style={{ width: 110 }}>{p.label}</Text>
+      <View class="flex-1">
+        {typeof p.value === "string" || typeof p.value === "number" ? <Text class={`text-sm ${p.strong ? "font-semibold" : ""} ${K.fg}`}>{String(p.value)}</Text> : p.value}
+      </View>
+    </View>
+  );
+}
+
 function Empty(p: { text: string }) {
   return <Text class={`text-sm py-3 ${K.fg2}`}>{p.text}</Text>;
 }
@@ -214,8 +230,11 @@ function Field(p: { label: string; value: string; onChange: (v: string) => void;
 }
 
 /** A picked receipt sent in chunks for bir_mark_paid's `proof_upload`. */
-async function uploadReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await rox.pickFile({ extensions: [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"], multiple: false });
+const uploadReceipt = () => uploadFile([".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]);
+
+/** A picked file sent in chunks (bir_app_upload), for a tool's `upload`. */
+async function uploadFile(extensions: string[]): Promise<{ upload: string; name: string } | null> {
+  const files = await rox.pickFile({ extensions, multiple: false });
   const file = files[0];
   if (!file) return null;
   const bytes = await file.read();
@@ -261,7 +280,34 @@ function SignIn() {
   );
 }
 
+// ------------------------------------------------------------ health
+
+function Health() {
+  const s = () => snap() || {};
+  const queue = () => s().queue || {};
+  const real = () => String(s().database || "").toLowerCase().includes("real");
+  return (
+    <Card title={s().signed_in ? "BIR is working" : "BIR needs you"} sub={`BIR ${s().plugin_version || s().version || ""} on this computer`}>
+      <Row
+        title="Buwiz sign-in"
+        sub={s().signed_in ? `Signed in${s().server ? ` · ${s().server}` : ""}` : String(s().reason || "Signed out")}
+        right={s().signed_in ? <Chip text="Signed in" tone="ok" /> : <Btn label="Sign in" primary onPress={() => openApp("register")} />}
+      />
+      <Row
+        title="Taxpayer database"
+        sub={`${real() ? "Your real taxpayers" : `The ${String(s().database || "test")} database`}${s().taxpayers != null ? ` · ${s().taxpayers} taxpayer${s().taxpayers === 1 ? "" : "s"}` : ""}`}
+        right={<Chip text={s().signed_in ? "Open" : "Locked"} tone={s().signed_in ? "ok" : "warn"} />}
+      />
+      <Row
+        title="Sending queue"
+        sub={s().signed_in ? `${queue().waiting || 0} waiting to send · ${queue().sent_unconfirmed || 0} sent, waiting for BIR` : "Opens after sign-in"}
+        right={(queue().waiting || 0) > 0 ? <Btn label="Open Forms" onPress={() => openApp("forms")} /> : <Chip text={s().signed_in ? "Clear" : "—"} tone={s().signed_in ? "ok" : "plain"} />}
+      />
+    </Card>
+  );
+}
+
 export default function HelpCard() {
-  // signin is the only card here so far; later help cards switch on P.card
-  return P.card === "signin" || !P.card ? <SignIn /> : <SignIn />;
+  if (P.card === "signin") return <SignIn />;
+  return <Health />;
 }

@@ -1,9 +1,12 @@
 // BIR answer cards about taxpayers (spec 9.8): which taxpayer (pick), one
-// taxpayer at a glance (taxpayer) and every taxpayer's standing (board).
+// taxpayer at a glance (taxpayer), their branches (branches), a new
+// taxpayer to add (quickadd), every taxpayer's standing (board) and who
+// files on time (streak).
 // The assistant's tool picks the card and hands it the answer as
 // `props.snapshot`; Refresh re-reads it through the same tool. Buttons
 // open BIR's full apps on the taxpayer's ticket or attach the taxpayer to
-// the chat (Rox asks first); nothing here changes BIR's data.
+// the chat (Rox asks first). The only change, quickadd's Save, runs when
+// the user presses it.
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { rox } from "rox";
@@ -143,7 +146,10 @@ function Btn(p: { label: string; onPress: () => void; primary?: boolean; disable
   );
 }
 
-/** The card's frame: title and subtitle, the body, and its notes. */
+/** The card's frame: title and subtitle, the body, and its notes. The
+ *  body takes the height it needs (it scrolls only past the card's), so
+ *  the buttons sit right under it and a short card leaves no gap above
+ *  them; each card app declares a height that fits its cards. */
 function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
   return (
     <View style={{ flex: 1 }} class={`${K.pane} p-3 gap-2`}>
@@ -166,7 +172,7 @@ function Card(p: { title: string; sub?: string; children?: any; foot?: any }) {
       <If when={Boolean(note())}>
         <Text class={`text-xs ${K.ok}`}>{note()}</Text>
       </If>
-      <Scroll class="flex-1">
+      <Scroll style={{ flexGrow: 0, flexShrink: 1 }}>
         <View class="gap-1.5">{p.children}</View>
       </Scroll>
       <If when={Boolean(p.foot)}>
@@ -196,6 +202,18 @@ function Row(p: { title: string; sub?: string; right?: any; onPress?: () => void
   );
 }
 
+/** A label and its value on one line (a fact sheet). */
+function Fact(p: { label: string; value: any; strong?: boolean }) {
+  return (
+    <View class="flex-row items-start gap-3 py-0.5">
+      <Text class={`text-xs ${K.fg2}`} style={{ width: 110 }}>{p.label}</Text>
+      <View class="flex-1">
+        {typeof p.value === "string" || typeof p.value === "number" ? <Text class={`text-sm ${p.strong ? "font-semibold" : ""} ${K.fg}`}>{String(p.value)}</Text> : p.value}
+      </View>
+    </View>
+  );
+}
+
 function Empty(p: { text: string }) {
   return <Text class={`text-sm py-3 ${K.fg2}`}>{p.text}</Text>;
 }
@@ -217,8 +235,11 @@ function Field(p: { label: string; value: string; onChange: (v: string) => void;
 }
 
 /** A picked receipt sent in chunks for bir_mark_paid's `proof_upload`. */
-async function uploadReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await rox.pickFile({ extensions: [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"], multiple: false });
+const uploadReceipt = () => uploadFile([".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"]);
+
+/** A picked file sent in chunks (bir_app_upload), for a tool's `upload`. */
+async function uploadFile(extensions: string[]): Promise<{ upload: string; name: string } | null> {
+  const files = await rox.pickFile({ extensions, multiple: false });
   const file = files[0];
   if (!file) return null;
   const bytes = await file.read();
@@ -335,8 +356,120 @@ function Board() {
   );
 }
 
+// ------------------------------------------------------------ branches
+
+function Branches() {
+  const s = () => snap() || {};
+  const branches = () => (s().branches || []) as any[];
+  return (
+    <Card title={s().name || "Branches"} sub={`${branches().length} ${branches().length === 1 ? "office" : "offices"}${s().rdo ? ` · head office RDO ${s().rdo}` : ""}`}
+      foot={[<Btn label="Open profile" onPress={() => openApp("tax-profile", P.ticket)} />, <Btn label="Add a branch" onPress={() => openApp("tax-profile", P.ticket)} />]}>
+      <Each of={branches()} key={(b) => b.code}>
+        {(b) => (
+          <Row
+            title={`${b().code} · ${b().head_office ? "Head office" : b().name || "Branch"}`}
+            sub={[b().rdo ? `RDO ${b().rdo}` : "", b().address].filter(Boolean).join(" · ")}
+            right={
+              <View class="flex-row gap-2 items-center">
+                <If when={Boolean(b().head_office)}><Chip text="Head office" tone="info" /></If>
+                <Btn label="Open" onPress={() => openApp("tax-profile", b().tin)} />
+              </View>
+            }
+          />
+        )}
+      </Each>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------ quickadd
+
+const TYPES = ["Individual", "Corporation", "Partnership", "Cooperative", "Estate", "Trust"];
+
+function QuickAdd() {
+  const s = () => snap() || {};
+  const name = signal(String(snap()?.name || ""));
+  const kind = signal(String(snap()?.type || "Individual"));
+  const rdo = signal(String(snap()?.rdo || ""));
+  const saved = signal(false);
+  const save = () =>
+    act(() => rox.call("bir_card_add_taxpayer", { ticket: s().ticket, name: name().trim(), type: kind().toLowerCase(), ...(rdo().trim() ? { rdo: rdo().trim() } : {}) } as any), `${name().trim()} is saved in BIR.`).then(
+      () => !failure() && saved.set(true),
+    );
+  if (s().exists)
+    return (
+      <Card title="Already in BIR" sub={String(s().name || "")} foot={<Btn label="Open profile" primary onPress={() => openApp("tax-profile", s().tin_root)} />}>
+        <Text class={`text-sm ${K.fg}`}>That TIN is saved already, so nothing was added.</Text>
+      </Card>
+    );
+  return (
+    <Card
+      title="New taxpayer"
+      sub={s().ticket ? `TIN ending ${s().tin_end || ""} · nothing is saved until you press Save` : "No TIN given: add them in the full form"}
+      foot={
+        saved()
+          ? [<Btn label="Open profile" primary onPress={() => openApp("tax-profile", s().ticket)} />]
+          : [
+              <Btn label="Save taxpayer" primary disabled={!s().ticket || !name().trim()} onPress={save} />,
+              <Btn label="Full form" onPress={() => openApp("register")} />,
+            ]
+      }
+    >
+      <View class="flex-row flex-wrap gap-2">
+        <Field label="Registered name" value={name()} onChange={(v) => name.set(v)} width={260} />
+        <Field label="RDO" value={rdo()} onChange={(v) => rdo.set(v)} placeholder="040" width={80} />
+      </View>
+      <View class="flex-row flex-wrap gap-1.5 pt-1">
+        <Each of={TYPES}>
+          {(t) => (
+            <View onPress={() => kind.set(t())} focusable accessibilityRole="button" accessibilityLabel={t()}
+              class={`rounded-full px-2.5 py-0.5 ${kind() === t() ? K.accentBg : "bg-black/5 dark:bg-white/10"}`}>
+              <Text class={`text-xs ${kind() === t() ? "text-white dark:text-white" : K.fg}`}>{t()}</Text>
+            </View>
+          )}
+        </Each>
+      </View>
+      <If when={Boolean(s().rdo_office)}><Text class={`text-xs ${K.fg2}`}>{`RDO ${s().rdo}: ${s().rdo_office}`}</Text></If>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------ streak
+
+function Streak() {
+  const s = () => snap() || {};
+  const rows = () => (s().taxpayers || []) as any[];
+  const tone = (rate: number): Tone => (rate >= 90 ? "ok" : rate >= 70 ? "warn" : "danger");
+  const fill = (rate: number) => (rate >= 90 ? "bg-[#2e7d32] dark:bg-[#81c784]" : rate >= 70 ? "bg-[#b26a00] dark:bg-[#ffb74d]" : "bg-[#c62828] dark:bg-[#ff6b6b]");
+  return (
+    <Card title={`On time · ${s().year || ""}`} sub="Returns due so far this year, filed by their due date">
+      <If when={rows().length === 0}><Empty text="No returns were due yet this year." /></If>
+      <Each of={rows()} key={(t) => t.tin_root}>
+        {(t) => (
+          <Row
+            title={t().name}
+            sub={`${t().on_time} of ${t().due} on time${t().late ? ` · ${t().late} late` : ""}`}
+            onPress={() => openApp("deadlines", t().tin_root)}
+            right={
+              <View class="flex-row items-center gap-2">
+                <View class="rounded-full bg-black/10 dark:bg-white/10" style={{ width: 90, height: 6 }}>
+                  <View class={`rounded-full ${fill(t().rate ?? 0)}`} style={{ width: Math.max(4, Math.round(((t().rate ?? 0) / 100) * 90)), height: 6 }} />
+                </View>
+                <Chip text={t().rate == null ? "—" : `${t().rate}%`} tone={t().rate == null ? "plain" : tone(t().rate)} />
+              </View>
+            }
+          />
+        )}
+      </Each>
+    </Card>
+  );
+}
+
 export default function PeopleCard() {
   if (P.card === "pick") return <Pick />;
   if (P.card === "board") return <Board />;
+  if (P.card === "branches") return <Branches />;
+  if (P.card === "quickadd") return <QuickAdd />;
+  if (P.card === "streak") return <Streak />;
   return <Taxpayer />;
 }
