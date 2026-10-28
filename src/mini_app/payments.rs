@@ -168,6 +168,45 @@ pub(crate) fn recorded_for(db: &Database, tin: &str, form: &str, period: &str) -
     })
 }
 
+/// `bir_card_remove_payment {tin, form, period, id}`: payment `id` taken off
+/// that return (recorded on the wrong return, or a test), with the receipt
+/// file BIR kept for it. Only the user removes one, in an app.
+pub(crate) fn remove(
+    db: &Database,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+    receipts: &Path,
+) -> Result<Value, String> {
+    check_keys(arguments, &["tin", "form", "period", "id"])?;
+    let target = target(
+        db,
+        text(arguments, "tin")?,
+        text(arguments, "form")?,
+        text(arguments, "period")?,
+        today,
+    )?;
+    let id = text(arguments, "id")?;
+    let key = target.key();
+    let mut payments = load(db)?;
+    let at = payments
+        .iter()
+        .position(|payment| payment.id == id && payment.key == key)
+        .ok_or_else(|| format!("no payment `{id}` is recorded on {}", target.label()))?;
+    let removed = payments.remove(at);
+    save(db, &payments)?;
+    if removed.proof.kind == "file"
+        && let Some(path) = removed.proof.path.as_deref().map(Path::new)
+        && path.starts_with(receipts)
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(json!({
+        "removed": true,
+        "payment": removed.json(Some(&target.branch.name)),
+        "return": target.filing(db, today),
+    }))
+}
+
 fn save(db: &Database, payments: &[Payment]) -> Result<(), String> {
     let json = serde_json::to_string(payments).map_err(|error| error.to_string())?;
     db.set_setting(PAYMENTS_KEY, &json)
@@ -1555,6 +1594,15 @@ mod tests {
 
         let listed = list(&db, &args(json!({"tin": ROOT, "form": "2551Q", "period": "Q3 2026"})), today()).unwrap();
         assert_eq!(listed["payments"].as_array().unwrap().len(), 1, "{listed}");
+        // Remove takes it off only the return it is on
+        let id = listed["payments"][0]["id"].as_str().unwrap().to_string();
+        let other = json!({"tin": ROOT, "form": "2551Q", "period": "2026-Q2", "id": id});
+        assert!(remove(&db, &args(other), today(), &receipts).is_err());
+        let gone = remove(&db, &args(json!({"tin": ROOT, "form": "2551Q", "period": "2026-Q3", "id": id})), today(), &receipts).unwrap();
+        assert_eq!(gone["removed"], true);
+        assert!(!recorded_for(&db, TIN, "2551Q", "2026-Q3"));
+        // recorded again, as the routine would after a remove
+        assert_eq!(record(&db, &call, today(), &receipts).unwrap()["already"], false);
         let none = list(&db, &args(json!({"tin": ROOT, "form": "1601C"})), today()).unwrap();
         assert_eq!(none["payments"], json!([]));
         assert!(list(&db, &args(json!({"period": "2026-Q3"})), today()).is_err());

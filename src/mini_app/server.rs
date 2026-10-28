@@ -105,6 +105,8 @@ const BIR_MARK_PAID: &str = "bir_mark_paid";
 const BIR_PAYMENTS_LIST: &str = "bir_payments_list";
 const BIR_FILING_RECORD: &str = "bir_filing_record";
 const BIR_PAYMENT_RECEIPT: &str = "bir_payment_receipt";
+/// Forms' Remove on a payment (app-only): a payment on the wrong return.
+const BIR_CARD_REMOVE_PAYMENT: &str = "bir_card_remove_payment";
 /// The payment and filing-record tools, as many as `tool_list` adds.
 #[cfg(test)]
 const PAYMENT_TOOLS: [&str; 7] = [
@@ -568,6 +570,9 @@ impl MiniServer {
             app_tools::ALLOW_SEND => now(call_result(self.allow_send_once(arguments))),
             answers::ADD_TAXPAYER => now(call_result(database(|db| answers::add_taxpayer(db, arguments)))),
             answers::CANCEL_SEND => now(call_result(self.cancel_send(arguments))),
+            BIR_CARD_REMOVE_PAYMENT => now(call_result(database(|db| {
+                payments::remove(db, arguments, today, &payments::receipts_dir())
+            }))),
             return_view::ATTACH => now(call_result(self.card_attach(arguments))),
             return_view::IMPORT => now(call_result(self.card_import(arguments))),
             return_view::IMPORT_FILL => now(call_result(self.card_import_fill(arguments))),
@@ -1148,9 +1153,10 @@ fn is_app_only(name: &str) -> bool {
 
 /// The answer cards' own app-only tools (spec 9.8): the buttons the user
 /// presses that change something, and the import card's read.
-const CARD_TOOLS: [&str; 5] = [
+const CARD_TOOLS: [&str; 6] = [
     answers::ADD_TAXPAYER,
     answers::CANCEL_SEND,
+    BIR_CARD_REMOVE_PAYMENT,
     return_view::ATTACH,
     return_view::IMPORT,
     return_view::IMPORT_FILL,
@@ -1418,6 +1424,21 @@ fn tool_list() -> Value {
             "type": "object",
             "properties": { "ticket": { "type": "string" }, "name": { "type": "string" }, "type": { "type": "string" }, "rdo": { "type": "string" } },
             "required": ["ticket", "name"],
+            "additionalProperties": false
+        },
+        "annotations": { "readOnlyHint": false },
+        "_meta": { "rox/audience": ["app"] },
+    }));
+    list.push(json!({
+        "name": BIR_CARD_REMOVE_PAYMENT,
+        "description": "Mini apps only (refused for the assistant): Forms' Remove on a recorded payment, taking it off the return (recorded on the wrong return).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tin": { "type": "string" }, "form": { "type": "string" },
+                "period": { "type": "string" }, "id": { "type": "string" }
+            },
+            "required": ["tin", "form", "period", "id"],
             "additionalProperties": false
         },
         "annotations": { "readOnlyHint": false },
@@ -2399,7 +2420,7 @@ mod tests {
         let offered = call_as(&mut server, agent(), "bir_quick_add", json!({"name": "Reyes Mario", "tin": "111222333"}));
         let new_ticket = offered["structuredContent"]["result"]["ticket"].as_str().unwrap().to_string();
         let save = json!({"ticket": new_ticket, "name": "Reyes Mario", "type": "individual", "rdo": "040"});
-        for tool in [answers::ADD_TAXPAYER, answers::CANCEL_SEND, return_view::ATTACH, return_view::IMPORT, return_view::IMPORT_FILL] {
+        for tool in [answers::ADD_TAXPAYER, answers::CANCEL_SEND, BIR_CARD_REMOVE_PAYMENT, return_view::ATTACH, return_view::IMPORT, return_view::IMPORT_FILL] {
             let refused = call_as(&mut server, agent(), tool, save.clone());
             assert_eq!(refused["isError"], true, "{tool} answers the assistant: {refused}");
         }

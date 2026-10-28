@@ -138,6 +138,7 @@ const H = {
       tin: BRANCH, form, period, channel: d.channel, amount: d.amount, paid_at: d.paid_at,
       ...(d.reference.trim() ? { reference: d.reference.trim() } : {}),
     }),
+  removePayment: (form: string, period: string, id: string) => tool<{ removed: boolean }>("bir_card_remove_payment", { tin: BRANCH, form, period, id }),
   markPaid: (form: string, period: string, proof?: { upload: string; name: string }) =>
     tool<{ payment: Payment }>("bir_mark_paid", proof ? { tin: BRANCH, form, period, proof_upload: proof.upload, proof_name: proof.name } : { tin: BRANCH, form, period }),
 };
@@ -214,6 +215,8 @@ interface FS extends Opts {
   paymentsError?: string | null;
   /** The Mark as paid details, while the user types them. */
   payForm?: { paid_at: string; amount: string; channel: string; reference: string } | null;
+  /** The payment whose Remove asks "Remove this payment?" */
+  removeAsk?: string | null;
   paying: boolean;
 }
 
@@ -1659,6 +1662,21 @@ async function readPayments(s: FS, token: number) {
   bump();
 }
 
+/** Remove a payment recorded on this return (on the wrong return, or a test), after the row's own confirm. */
+async function removePayment(s: FS, id: string) {
+  s.paying = true;
+  bump();
+  try {
+    await H.removePayment(s.code, tokenPeriod(s), id);
+    toast("Payment removed.", "success");
+  } catch (e) {
+    toast(errText(e), "danger");
+  }
+  s.removeAsk = null;
+  s.paying = false;
+  await readPayments(s, T);
+}
+
 /** The return's receipt (every payment and its proof: the receipt file or the payment email) in Rox's document
  *  view, made by BIR (`bir_payment_receipt`). */
 function viewReceipt(s: FS) {
@@ -2923,7 +2941,18 @@ function PaymentPanel(p: { s: FS }) {
           <Chip text={(rev(), paid() ? "Paid" : "Payment not recorded")} tone={(rev(), paid() ? "success" : "warning")} />
           <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
             <If when={paid()} else={<Text class={`text-xs ${C.fg2}`}>{(rev(), s.paymentsError || "No payment recorded yet. The BIR payments routine records payment emails; you can also mark it paid here.")}</Text>}>
-              <Each of={(rev(), s.payments || [])} key={(x) => x.id}>{(x) => <Text class={`text-xs ${C.fg2}`}>{paymentLine(x())}</Text>}</Each>
+              <Each of={(rev(), s.payments || [])} key={(x) => x.id}>
+                {(x) => (
+                  <View class="flex-row flex-wrap items-center gap-2">
+                    <Text class={`text-xs ${C.fg2}`}>{paymentLine(x())}</Text>
+                    <If when={(rev(), s.removeAsk === x().id)} else={<Btn label="Remove" variant="ghost" onPress={() => { s.removeAsk = x().id; bump(); }} disabled={(rev(), s.paying)} />}>
+                      <Text class={`text-xs ${C.fg}`}>Remove this payment?</Text>
+                      <Btn label="Remove" variant="danger" onPress={() => removePayment(s, x().id)} disabled={(rev(), s.paying)} />
+                      <Btn label="Cancel" variant="ghost" onPress={() => { s.removeAsk = null; bump(); }} />
+                    </If>
+                  </View>
+                )}
+              </Each>
             </If>
           </View>
           <If when={!paid() && !form()}>
