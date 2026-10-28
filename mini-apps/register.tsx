@@ -32,7 +32,8 @@ const typed = (e: { value: string } | string): string => (typeof e === "string" 
 // (`bir_app_<fn>`). Onboarding names no taxpayer yet, so it holds no ticket.
 
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const r: any = await rox.call(`bir_app_${fn}`, { args });
+  // a signed call carries whole numbers only: the arguments go as JSON text
+  const r: any = await rox.call(`bir_app_${fn}`, { args_json: JSON.stringify(args) });
   return r?.result as T;
 }
 

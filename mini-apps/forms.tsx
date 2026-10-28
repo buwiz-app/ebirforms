@@ -47,7 +47,8 @@ let BRANCH = "";
 
 /** One BIR host function through its named tool (`bir_app_<fn>`), held to the branch's ticket. */
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const r: any = await rox.call(`bir_app_${fn}`, BRANCH ? { args, ticket: BRANCH } : { args });
+  // a signed call carries whole numbers only: the arguments (a draft's amounts) go as JSON text
+  const r: any = await rox.call(`bir_app_${fn}`, BRANCH ? { args_json: JSON.stringify(args), ticket: BRANCH } : { args_json: JSON.stringify(args) });
   return r?.result as T;
 }
 

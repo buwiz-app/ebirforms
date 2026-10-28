@@ -48,7 +48,8 @@ if (TICKET)
     .catch(() => {});
 
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
-  const r: any = await rox.call(`bir_app_${fn}`, TICKET ? { args, ticket: TICKET } : { args });
+  // a signed call carries whole numbers only: the arguments go as JSON text
+  const r: any = await rox.call(`bir_app_${fn}`, TICKET ? { args_json: JSON.stringify(args), ticket: TICKET } : { args_json: JSON.stringify(args) });
   return r?.result as T;
 }
 

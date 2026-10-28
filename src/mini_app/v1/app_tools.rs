@@ -272,6 +272,7 @@ pub(crate) fn descriptors() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "args": { "type": "array", "description": "The function's positional arguments." },
+                    "args_json": { "type": "string", "description": "The same arguments as JSON text, for values a signed call can't carry (amounts with cents)." },
                     "ticket": { "type": "string", "description": "The ticket the app was opened with." }
                 },
                 "additionalProperties": false
@@ -292,13 +293,21 @@ pub(crate) struct HostRequest {
 
 pub(crate) fn request(tool: &str, arguments: &Map<String, Value>) -> Result<HostRequest, String> {
     let function = function_of(tool).ok_or_else(|| format!("unknown tool: {tool}"))?;
-    if let Some(key) = arguments.keys().find(|key| !["args", "ticket"].contains(&key.as_str())) {
-        return Err(format!("unknown argument `{key}` (allowed: args, ticket)"));
+    if let Some(key) = arguments.keys().find(|key| !["args", "args_json", "ticket"].contains(&key.as_str())) {
+        return Err(format!("unknown argument `{key}` (allowed: args, args_json, ticket)"));
     }
-    let args = match arguments.get("args") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(args)) => args.clone(),
-        Some(_) => return Err("`args` must be an array of the function's arguments".into()),
+    // A signed call carries whole numbers only: a draft's amounts (629.94,
+    // a 0.03 rate) come as `args_json`, the arguments as JSON text.
+    let args = match (arguments.get("args"), arguments.get("args_json")) {
+        (Some(args), Some(_)) if !args.is_null() => return Err("send `args` or `args_json`, not both".into()),
+        (_, Some(Value::String(text))) => match serde_json::from_str(text) {
+            Ok(Value::Array(args)) => args,
+            _ => return Err("`args_json` must be a JSON array of the function's arguments".into()),
+        },
+        (_, Some(_)) => return Err("`args_json` must be a JSON array, as text".into()),
+        (None | Some(Value::Null), None) => Vec::new(),
+        (Some(Value::Array(args)), None) => args.clone(),
+        (Some(_), None) => return Err("`args` must be an array of the function's arguments".into()),
     };
     let ticket = match arguments.get("ticket") {
         None | Some(Value::Null) => None,
@@ -652,6 +661,19 @@ mod tests {
         assert_eq!(function_of("bir_app_list_taxpayers"), Some("list_taxpayers"));
         assert_eq!(function_of("bir_app_set_setting"), None);
         assert!(read_only("bir_app_list_taxpayers") && !read_only("bir_app_delete_taxpayer"));
+    }
+
+    #[test]
+    fn a_draft_with_cents_comes_as_json_text() {
+        let args = |v: Value| v.as_object().unwrap().clone();
+        let tool = "bir_app_screen_form_save";
+        let sent = request(tool, &args(json!({"args_json": "[\"2551Q\", {\"tax_rate\": 0.03, \"amount\": 629.94}]", "ticket": "t"}))).unwrap();
+        assert_eq!(sent.args, vec![json!("2551Q"), json!({"tax_rate": 0.03, "amount": 629.94})]);
+        assert_eq!(sent.ticket.as_deref(), Some("t"));
+        assert_eq!(request(tool, &args(json!({"args": [1, 2]}))).unwrap().args, vec![json!(1), json!(2)]);
+        for bad in [json!({"args": [], "args_json": "[]"}), json!({"args_json": "{}"}), json!({"args_json": [1]}), json!({"args_json": "not json"})] {
+            assert!(request(tool, &args(bad.clone())).is_err(), "{bad}");
+        }
     }
 
     #[test]
