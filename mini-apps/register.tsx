@@ -8,6 +8,12 @@
 // with a button that opens the BIR Tax Profile mini app on the new taxpayer's
 // ticket (Rox's bridge, `rox.open`: the app never builds a link with a TIN).
 //
+// On a computer that is already set up, signing in (or opening the app
+// signed in) lands on "Signed in": who is signed in, this computer's
+// taxpayers with buttons into BIR Forms and their profiles, Add a taxpayer
+// and Sign out. The new-taxpayer form opens only when the user picks Add, or
+// when there is no taxpayer yet ([`stepAfterSignIn`]).
+//
 // Sign-in screens for an existing setup (TIN + PIN), PIN/TOTP management and
 // setup changes (security.js, setup_change.js) are not part of onboarding: the
 // only code first-run setup requires is the help desk's admin PIN.
@@ -81,6 +87,8 @@ const api = {
   beginSignUp: () => bir<CloudSignInStart>("cloud_account_begin_sign_up"),
   /** Waits until the browser approves this computer. */
   finishSignIn: () => bir<CloudAccountStatus>("cloud_account_finish_sign_in"),
+  /** Signs this computer out of Buwiz and locks the filing database again. */
+  signOut: () => bir<CloudAccountStatus>("cloud_account_sign_out"),
   /** Opens the database for this session; every other call fails until it ran. */
   sessionOpened: () => bir<null>("cloud_account_session_opened"),
   authState: () => bir<AuthState>("auth_state"),
@@ -108,6 +116,45 @@ function formatTin(root: string): string {
   return r.length >= 9 ? `${r.slice(0, 3)}-${r.slice(3, 6)}-${r.slice(6, 9)}` : r;
 }
 
+// ============================================================ where the app goes
+// Plain functions of what BIR answered, so the flow can be tested on its own
+// (v1-tests/apps.test.mjs runs this block). Keep it free of types and imports.
+// step-decision:begin
+
+/**
+ * The step after BIR says who is signed in: the account page when nobody
+ * is; first-launch setup when this computer has no setup yet (auth mode
+ * null); otherwise "Signed in", or the new-taxpayer form when there is no
+ * taxpayer to show.
+ */
+function stepAfterSignIn(mode, signedIn, taxpayers) {
+  if (!signedIn) return "account";
+  if (!mode) return "setup";
+  return taxpayers > 0 ? "signed-in" : "taxpayer";
+}
+
+/**
+ * What the account page says about this computer's sign-in, from the
+ * account status and the last error: never signed in, expired, offline
+ * (the server is not answering), or another failure.
+ */
+function accountState(status, error) {
+  const text = String(error || "");
+  const host = (() => {
+    const url = String((status && status.server_url) || "");
+    const m = /^[a-z]+:\/\/([^/]+)/i.exec(url);
+    return m ? m[1] : url || "the Buwiz server";
+  })();
+  if ((status && status.offline) || /could not reach|error sending request|timed out|connection refused|not answering|unreachable/i.test(text))
+    return { kind: "offline", host };
+  if (/sign in again|expired|ended this computer|refresh was rejected/i.test(text + " " + String((status && status.detail) || "")))
+    return { kind: "expired", host };
+  if (text) return { kind: "error", host };
+  return { kind: "never", host };
+}
+
+// step-decision:end
+
 // ============================================================ UI kit (Sand theme)
 
 const C = {
@@ -131,7 +178,10 @@ function Button(p: { label: string; onPress: () => void; variant?: Variant; disa
     <View
       onPress={() => !p.disabled && p.onPress()}
       activeStyle={{ opacity: 0.7 }}
-      class={`px-4 py-2 rounded-md items-center justify-center ${box()} ${p.disabled ? "opacity-50" : ""} ${p.block ? "" : "self-start"}`}
+      focusable={!p.disabled}
+      accessibilityRole="button"
+      accessibilityLabel={p.label}
+      class={`px-4 py-2 rounded-md items-center justify-center border-2 border-transparent focus:border-[#1680f3] dark:focus:border-[#1884fc] ${box()} ${p.disabled ? "opacity-50" : ""} ${p.block ? "" : "self-start"}`}
       style={{ minHeight: 34 }}
     >
       <Text class={`text-sm font-semibold ${ink()}`}>{p.label}</Text>
@@ -410,7 +460,7 @@ function Choice(p: { icon: string; title: string; line: string; onPress: () => v
 
 // ============================================================ the app
 
-type Step = "checking" | "account" | "waiting" | "setup" | "helpdesk-pin" | "helpdesk-key" | "taxpayer" | "done";
+type Step = "checking" | "account" | "waiting" | "signed-in" | "setup" | "helpdesk-pin" | "helpdesk-key" | "taxpayer" | "done";
 
 export default function R() {
   const step = signal<Step>("checking");
@@ -424,6 +474,11 @@ export default function R() {
   const pin = signal("");
   const recoveryKey = signal("");
   const created = signal<Taxpayer | null>(null);
+  /** This computer's taxpayers, for "Signed in". */
+  const people = signal<Taxpayer[]>([]);
+  const openError = signal<string | null>(null);
+  /** Bumped by Cancel: a sign-in still waiting in the browser is then ignored. */
+  let attempt = 0;
   let alive = true;
   cleanup(() => {
     alive = false;
@@ -437,15 +492,16 @@ export default function R() {
     await toSetup();
   };
 
+  /** Signed in: first-launch setup, "Signed in", or (no taxpayer yet) the new-taxpayer form. */
   const toSetup = async () => {
     const a = await api.authState();
     auth.set(a);
-    if (!a.mode) {
-      step.set("setup");
-    } else {
-      pendingSolo.set(false);
-      openNewTaxpayer();
-    }
+    pendingSolo.set(false);
+    const list = a.mode ? (await api.listTaxpayers()).filter((t) => !t.archived) : [];
+    people.set(list);
+    const next = stepAfterSignIn(a.mode, true, list.length);
+    if (next === "taxpayer") openNewTaxpayer();
+    else step.set(next as Step);
   };
 
   const check = async () => {
@@ -465,20 +521,43 @@ export default function R() {
 
   const startAccountFlow = async (kind: "sign-in" | "create") => {
     if (busy()) return;
+    const mine = ++attempt;
     busy.set(true);
     error.set(null);
     try {
       const s = kind === "create" ? await api.beginSignUp() : await api.beginSignIn();
-      if (!alive) return;
+      if (!alive || mine !== attempt) return;
       started.set(s);
       step.set("waiting");
       const st = await api.finishSignIn();
-      if (!alive) return;
+      if (!alive || mine !== attempt) return;
       status.set(st);
       await unlock();
     } catch (e) {
+      if (mine !== attempt) return;
       error.set(errorText(e));
       step.set("account");
+    } finally {
+      if (mine === attempt) busy.set(false);
+    }
+  };
+  /** Back to the account page; the code waiting in the browser no longer counts. */
+  const cancelSignIn = () => {
+    attempt++;
+    busy.set(false);
+    started.set(null);
+    error.set(null);
+    step.set("account");
+  };
+  const signOut = async () => {
+    busy.set(true);
+    try {
+      status.set(await api.signOut());
+      error.set(null);
+      people.set([]);
+      step.set("account");
+    } catch (e) {
+      openError.set(errorText(e));
     } finally {
       busy.set(false);
     }
@@ -655,6 +734,17 @@ export default function R() {
     }
   };
 
+  /** Opens a taxpayer in BIR Forms or the BIR Tax Profile app, on its ticket. */
+  const openFor = async (app: "forms" | "tax-profile", t: Taxpayer) => {
+    openError.set(null);
+    if (!t.ticket) return openError.set(`BIR gave no ticket for ${t.name}. Open them from the chat instead.`);
+    try {
+      await rox.open({ app, ticket: t.ticket, props: { ticket: t.ticket } });
+    } catch (e) {
+      openError.set(errorText(e));
+    }
+  };
+
   /** Opens the new taxpayer's profile in the BIR Tax Profile app. */
   const openProfile = async () => {
     const t = created();
@@ -668,16 +758,30 @@ export default function R() {
 
   // ---------------------------------------------------------------- views
 
+  /** The account state line: plain words and what to do. */
+  const stateLine = computed(() => {
+    const st = accountState(status(), error());
+    if (st.kind === "offline") return { danger: true, text: `Offline: the Buwiz server at ${st.host} isn't answering. Check your internet connection (or that the server is running), then press Check again.` };
+    if (st.kind === "expired") return { danger: true, text: "Your sign-in expired. Sign in again to keep filing from this computer." };
+    if (st.kind === "error") return { danger: true, text: `Sign-in didn't finish: ${error()}. Try again; if it keeps failing, check the Buwiz server at ${st.host}.` };
+    return { danger: false, text: "This computer isn't signed in to Buwiz yet." };
+  });
+
   const accountView = () => (
     <Card
       icon="☁"
-      title="Welcome to eBIRForms"
-      line={error() || status()?.detail || "Sign in with your Buwiz account to file from this computer."}
-      lineDanger={!!error()}
+      title="Sign in to Buwiz"
+      line="BIR needs your Buwiz account to file returns and to keep this computer licensed. Preparing returns works offline."
     >
+      <View class={`rounded-xl px-4 py-3 gap-1 ${C.inset}`}>
+        <Text class={`text-sm ${stateLine().danger ? C.danger : C.fg}`}>{stateLine().text}</Text>
+        <If when={status()?.email}>
+          <Text class={`text-xs ${C.fg2}`}>{`Last signed in as ${status()?.email || ""}`}</Text>
+        </If>
+      </View>
       <Button label={busy() ? "Waiting…" : "Sign in"} variant="primary" block disabled={busy()} onPress={() => startAccountFlow("sign-in")} />
-      <Button label={busy() ? "Waiting…" : "Create account"} block disabled={busy()} onPress={() => startAccountFlow("create")} />
-      <If when={error()}>
+      <Button label="Create an account" block disabled={busy()} onPress={() => startAccountFlow("create")} />
+      <If when={error() || status()?.offline}>
         <View class="items-center">
           <Button label="Check again" variant="ghost" onPress={check} />
         </View>
@@ -685,33 +789,74 @@ export default function R() {
     </Card>
   );
 
+  const signInLink = () => started()?.verification_uri_complete || started()?.verification_uri || "";
+
   const waitingView = () => (
     <Card
       icon="⧗"
       title="Approve this computer"
       line={
         started()?.browser_opened
-          ? "Finish in the browser that opened, then return here. Check that it shows this code."
-          : "Open the link below in a browser, sign in, and approve this computer with this code."
+          ? "Your browser opened Buwiz's sign-in page. Sign in there and check that it shows this code, then come back here."
+          : "Open the sign-in page in your browser (copy its link below), sign in, and enter this code."
       }
     >
-      <View class={`items-center rounded-xl py-4 ${C.inset}`}>
-        <Text class={`text-2xl font-semibold ${C.fg}`} selectable style={{ fontFamily: "Menlo", letterSpacing: 4 }}>
+      <View class={`items-center rounded-xl py-5 gap-2 ${C.inset}`}>
+        <Text class={`text-3xl font-semibold ${C.fg}`} selectable style={{ fontFamily: "Menlo", letterSpacing: 6 }}>
           {started()?.user_code || ""}
         </Text>
+        <Button label="Copy code" variant="ghost" onPress={() => void rox.copy(started()?.user_code || "")} />
       </View>
       <View class="gap-1">
-        <Text class={`text-xs ${C.fg2}`}>Verification link</Text>
+        <Text class={`text-xs ${C.fg2}`}>Sign-in page</Text>
         <Text class={`text-sm ${C.accent}`} selectable>
-          {started()?.verification_uri_complete || started()?.verification_uri || ""}
+          {signInLink()}
         </Text>
       </View>
       <View class="flex-row flex-wrap items-center justify-between gap-2">
-        <Text class={`text-xs ${C.fg2}`}>Waiting for approval…</Text>
-        <Button
-          label="Copy link"
-          onPress={() => void rox.copy(started()?.verification_uri_complete || started()?.verification_uri || "")}
-        />
+        <Text class={`text-xs ${C.fg2}`}>Waiting for you to approve…</Text>
+        <View class="flex-row gap-2">
+          <Button label="Cancel" variant="ghost" onPress={cancelSignIn} />
+          <Button label="Copy the sign-in link" onPress={() => void rox.copy(signInLink())} />
+        </View>
+      </View>
+    </Card>
+  );
+
+  /** Signed in on a computer that is set up: its taxpayers, and the way in. */
+  const signedInView = () => (
+    <Card
+      icon="✓"
+      title="Signed in"
+      line={`Signed in to Buwiz as ${status()?.email || status()?.user_id || "your account"}. This computer has ${people().length} ${people().length === 1 ? "taxpayer" : "taxpayers"}.`}
+    >
+      <If when={people().length === 1}>
+        <Button label="Open BIR Forms" variant="primary" block onPress={() => openFor("forms", people()[0])} />
+      </If>
+      <If when={people().length > 1}>
+        <Text class={`text-xs ${C.fg2}`}>Pick a taxpayer to open their returns in BIR Forms or their profile.</Text>
+      </If>
+      <View class={`rounded-xl ${C.line}`}>
+        <Each of={people().slice(0, 6)} key={(t) => t.tin_root}>
+          {(t) => (
+            <View class="flex-row items-center gap-2 px-3 py-2 border-b border-black/5 dark:border-white/5">
+              <View class="flex-1">
+                <Text class={`text-sm font-semibold ${C.fg}`} numberOfLines={1}>{t().name}</Text>
+                <Text class={`text-xs ${C.fg2}`}>{`TIN ${formatTin(t().tin_root)}`}</Text>
+              </View>
+              <Button label="Forms" variant={people().length === 1 ? "ghost" : "default"} onPress={() => openFor("forms", t())} />
+              <Button label="Profile" variant="ghost" onPress={() => openFor("tax-profile", t())} />
+            </View>
+          )}
+        </Each>
+      </View>
+      <If when={people().length > 6}>
+        <Text class={`text-xs ${C.fg2}`}>{`And ${people().length - 6} more: ask for a taxpayer by name in the chat.`}</Text>
+      </If>
+      <ErrorText text={openError()} />
+      <View class="flex-row flex-wrap items-center justify-between gap-2">
+        <Button label="Add a taxpayer" onPress={openNewTaxpayer} />
+        <Button label={busy() ? "Signing out…" : "Sign out"} variant="ghost" disabled={busy()} onPress={signOut} />
       </View>
     </Card>
   );
@@ -855,6 +1000,9 @@ export default function R() {
           <If when={!auth()?.mode || pendingSolo()}>
             <Button label="Cancel" variant="ghost" onPress={cancelSetup} />
           </If>
+          <If when={!!auth()?.mode && !pendingSolo() && people().length > 0}>
+            <Button label="Back" variant="ghost" onPress={() => step.set("signed-in")} />
+          </If>
           <Button label={busy() ? "Creating…" : "Create taxpayer"} variant="primary" disabled={busy()} onPress={createTaxpayer} />
         </View>
       </View>
@@ -881,6 +1029,7 @@ export default function R() {
         </If>
         <If when={step() === "account"}>{accountView()}</If>
         <If when={step() === "waiting"}>{waitingView()}</If>
+        <If when={step() === "signed-in"}>{signedInView()}</If>
         <If when={step() === "setup"}>{setupView()}</If>
         <If when={step() === "helpdesk-pin"}>{pinView()}</If>
         <If when={step() === "helpdesk-key"}>{keyView()}</If>
