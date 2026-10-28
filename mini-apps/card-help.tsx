@@ -296,7 +296,7 @@ function Health() {
       <Row
         title="Taxpayer database"
         sub={`${real() ? "Your real taxpayers" : `The ${String(s().database || "test")} database`}${s().taxpayers != null ? ` · ${s().taxpayers} taxpayer${s().taxpayers === 1 ? "" : "s"}` : ""}`}
-        right={<Chip text={s().signed_in ? "Open" : "Locked"} tone={s().signed_in ? "ok" : "warn"} />}
+        right={<Chip text={s().signed_in ? "Unlocked" : "Locked"} tone={s().signed_in ? "ok" : "warn"} />}
       />
       <Row
         title="Sending queue"
