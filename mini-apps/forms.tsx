@@ -132,6 +132,11 @@ const H = {
   revoke: (tin: string, code: string) => bir<null>("revoke_send", tin, code),
   // payments and the printable filing record (the server's own tools)
   payments: (form: string, period: string) => tool<{ payments: Payment[] }>("bir_payments_list", { tin: BRANCH, form, period }),
+  recordPayment: (form: string, period: string, d: { paid_at: string; amount: string; channel: string; reference: string }) =>
+    tool<{ payment: Payment }>("bir_record_payment", {
+      tin: BRANCH, form, period, channel: d.channel, amount: d.amount, paid_at: d.paid_at,
+      ...(d.reference.trim() ? { reference: d.reference.trim() } : {}),
+    }),
   markPaid: (form: string, period: string, proof?: { upload: string; name: string }) =>
     tool<{ payment: Payment }>("bir_mark_paid", proof ? { tin: BRANCH, form, period, proof_upload: proof.upload, proof_name: proof.name } : { tin: BRANCH, form, period }),
 };
@@ -203,6 +208,10 @@ interface FS extends Opts {
   assistantMay: boolean | null;
   /** This return's recorded payments (null: not read yet, or not a stored return). */
   payments: Payment[] | null;
+  /** Why the payments could not be read (signed out, server down), in plain words. */
+  paymentsError?: string | null;
+  /** The Mark as paid details, while the user types them. */
+  payForm?: { paid_at: string; amount: string; channel: string; reference: string } | null;
   paying: boolean;
 }
 
@@ -1618,8 +1627,12 @@ async function readPayments(s: FS, token: number) {
     const r = await H.payments(s.code, tokenPeriod(s));
     if (!live(s, token)) return;
     s.payments = r.payments || [];
-  } catch {
-    if (live(s, token)) s.payments = null;
+    s.paymentsError = null;
+  } catch (e) {
+    if (live(s, token)) {
+      s.payments = null;
+      s.paymentsError = errText(e);
+    }
   }
   bump();
 }
@@ -1634,18 +1647,33 @@ function paymentLine(p: Payment): string {
     .join(" · ");
 }
 
-/** "Mark as paid": on the user's word, no proof (a receipt can be attached later). */
+/** "Mark as paid": the payment's details when the user gives them (date, amount, channel such as MyEG,
+ *  reference: `bir_record_payment`), else on the user's word alone (`bir_mark_paid`). A receipt can be
+ *  attached later. */
 async function markPaid(s: FS) {
+  const d = s.payForm;
   s.paying = true;
   bump();
   try {
-    await H.markPaid(s.code, tokenPeriod(s));
-    toast("Marked as paid. Attach the receipt when you have it.", "success");
+    if (d && d.amount.trim() && d.channel.trim()) {
+      await H.recordPayment(s.code, tokenPeriod(s), { ...d, paid_at: d.paid_at.trim() || isoToday() });
+      toast("Payment recorded. Attach the receipt when you have it.", "success");
+    } else {
+      await H.markPaid(s.code, tokenPeriod(s));
+      toast("Marked as paid. Attach the receipt when you have it.", "success");
+    }
+    s.payForm = null;
   } catch (e) {
     toast(errText(e), "danger");
   }
   s.paying = false;
   await readPayments(s, T);
+}
+
+/** Today as YYYY-MM-DD (the payment date's default). */
+function isoToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 /**
@@ -2592,7 +2620,9 @@ function FormPage(p: { s: FS }) {
   const openOne = () => (rev(), s.openParts.size === 1 ? [...s.openParts][0] : -1);
   const needsYou = () => {
     rev();
-    if (!s.schema) return [] as { id: string; pi: number; ii: number; label: string; msg: string }[];
+    // A return that has left Draft (sent, confirmed, read-only) can't be changed: recompute-style
+    // messages on it are not the user's to fix. Payment shows in the payment panel instead.
+    if (!s.schema || !s.editable) return [] as { id: string; pi: number; ii: number; label: string; msg: string }[];
     return Object.entries({ ...s.messages, ...s.dateErrors })
       .filter(([id]) => id !== "form")
       .map(([id, msg]) => {
@@ -2828,23 +2858,60 @@ function AssistantToggle(p: { s: FS }) {
   );
 }
 
-/** Payment, apart from BIR's filing confirmation: what is recorded, and Mark as paid / Attach receipt. */
+/** Payment, apart from BIR's filing confirmation: what is recorded, and Mark as paid (with its details) /
+ *  Attach receipt. Shown on every return that has left Draft, even when the payments could not be read. */
 function PaymentPanel(p: { s: FS }) {
   const s = p.s;
-  const shown = () => (rev(), sentOrQueued(s) && !s.loading && !s.error && s.payments !== null);
+  const shown = () => (rev(), sentOrQueued(s) && !s.loading && !s.error);
   const paid = () => (rev(), (s.payments || []).length > 0);
   const hasReceipt = () => (rev(), (s.payments || []).some((x) => x.proof.kind === "file"));
+  const form = () => (rev(), s.payForm || null);
+  const field = (key: "paid_at" | "amount" | "channel" | "reference", label: string, placeholder: string, width: number) => (
+    <View class="gap-0.5">
+      <Text class={`text-xs ${C.fg2}`}>{label}</Text>
+      <Input
+        class={C.input}
+        style={{ width }}
+        placeholder={placeholder}
+        value={(rev(), form()?.[key] || "")}
+        onChange={(e) => {
+          if (s.payForm) s.payForm[key] = typed(e);
+        }}
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
+    </View>
+  );
   return (
     <If when={shown()}>
-      <View class={`flex-row flex-wrap items-center gap-2 py-2 px-3 rounded-xl border ${C.line}`}>
-        <Chip text={(rev(), paid() ? "Paid" : "Not paid yet")} tone={(rev(), paid() ? "success" : "warning")} />
-        <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
-          <If when={paid()} else={<Text class={`text-xs ${C.fg2}`}>No payment recorded. Payment emails are recorded by the BIR payments routine; you can also mark it paid or attach the receipt.</Text>}>
-            <Each of={(rev(), s.payments || [])} key={(x) => x.id}>{(x) => <Text class={`text-xs ${C.fg2}`}>{paymentLine(x())}</Text>}</Each>
+      <View class={`gap-2 py-2 px-3 rounded-xl border ${C.line}`}>
+        <View class="flex-row flex-wrap items-center gap-2">
+          <Chip text={(rev(), paid() ? "Paid" : "Payment not recorded")} tone={(rev(), paid() ? "success" : "warning")} />
+          <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
+            <If when={paid()} else={<Text class={`text-xs ${C.fg2}`}>{(rev(), s.paymentsError || "No payment recorded yet. The BIR payments routine records payment emails; you can also mark it paid here.")}</Text>}>
+              <Each of={(rev(), s.payments || [])} key={(x) => x.id}>{(x) => <Text class={`text-xs ${C.fg2}`}>{paymentLine(x())}</Text>}</Each>
+            </If>
+          </View>
+          <If when={!paid() && !form()}>
+            <Btn label="Mark as paid" onPress={() => { s.payForm = { paid_at: isoToday(), amount: "", channel: "", reference: "" }; bump(); }} disabled={(rev(), s.paying)} />
           </If>
+          <Btn label={(rev(), hasReceipt() ? "Replace receipt" : "Attach receipt")} variant="ghost" onPress={() => attachReceipt(s)} disabled={(rev(), s.paying)} />
         </View>
-        <If when={!paid()}><Btn label="Mark as paid" onPress={() => markPaid(s)} disabled={(rev(), s.paying)} /></If>
-        <Btn label={(rev(), hasReceipt() ? "Replace receipt" : "Attach receipt")} variant="ghost" onPress={() => attachReceipt(s)} disabled={(rev(), s.paying)} />
+        <If when={Boolean(form())}>
+          <View class="gap-2">
+            <View class="flex-row flex-wrap gap-3">
+              {field("paid_at", "Paid on", "2026-10-26", 130)}
+              {field("amount", "Amount (PHP)", "1,629.94", 130)}
+              {field("channel", "Paid through", "MyEG, GCash, a bank…", 180)}
+              {field("reference", "Reference (optional)", "Reference no.", 180)}
+            </View>
+            <Text class={`text-xs ${C.fg3}`}>Leave the amount and channel empty to mark it paid without details.</Text>
+            <View class="flex-row gap-2">
+              <Btn label={(rev(), s.paying ? "Saving…" : "Save payment")} variant="primary" onPress={() => markPaid(s)} disabled={(rev(), s.paying)} />
+              <Btn label="Cancel" variant="ghost" onPress={() => { s.payForm = null; bump(); }} />
+            </View>
+          </View>
+        </If>
       </View>
     </If>
   );
