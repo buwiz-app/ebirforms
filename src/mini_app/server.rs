@@ -642,10 +642,10 @@ impl MiniServer {
             BIR_CALENDAR_LINK => Ok(now(self.on_database(name, arguments, |db, arguments, _| {
                 calendar::link(db, arguments)
             }))),
-            BIR_CONFIRMATION_SEARCH => Ok(now(self.on_database(name, arguments, confirm::search))),
+            BIR_CONFIRMATION_SEARCH => Ok(now(routine_query(self.on_database(name, arguments, confirm::search)))),
             BIR_CONFIRM_FILING => Ok(now(self.on_database(name, arguments, confirm::confirm))),
             // Payments and the printable filing record.
-            BIR_PAYMENT_SEARCH => Ok(now(self.on_database(name, arguments, payments::search))),
+            BIR_PAYMENT_SEARCH => Ok(now(routine_query(self.on_database(name, arguments, payments::search)))),
             BIR_PAYMENT_PARSE => Ok(now(self.on_database(name, arguments, |_, arguments, today| {
                 payments::parse(arguments, today)
             }))),
@@ -1060,6 +1060,16 @@ fn call_result(result: Result<Value, String>) -> Value {
         }),
         Err(message) => tool_error(message),
     }
+}
+
+/// A routine takes its search text from `structuredContent.query` (spec
+/// 5.9 step 1), but BIR's answers nest everything under `result`: the
+/// search tools carry `query` at the top as well.
+fn routine_query(mut result: Value) -> Value {
+    if let Some(query) = result.pointer("/structuredContent/result/query").cloned() {
+        result["structuredContent"]["query"] = query;
+    }
+    result
 }
 
 fn now(result: Value) -> Reply {
@@ -1887,6 +1897,11 @@ mod tests {
         let search = call_as(&mut server, routine.clone(), BIR_CONFIRMATION_SEARCH, json!({}));
         assert_eq!(search["isError"], false, "{search}");
         assert!(search["structuredContent"]["result"]["query"].is_string());
+        // the broker reads the search text at the top (spec 5.9 step 1)
+        for tool in [BIR_CONFIRMATION_SEARCH, BIR_PAYMENT_SEARCH] {
+            let search = call_as(&mut server, routine.clone(), tool, json!({}));
+            assert!(search["structuredContent"]["query"].is_string(), "{tool}: {search}");
+        }
         for (tool, args) in [
             (BIR_CALENDAR_SET, json!({"tin": ROOT, "forms": ["2551Q"], "enabled": false})),
             (BIR_MARK_PAID, json!({"tin": ROOT, "form": "2551Q", "period": "2026-Q3"})),
