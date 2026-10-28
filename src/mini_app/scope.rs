@@ -1,6 +1,6 @@
-//! Profile scope for `bir_call`: a mini app opened for one taxpayer passes
-//! that taxpayer's 9-digit TIN root, and every host call it makes is held to
-//! that root.
+//! Profile scope for the mini apps' host calls (`bir_app_*`): a mini app
+//! holds a ticket for one taxpayer, and every host call it makes is held to
+//! that ticket's 9-digit TIN root ([`super::v1::app_tools`]).
 //!
 //! One rule per host function, read off its TypeScript declaration. A call
 //! whose arguments name another root is refused before it runs; a list that
@@ -187,16 +187,6 @@ pub(crate) fn rule(function: &str) -> Option<Rule> {
         .map(|(_, rule)| *rule)
 }
 
-/// `"123-456-789"`, `"123456789"` -> the root. Anything else is refused.
-pub(crate) fn parse_scope(raw: &str) -> Result<String, String> {
-    let digits: String = raw.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
-    if digits.len() == 9 && digits.bytes().all(|b| b.is_ascii_digit()) {
-        Ok(digits)
-    } else {
-        Err(format!("`scope` must be a 9-digit TIN root (got `{raw}`)"))
-    }
-}
-
 /// The TIN root a value names: a TIN string (with or without dashes, 9 to 14
 /// digits) or a `{segment1, segment2, segment3}` TIN object.
 pub(crate) fn root_of(value: &Value) -> Option<String> {
@@ -358,14 +348,6 @@ mod tests {
                 "rule for a function the module lacks: {name}"
             );
         }
-    }
-
-    #[test]
-    fn scope_parses_a_root_and_refuses_anything_else() {
-        assert_eq!(parse_scope("123-456-788").unwrap(), SCOPE);
-        assert_eq!(parse_scope(SCOPE).unwrap(), SCOPE);
-        assert!(parse_scope("12345678800000").is_err());
-        assert!(parse_scope("abc").is_err());
     }
 
     #[test]

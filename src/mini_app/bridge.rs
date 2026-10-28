@@ -1,4 +1,5 @@
-//! `bir_call`: the mini apps' bridge to the `bir` host module.
+//! The mini apps' bridge to the `bir` host module, behind the named
+//! `bir_app_*` tools ([`super::v1::app_tools`]).
 //!
 //! Any exported function is callable by name with JSON arguments, exactly as
 //! `app/` calls it through gpui-shell. Synchronous functions run here, on the
@@ -16,7 +17,7 @@ use crate::bir_module::{json, to_json};
 /// app can sign in. Everything else waits for the account gate.
 const ACCOUNT_PREFIX: &str = "cloud_account_";
 
-/// One `bir_call` outcome.
+/// One host call's outcome.
 pub(crate) enum Call {
     Ready(Result<Value, String>),
     /// An async host function, already started. Run it to completion off the

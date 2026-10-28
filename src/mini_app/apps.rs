@@ -1,21 +1,23 @@
 //! The TSX mini apps, served as MCP resources.
 //!
 //! One resource per `*.tsx` in `crates/bir-shell/mini-apps/`, embedded at
-//! build time (`build.rs`). `mini-apps/apps.json` gives each one its title
-//! and description. `BIR_MINI_APPS_DIR` reads both from that directory on
-//! disk instead, so the apps can be edited without a rebuild.
+//! build time (`build.rs`), at `rox-app://<id>`. `mini-apps/apps.json`
+//! gives each one its title and description. `BIR_MINI_APPS_DIR` reads both
+//! from that directory on disk instead, so the apps can be edited without a
+//! rebuild; the v1 manifest's fingerprints are then those files' bytes, so
+//! an edited app needs a new signature before Rox loads it.
 
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-/// `nsh://bir/<id>`.
-pub(crate) const URI_PREFIX: &str = "nsh://bir/";
+/// `rox-app://<id>` (spec 5.5: an app's `entry`).
+pub(crate) const URI_PREFIX: &str = "rox-app://";
 pub(crate) const MIME_TYPE: &str = "text/x-nsh-tsx";
 pub(crate) const DIR_ENV: &str = "BIR_MINI_APPS_DIR";
 
 /// The apps `bir_app_open` may name.
-pub(crate) const OPENABLE: [&str; 4] = ["forms", "tax-profile", "register", "calendar"];
+pub(crate) const OPENABLE: [&str; 5] = ["forms", "tax-profile", "register", "calendar", "deadlines"];
 
 static EMBEDDED: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/mini_apps.rs"));
 static EMBEDDED_MANIFEST: &str = include_str!("../../mini-apps/apps.json");
@@ -150,7 +152,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|resource| resource["uri"] == "nsh://bir/forms")
+            .find(|resource| resource["uri"] == "rox-app://forms")
             .expect("forms is shipped")
             .clone();
         assert_eq!(forms["mimeType"], MIME_TYPE);
@@ -161,12 +163,12 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| !text.is_empty())
         );
-        let read = catalog.read("nsh://bir/forms").unwrap();
+        let read = catalog.read("rox-app://forms").unwrap();
         let content = &read["contents"][0];
-        assert_eq!(content["uri"], "nsh://bir/forms");
+        assert_eq!(content["uri"], "rox-app://forms");
         assert_eq!(content["mimeType"], MIME_TYPE);
         assert!(content["text"].as_str().unwrap().contains("from \"nsh\""));
-        assert!(catalog.read("nsh://bir/nope").is_err());
+        assert!(catalog.read("rox-app://nope").is_err());
         assert!(catalog.read("file:///etc/passwd").is_err());
     }
 
@@ -185,10 +187,10 @@ mod tests {
         let listed = catalog.list().unwrap();
         let resources = listed["resources"].as_array().unwrap();
         assert_eq!(resources.len(), 1);
-        assert_eq!(resources[0]["uri"], "nsh://bir/register");
+        assert_eq!(resources[0]["uri"], "rox-app://register");
         assert_eq!(resources[0]["title"], "Sign in");
         assert_eq!(
-            catalog.read("nsh://bir/register").unwrap()["contents"][0]["text"],
+            catalog.read("rox-app://register").unwrap()["contents"][0]["text"],
             "export default 1;"
         );
         let _ = std::fs::remove_dir_all(dir);

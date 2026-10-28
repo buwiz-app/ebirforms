@@ -2,12 +2,17 @@
 //!
 //! Every tool runs in this process. The form, profile and dues tools are
 //! bir-mcp's descriptions and argument checks over bir-shell's agent
-//! [`Session`]; `bir_call` is the mini apps' bridge to the `bir` host module;
-//! `bir_app_open` asks Rox to open one of the TSX apps this binary ships as
-//! resources; `bir_resolve` answers the commands and `@` scopes of the
-//! `rox://manifest` resource ([`resolve`]); `bir_drafts_list` lists a
+//! [`Session`]; the `bir_app_*` tools are the mini apps' named calls into
+//! the `bir` host module ([`v1::app_tools`]); `bir_app_open` asks Rox to
+//! open one of the TSX apps this binary ships as resources; `bir_resolve`
+//! answers the commands and `@` scopes of the `rox://manifest` resource
+//! ([`v1::resolve`] over [`resolve`]); `bir_drafts_list` lists a
 //! taxpayer's unsubmitted returns. There is no app discovery and no connect
 //! step: this process owns the database.
+//!
+//! Rox speaks the Mini App Protocol v1 ([`v1`]): `rox.provision` first, then
+//! every call carries its caller (`_meta["rox/caller"]`), and [`MiniServer::authorize`]
+//! holds each origin to what it may do before a tool runs.
 
 use bir_core::forms::taxform::{self, TaxformAction};
 use bir_mcp::license::{License, UNAUTHENTICATED};
@@ -21,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use super::apps::{self, Catalog};
 use super::bridge::{Bridge, Call};
+use super::v1::{self, Caller, Origin, app_tools, manifest as v1_manifest};
 use super::{calendar, confirm, payments, resolve, scope};
 use crate::agent::{Session, UiQueue};
 
@@ -50,36 +56,36 @@ const HOST_TOOLS: [&str; 11] = [
 ];
 
 const INSTRUCTIONS: &str = "BIR (Philippine tax returns) running headless on this computer: it owns \
-the taxpayer database and files queued returns in the background. To let the user work visually, \
-call bir_app_open: `forms` to prepare and file returns, `tax-profile` for a taxpayer's \
-registration, `calendar` for the filing schedule (when asked to show the schedule), `register` to \
-sign in to Buwiz. Pass `tin` to open it for one taxpayer (only that \
-taxpayer is reachable from the app then). You can also read taxpayer profiles and dues and draft \
-a return yourself with the bir_form_* tools: open, read fields and context, fill with a stated \
-source, list what needs the user, validate, save the draft, dismiss. Only one form is open at a \
-time. bir_drafts_list shows a taxpayer's unsubmitted returns. A message may name a return as a \
-token `@bir:taxform:<tin>/<FORM>-<period>` (e.g. @bir:taxform:000000000/2551Q-2026-Q3): pass its \
-value as bir_form_open's `code`. Sending (bir_form_send) needs the user's standing OK for that \
-taxpayer and form; without it the user presses Submit in the Forms app themselves. bir_call and \
-bir_resolve are the mini apps' and Rox's own; do not call them yourself. The form calendar: \
-bir_calendar_get lists returns and due dates with their status, bir_calendar_set turns forms on or \
-off the calendar; to sync it to Google Calendar, a routine checks bir_calendar_changes and you \
-create, update or delete each event with the Google Workspace tools, then call bir_calendar_link. \
-BIR confirmation emails: search Gmail with bir_confirmation_search's query, read each email \
-(file name, date and time received by BIR) and call bir_confirm_filing, then report. \
-Payments: a routine searches Gmail with bir_payment_search's query; read each email with \
-bir_payment_parse (null for a format bir does not know: read it yourself) and call \
-bir_record_payment. A receipt the user attaches (image or PDF) is recorded with its local path as \
-`proof_path`; bir_mark_paid marks a return paid with no proof (offer to attach one). Payment is \
-separate from BIR's filing confirmation. bir_filing_record makes the printable record (form, \
-confirmation and proof of payment) and returns a rox://view link for the user. \
-Deadlines: a deadline the user moves (\"adjust the 2551Q Q3 deadline to Nov 3\") is a rule for every \
-taxpayer: bir_deadline_override_set moves one form's deadline for one period, \
-bir_deadline_overrides_list shows what is moved, bir_deadline_override_remove puts one back. The \
-calendar, Google Calendar and every return's penalties follow it. Only on the user's request.";
+the taxpayer database and files queued returns in the background. Taxpayers, branches and returns \
+reach you as tickets (tkt_...), never as TINs: a token @bir:taxprofile:<ticket>, \
+@bir:branchcode:<ticket> or @bir:taxform:<ticket> names one, and BIR's answers name taxpayers by \
+ticket too. Pass a ticket wherever a tool takes `tin` (or in `tins`); a return's ticket also goes \
+in bir_form_open's `code` and bir_app_open's `form`. Never ask the user for a TIN and never write \
+one out; use the taxpayer's name when you talk about them. To let the user work visually, call \
+bir_app_open: `forms` to prepare and file returns, `tax-profile` for a taxpayer's registration, \
+`calendar` for the filing schedule, `deadlines` for a small card of the next returns due, \
+`register` to sign in to Buwiz. Pass `tin` (a ticket) to open it for one taxpayer; Rox shows the \
+user an Open button. You can read taxpayer profiles and dues and draft a return yourself with the \
+bir_form_* tools: open, read fields and context, fill with a stated source, list what needs the \
+user, validate, save the draft, dismiss. Only one form is open at a time. bir_drafts_list shows a \
+taxpayer's unsubmitted returns. Sending (bir_form_send) needs the user's standing OK for that \
+taxpayer and form; without it the user presses Submit in the Forms app themselves. The tools \
+whose description starts with \"Mini apps only\" and bir_resolve belong to the apps and to Rox: do \
+not call them. The form calendar: bir_calendar_get lists returns and due dates with their status, \
+bir_calendar_set turns forms on or off the calendar; to sync it to Google Calendar, check \
+bir_calendar_changes, create, update or delete each event with the Google Workspace tools, then \
+call bir_calendar_link with the change's key. BIR confirmation emails: search mail with \
+bir_confirmation_search's query, read each email (file name, date and time received by BIR) and \
+call bir_confirm_filing, then report. Payments: read each payment email with bir_payment_parse \
+(null for a format bir does not know: read it yourself) and call bir_record_payment. A receipt the \
+user attaches is recorded with its local path as `proof_path`; bir_mark_paid marks a return paid \
+with no proof (offer to attach one). Payment is separate from BIR's filing confirmation. \
+bir_filing_record makes the printable record of a return. Deadlines: a deadline the user moves is \
+a rule for every taxpayer: bir_deadline_override_set moves one form's deadline for one period, \
+bir_deadline_overrides_list shows what is moved, bir_deadline_override_remove puts one back. Only \
+on the user's request.";
 
 const BIR_STATUS: &str = "bir_status";
-const BIR_CALL: &str = "bir_call";
 const BIR_APP_OPEN: &str = "bir_app_open";
 const BIR_RESOLVE: &str = resolve::RESOLVE_TOOL;
 const BIR_DRAFTS_LIST: &str = "bir_drafts_list";
@@ -149,12 +155,14 @@ pub(crate) struct MiniServer {
     bridge: Bridge,
     catalog: Catalog,
     gate: Gate,
+    v1: v1::Host,
 }
 
 impl MiniServer {
     /// The stdio server: the debug test bypass, a `BUWIZ_ACCESS_TOKEN`
-    /// agent token, or the desktop account, in that order.
-    pub(crate) fn new(catalog: Catalog) -> Self {
+    /// agent token, or the desktop account, in that order. `rox` (stdio, as
+    /// Rox spawns it) answers nothing before `rox.provision`.
+    pub(crate) fn new(catalog: Catalog, rox: bool) -> Self {
         let gate = if crate::account_gate::auth_bypass_enabled() {
             Gate::Fixed(License::open())
         } else if let Some(token) = env_nonempty("BUWIZ_ACCESS_TOKEN") {
@@ -164,10 +172,10 @@ impl MiniServer {
         } else {
             Gate::Desktop
         };
-        Self::with_gate(catalog, gate)
+        Self::with_gate(catalog, gate, rox)
     }
 
-    fn with_gate(catalog: Catalog, gate: Gate) -> Self {
+    fn with_gate(catalog: Catalog, gate: Gate, rox: bool) -> Self {
         let commands = UiQueue::new();
         Self {
             session: Session::named(commands.clone(), SERVER_NAME, MODE),
@@ -175,6 +183,7 @@ impl MiniServer {
             bridge: Bridge::new(),
             catalog,
             gate,
+            v1: v1::Host::new(rox),
         }
     }
 
@@ -183,7 +192,7 @@ impl MiniServer {
     pub(crate) fn for_tests() -> Self {
         crate::bir_module::use_ephemeral_database();
         crate::account_gate::set_unlocked(true);
-        Self::with_gate(Catalog::Embedded, Gate::Fixed(License::open()))
+        Self::with_gate(Catalog::Embedded, Gate::Fixed(License::open()), false)
     }
 
     pub(crate) fn set_license(&mut self, license: License) {
@@ -238,14 +247,22 @@ impl MiniServer {
                 .list()
                 .map(|mut listed| {
                     if let Some(resources) = listed["resources"].as_array_mut() {
-                        resources.push(resolve::descriptor());
+                        resources.push(manifest_descriptor());
                     }
                     listed
                 })
                 .map_err(|error| (INVALID_PARAMS, error)),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
-                Some(resolve::MANIFEST_URI) => Ok(resolve::read()),
+                Some(v1_manifest::MANIFEST_URI) => v1_manifest::served_text(&self.catalog)
+                    .map(|text| {
+                        json!({ "contents": [{
+                            "uri": v1_manifest::MANIFEST_URI,
+                            "mimeType": v1_manifest::MANIFEST_MIME,
+                            "text": text,
+                        }] })
+                    })
+                    .map_err(|error| (INVALID_PARAMS, error)),
                 Some(uri) => self
                     .catalog
                     .read(uri)
@@ -274,9 +291,177 @@ impl MiniServer {
                 return Ok(now(tool_error("arguments must be a JSON object".into())));
             }
         };
+        // Reserved tools first; an unknown `rox.*` is method-not-found (7.9).
+        if name.starts_with("rox.") {
+            return match self.v1.reserved(&self.catalog, name, arguments) {
+                None => Err((METHOD_NOT_FOUND, format!("{name} is not a tool of this plugin"))),
+                Some(Err(message)) => Err((INVALID_REQUEST, message)),
+                Some(Ok(result)) => Ok(now(result)),
+            };
+        }
+        // P7: nothing before a successful provision.
+        if !self.v1.ready() {
+            return Err((INVALID_REQUEST, "rox.provision must come first".into()));
+        }
+        let caller = Caller::of(params);
+        if let Err(message) = self.authorize(name, &caller) {
+            return Ok(now(v1::fail("permission_denied", &message)));
+        }
+        if is_app_only(name) {
+            return Ok(self.app_tool(name, arguments));
+        }
+        let mut arguments = arguments.clone();
+        let has_ticket = Value::Object(arguments.clone()).to_string().contains("tkt_");
+        if (has_ticket || caller.origin == Origin::App)
+            && let Err(message) = database(|db| v1::expand(db, name, &mut arguments, caller.origin))
+        {
+            return Ok(now(tool_error(message)));
+        }
+        let upload = match self.take_upload(name, &mut arguments, caller.origin) {
+            Ok(upload) => upload,
+            Err(message) => return Ok(now(tool_error(format!("{name}: {message}")))),
+        };
+        let reply = self.dispatch(name, &arguments);
+        if let Some(path) = upload {
+            let _ = std::fs::remove_file(path);
+        }
+        // What the model or an app reads names taxpayers by ticket.
+        match reply {
+            Ok(Reply::Now(Some(mut result))) if matches!(caller.origin, Origin::Agent | Origin::App) => {
+                let today = taxform::today();
+                let _ = database(|db| {
+                    v1::Scrubber::new(db, today).result(&mut result);
+                    Ok(())
+                });
+                Ok(now(result))
+            }
+            other => other,
+        }
+    }
+
+    /// Whether `caller` may call `name` at all (P1, P5, P6): app-only tools
+    /// answer apps, an app calls only what its manifest entry lists and only
+    /// from an open this process certified, and resolve and routine calls
+    /// never cause side effects.
+    fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
+        if matches!(caller.origin, Origin::Resolve | Origin::Routine)
+            && name != BIR_RESOLVE
+            && !read_only(name)
+        {
+            return Err(format!(
+                "{name} changes BIR data, so it does not run for a resolve or routine call"
+            ));
+        }
+        if caller.origin != Origin::App {
+            return if is_app_only(name) {
+                Err(format!("{name} is for BIR's mini apps only"))
+            } else {
+                Ok(())
+            };
+        }
+        let app = caller.app.as_deref().ok_or("an app call names no app")?;
+        if self.v1.provisioned() {
+            let open = caller.open_id.as_deref().unwrap_or("");
+            if self.v1.session_app(open) != Some(app) {
+                return Err("this app open was not certified by BIR".into());
+            }
+        }
+        let allowed = v1_manifest::served_app(&self.catalog, app)?
+            .and_then(|entry| entry["permissions"]["tools"].as_array().cloned())
+            .unwrap_or_default();
+        if allowed.iter().any(|tool| tool == name) {
+            Ok(())
+        } else {
+            Err(format!("{name} is not in the {app} app's permissions"))
+        }
+    }
+
+    /// A `bir_app_*`, ticket or upload tool, for an app.
+    fn app_tool(&mut self, name: &str, arguments: &Map<String, Value>) -> Reply {
+        let today = taxform::today();
+        match name {
+            app_tools::TICKET_SUBJECT => now(call_result(database(|db| {
+                app_tools::ticket_subject(db, arguments, today)
+            }))),
+            app_tools::TICKET_ISSUE => now(call_result(database(|db| {
+                app_tools::ticket_issue(db, arguments, today)
+            }))),
+            app_tools::UPLOAD => now(call_result(self.v1.uploads.append(arguments))),
+            _ => {
+                let request = match app_tools::request(name, arguments) {
+                    Ok(request) => request,
+                    Err(message) => return now(tool_error(format!("{name}: {message}"))),
+                };
+                // The ticket is read, then the lock let go: the host function
+                // takes the database itself.
+                let prepared = if app_tools::needs_database(&request) {
+                    match database(|db| app_tools::prepare(db, &request)) {
+                        Ok(prepared) => Some(prepared),
+                        Err(message) => return now(tool_error(format!("{name}: {message}"))),
+                    }
+                } else {
+                    None
+                };
+                let scope = prepared.as_ref().and_then(|prepared| prepared.scope.clone());
+                match self.bridge.call(request.function, request.args.clone(), scope.as_deref()) {
+                    Call::Ready(Ok(value)) => now(call_result(match &prepared {
+                        Some(prepared) => {
+                            database(|db| app_tools::finish(db, &request, prepared, value))
+                        }
+                        None => Ok(value),
+                    })),
+                    Call::Ready(Err(message)) => now(call_result(Err(message))),
+                    Call::Pending(run) => Reply::Later(Box::new(move || call_result(run()))),
+                }
+            }
+        }
+    }
+
+    /// `bir_mark_paid` from the Forms app: the receipt it uploaded
+    /// (`proof_upload`, `proof_name`) written where `proof_path` reads it.
+    /// An app never names a file path itself. The temporary file's path
+    /// comes back so it is removed after the call.
+    fn take_upload(
+        &mut self,
+        name: &str,
+        arguments: &mut Map<String, Value>,
+        origin: Origin,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        if name != BIR_MARK_PAID {
+            return Ok(None);
+        }
+        if origin == Origin::App && arguments.contains_key("proof_path") {
+            return Err("an app attaches a receipt with proof_upload, not a path".into());
+        }
+        let Some(id) = arguments.remove("proof_upload") else {
+            arguments.remove("proof_name");
+            return Ok(None);
+        };
+        let file_name = arguments
+            .remove("proof_name")
+            .and_then(|name| name.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let ext = std::path::Path::new(&file_name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .ok_or("`proof_name` must be the picked file's name, with its extension")?;
+        let bytes = id
+            .as_str()
+            .and_then(|id| self.v1.uploads.take(id))
+            .ok_or("`proof_upload` is not an upload in progress")?;
+        let mut stamp = [0u8; 8];
+        getrandom::fill(&mut stamp).map_err(|error| error.to_string())?;
+        let path = std::env::temp_dir().join(format!("bir-receipt-{}.{ext}", hex::encode(stamp)));
+        std::fs::write(&path, bytes).map_err(|error| format!("cannot keep the receipt: {error}"))?;
+        arguments.insert("proof_path".into(), Value::String(path.display().to_string()));
+        Ok(Some(path))
+    }
+
+    /// One tool of this server's own, its arguments already in TINs.
+    fn dispatch(&mut self, name: &str, arguments: &Map<String, Value>) -> Result<Reply, (i64, String)> {
         match name {
             BIR_STATUS => Ok(now(self.status())),
-            BIR_CALL => Ok(self.bir_call(arguments)),
             BIR_APP_OPEN => Ok(now(self.app_open(arguments))),
             BIR_RESOLVE => Ok(now(self.resolve(arguments))),
             BIR_DRAFTS_LIST => Ok(now(self.drafts_list(arguments))),
@@ -411,20 +596,6 @@ impl MiniServer {
         }
     }
 
-    fn bir_call(&mut self, arguments: &Map<String, Value>) -> Reply {
-        let request = match bir_call_args(arguments) {
-            Ok(request) => request,
-            Err(message) => return now(tool_error(format!("{BIR_CALL}: {message}"))),
-        };
-        match self
-            .bridge
-            .call(&request.function, request.args, request.scope.as_deref())
-        {
-            Call::Ready(result) => now(call_result(result)),
-            Call::Pending(run) => Reply::Later(Box::new(move || call_result(run()))),
-        }
-    }
-
     fn app_open(&mut self, arguments: &Map<String, Value>) -> Value {
         match self.try_app_open(arguments) {
             Ok(result) => result,
@@ -537,26 +708,24 @@ impl MiniServer {
                 )
             }
         };
+        let opened = database(|db| v1::v1_props(db, id, &props, today))?;
+        let placement = if id == "deadlines" { "inline" } else { "full" };
         Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "isError": false,
-            "_meta": { "rox/open": open_meta(&app.uri(), id, &props) },
+            "_meta": { "rox/open": v1::open_meta(id, &app.title, &opened, placement) },
         }))
     }
 
     /// `bir_resolve`: Rox's resolver for the manifest's commands and
-    /// scopes. Local only: the account gate and a database read, never the
-    /// license check (which may refresh a token over the network).
+    /// scopes, answering spec 9.2's `result` shapes in `structuredContent`.
+    /// Local only: the account gate and a database read, never the license
+    /// check (which may refresh a token over the network).
     fn resolve(&mut self, arguments: &Map<String, Value>) -> Value {
-        let request = match resolve::request(arguments) {
-            Ok(request) => request,
-            Err(message) => return tool_error(format!("{BIR_RESOLVE}: {message}")),
-        };
         let today = taxform::today();
-        let answer =
-            crate::bir_module::with_database(|db| Ok(resolve::resolve(db, &request, today)))
-                .unwrap_or_else(|error| json!({ "ok": false, "error": error.message() }));
-        call_result(Ok(answer))
+        let answer = crate::bir_module::with_database(|db| Ok(v1::resolve(db, arguments, today)))
+            .unwrap_or_else(|error| json!({ "result": "error", "message": error.message() }));
+        v1::ok(answer)
     }
 
     /// `bir_drafts_list`: a taxpayer's returns not yet submitted.
@@ -673,44 +842,6 @@ impl bir_mcp::http::McpHandler for MiniServer {
     }
 }
 
-struct CallRequest {
-    function: String,
-    args: Vec<Value>,
-    scope: Option<String>,
-}
-
-fn bir_call_args(arguments: &Map<String, Value>) -> Result<CallRequest, String> {
-    if let Some(key) = arguments
-        .keys()
-        .find(|key| !["fn", "args", "scope"].contains(&key.as_str()))
-    {
-        return Err(format!(
-            "unknown argument `{key}` (allowed: fn, args, scope)"
-        ));
-    }
-    let function = arguments
-        .get("fn")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .ok_or("`fn` is required: a `bir` host function name")?
-        .to_string();
-    let args = match arguments.get("args") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(args)) => args.clone(),
-        Some(_) => return Err("`args` must be an array of the function's arguments".into()),
-    };
-    let scope = match arguments.get("scope") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(raw)) => Some(scope::parse_scope(raw)?),
-        Some(_) => return Err("`scope` must be a 9-digit TIN root string".into()),
-    };
-    Ok(CallRequest {
-        function,
-        args,
-        scope,
-    })
-}
-
 /// `bir_form_open` with no `tin` and no TIN in its token is for the
 /// current taxpayer (`/taxprofile`), as a taxform without a TIN is.
 fn with_current_tin(name: &str, arguments: &Map<String, Value>) -> Map<String, Value> {
@@ -745,20 +876,50 @@ fn call_result(result: Result<Value, String>) -> Value {
     }
 }
 
-/// `_meta["rox/open"]`: the app's resource, its props and, when the props
-/// name one, the canonical token of what opens (`token`, and `&token=` on
-/// `link`, the same `rox://app/` link the resolver answers).
-fn open_meta(uri: &str, app: &str, props: &Value) -> Value {
-    let mut open = json!({ "uri": uri, "props": props });
-    if let Some(token) = resolve::app_token(app, props) {
-        open["token"] = json!(token);
-        open["link"] = json!(resolve::app_link(app, props));
-    }
-    open
-}
-
 fn now(result: Value) -> Reply {
     Reply::Now(Some(result))
+}
+
+/// Tools that answer BIR's mini apps only (`bir_app_open` is the
+/// assistant's, not one of them).
+fn is_app_only(name: &str) -> bool {
+    app_tools::function_of(name).is_some()
+        || [app_tools::TICKET_SUBJECT, app_tools::TICKET_ISSUE, app_tools::UPLOAD].contains(&name)
+}
+
+/// This server's tools that change nothing (`readOnlyHint`, P8): the ones a
+/// routine or resolve call may run, and the reads a routine may name.
+const READ_ONLY: [&str; 15] = [
+    BIR_STATUS,
+    BIR_DRAFTS_LIST,
+    BIR_CALENDAR_GET,
+    BIR_CALENDAR_CHANGES,
+    BIR_CONFIRMATION_SEARCH,
+    BIR_PAYMENT_SEARCH,
+    BIR_PAYMENT_PARSE,
+    BIR_PAYMENTS_LIST,
+    BIR_DEADLINE_OVERRIDES_LIST,
+    "bir_profiles_list",
+    "bir_dues_list",
+    "bir_form_fields",
+    "bir_form_context",
+    "bir_form_needs_you",
+    "bir_form_validate",
+];
+
+fn read_only(name: &str) -> bool {
+    READ_ONLY.contains(&name) || app_tools::read_only(name)
+}
+
+/// The manifest's `resources/list` entry.
+fn manifest_descriptor() -> Value {
+    json!({
+        "uri": v1_manifest::MANIFEST_URI,
+        "name": "manifest",
+        "title": "BIR plugin manifest",
+        "description": "The Rox Mini App Protocol v1 manifest: identity, commands, scopes, routines and apps.",
+        "mimeType": v1_manifest::MANIFEST_MIME,
+    })
 }
 
 fn tool_text(value: &Value) -> Value {
@@ -815,17 +976,17 @@ fn tool_list() -> Value {
         }),
         json!({
             "name": BIR_APP_OPEN,
-            "description": "Open one of BIR's mini apps for the user in Rox: `forms` (prepare, validate, save and queue returns), `tax-profile` (a taxpayer's registration and yearly forms), `calendar` (the filing schedule: when each return is due and its status, month by month, and the deadlines moved for every taxpayer; open it when the user asks to see the schedule) or `register` (sign in to Buwiz on this computer; works signed out). With `tin`, the app opens for that saved taxpayer only (check it with bir_profiles_list first); without it, the app lets the user pick. `forms` with `form` opens one return: `form` is a code (2551Q) or a return token's value (000000000/2551Q-2026-Q3); `period` names its period (2026-Q3, jan 2026, 2025; default: an unsubmitted draft of that form, else the return to file now); `action` is view (read-only), file (fill it, the default) or submit (validate, then the user presses Submit); `draft_id` comes from bir_drafts_list. Without `tin` a return is for the current taxpayer. `tax-profile` with `branch` opens on that branch. If a tool says Buwiz sign-in is required, open `register`.",
+            "description": "Open one of BIR's mini apps for the user in Rox (Rox shows an Open button; nothing opens by itself): `forms` (prepare, validate, save and queue returns), `tax-profile` (a taxpayer's registration and yearly forms), `calendar` (the filing schedule, month by month; open it when the user asks to see the schedule), `deadlines` (a small card of the next returns due) or `register` (sign in to Buwiz on this computer; works signed out). With `tin` (a taxpayer's ticket) the app opens for that taxpayer only; without it, the app lets the user pick. `forms` with `form` opens one return: `form` is a code (2551Q) or a return's ticket; `period` names its period (2026-Q3, jan 2026, 2025; default: an unsubmitted draft of that form, else the return to file now); `action` is view (read-only), file (the default) or submit (validate, then the user presses Submit); `draft_id` comes from bir_drafts_list. Without `tin` a return is for the current taxpayer. If a tool says Buwiz sign-in is required, open `register`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "app": { "type": "string", "enum": apps::OPENABLE },
-                    "tin": { "type": "string", "description": "Taxpayer TIN (9-digit root or 14-digit branch TIN) as bir_profiles_list returns it." },
-                    "form": { "type": "string", "description": "forms only: a form code (2551Q) or a return token's value (000000000/2551Q-2026-Q3)." },
+                    "tin": { "type": "string", "description": "The taxpayer's ticket (from a token or a BIR answer)." },
+                    "form": { "type": "string", "description": "forms only: a form code (2551Q) or a return's ticket." },
                     "period": { "type": "string", "description": "forms only: the return's period, e.g. 2026-Q3, jan 2026, 2026-01, 2025." },
                     "action": { "type": "string", "enum": ["view", "file", "submit"], "description": "forms only: view (read-only), file (fill it; default) or submit (validate and show the user the Submit button)." },
                     "draft_id": { "type": "integer", "description": "forms only: a saved return's id from bir_drafts_list." },
-                    "branch": { "type": "string", "description": "tax-profile only: the branch code, e.g. 00001." }
+                    "branch": { "type": "string", "description": "tax-profile only: a branch code, e.g. 00001 (or pass the branch's ticket as `tin`)." }
                 },
                 "required": ["app"],
                 "additionalProperties": false
@@ -936,38 +1097,38 @@ fn tool_list() -> Value {
     list.extend(payment_tools());
     list.extend(deadline_tools());
     list.push(json!({
-        "name": BIR_CALL,
-        "description": "The BIR mini apps' bridge to the host: calls one `bir` host function by name with its arguments and returns its JSON result. It is used by the mini apps opened with bir_app_open, not by the assistant: do not call it yourself. `scope` holds the call to one taxpayer's 9-digit TIN root.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "fn": { "type": "string", "description": "A `bir` host function name, e.g. list_taxpayers or screen_form_open." },
-                "args": { "type": "array", "description": "The function's positional arguments, as JSON." },
-                "scope": { "type": "string", "description": "9-digit TIN root this call is held to." }
-            },
-            "required": ["fn"],
-            "additionalProperties": false
-        },
-    }));
-    list.push(json!({
         "name": BIR_RESOLVE,
-        "description": "Rox's resolver for the commands and @ scopes in the rox://manifest resource (/taxprofile, /taxform, @bir:taxprofile:, @bir:branchcode:, @bir:taxform:). Rox calls it locally as the user types; it reads only this computer's database. Do not call it yourself.",
+        "description": "Rox's resolver for the commands and @ scopes in the rox://manifest resource (/taxprofile, /taxform, @bir:taxprofile:, @bir:branchcode:, @bir:taxform:). Rox calls it as the user types; it reads only this computer's database and answers with tickets. Do not call it yourself.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "kind": { "type": "string", "enum": ["command", "scope"] },
                 "name": { "type": "string", "enum": ["taxprofile", "branchcode", "taxform"], "description": "The command or scope name." },
-                "args": { "type": "string", "description": "The text after `/name ` or after `@bir:name:`; may be empty." },
-                "complete": { "type": "boolean", "default": false, "description": "True for suggestions (at most 20) for a partial `args`." },
+                "value": { "type": "string", "description": "The text after `/name ` or after `@bir:name:`; may be empty." },
+                "complete": { "type": "boolean", "default": false, "description": "True for suggestions (at most 20) for a partial `value`." },
                 "context": {
                     "type": "object",
-                    "description": "Where the user types: `attached` lists the tokens attached there; an attached taxpayer or branch is the default taxpayer.",
-                    "properties": { "attached": { "type": "array", "items": { "type": "string" } } }
+                    "properties": { "attached": { "type": "array", "items": { "type": "object" } } }
                 }
             },
             "required": ["name"],
             "additionalProperties": false
         },
     }));
+    list.extend(app_tools::descriptors());
+    for name in v1::RESERVED {
+        list.push(json!({
+            "name": name,
+            "description": "Reserved for Rox.",
+            "inputSchema": { "type": "object" },
+        }));
+    }
+    for tool in &mut list {
+        let name = tool["name"].as_str().unwrap_or("").to_string();
+        if tool.get("annotations").is_none() && !name.starts_with("rox.") {
+            tool["annotations"] = json!({ "readOnlyHint": read_only(&name) });
+        }
+    }
     json!({ "tools": list })
 }
 
@@ -1078,7 +1239,9 @@ fn payment_tools() -> Vec<Value> {
                     "form": { "type": "string", "description": "Form code, e.g. 2551Q." },
                     "period": { "type": "string", "description": "The return's period, e.g. 2026-Q3." },
                     "note": { "type": "string", "description": "A note, e.g. where it was paid." },
-                    "proof_path": { "type": "string", "description": "Absolute path of a receipt image or PDF to keep as proof." }
+                    "proof_path": { "type": "string", "description": "Absolute path of a receipt image or PDF to keep as proof." },
+                    "proof_upload": { "type": "string", "description": "Mini apps only: a receipt sent with bir_app_upload, in place of proof_path." },
+                    "proof_name": { "type": "string", "description": "Mini apps only: the uploaded receipt's file name." }
                 },
                 "required": ["tin", "form", "period"],
                 "additionalProperties": false
@@ -1117,41 +1280,82 @@ fn payment_tools() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mini_app::v1::keys::{self, b64url};
+    use crate::mini_app::v1::{jcs, tickets};
 
     const TIN: &str = "12345678800000";
     const ROOT: &str = "123456788";
+    const OTHER: &str = "987654321";
 
     fn server() -> MiniServer {
         crate::bir_module::use_ephemeral_database();
         crate::account_gate::set_unlocked(true);
-        MiniServer::with_gate(Catalog::Embedded, Gate::Fixed(License::open()))
+        MiniServer::with_gate(Catalog::Embedded, Gate::Fixed(License::open()), false)
+    }
+
+    /// As Rox spawns it: nothing answers before `rox.provision`.
+    fn rox_server() -> MiniServer {
+        crate::bir_module::use_ephemeral_database();
+        crate::account_gate::set_unlocked(true);
+        MiniServer::with_gate(Catalog::Embedded, Gate::Fixed(License::open()), true)
+    }
+
+    fn request(server: &mut MiniServer, params: Value) -> Value {
+        server
+            .handle(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }))
+            .wait()
+            .expect("a request is answered")
     }
 
     fn call(server: &mut MiniServer, name: &str, arguments: Value) -> Value {
-        let reply = server
-            .handle(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": { "name": name, "arguments": arguments },
-            }))
-            .wait()
-            .expect("a request is answered");
-        reply["result"].clone()
+        request(server, json!({ "name": name, "arguments": arguments }))["result"].clone()
     }
 
-    fn save_taxpayer(server: &mut MiniServer) {
+    /// A call with `_meta["rox/caller"]` as the broker sends it.
+    fn call_as(server: &mut MiniServer, caller: Value, name: &str, arguments: Value) -> Value {
+        request(
+            server,
+            json!({ "name": name, "arguments": arguments, "_meta": { "rox/caller": caller } }),
+        )["result"]
+            .clone()
+    }
+
+    fn app(id: &str) -> Value {
+        json!({ "origin": "app", "plugin": "dev.goldcoders.bir", "app": id, "open_id": b64url(&[9; 16]), "ts": 1 })
+    }
+
+    fn agent() -> Value {
+        json!({ "origin": "agent", "plugin": "dev.goldcoders.bir", "ts": 1 })
+    }
+
+    fn save_taxpayer(server: &mut MiniServer, tin: &str, name: &str) {
         let saved = server
             .host(
                 "profile.save",
-                json!({"tin": TIN, "name": "Scratch Taxpayer", "rdo_code": "040"}),
+                json!({"tin": tin, "name": name, "rdo_code": "040"}),
             )
             .unwrap();
         assert_eq!(saved["status"], "ok");
     }
 
+    fn ticket_of(root: &str) -> String {
+        crate::bir_module::with_database(|db| {
+            tickets::issue(db, &tickets::Subject::Taxpayer(root.into())).map_err(HostError::new)
+        })
+        .unwrap()
+    }
+
+    fn names() -> Vec<String> {
+        tool_list()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
     #[test]
-    fn initialize_offers_tools_and_resources() {
+    fn initialize_offers_tools_resources_and_capped_instructions() {
         let mut server = server();
         let reply = server
             .handle(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
@@ -1161,321 +1365,279 @@ mod tests {
         assert!(capabilities["tools"].is_object());
         assert!(capabilities["resources"].is_object());
         assert_eq!(reply["result"]["serverInfo"]["name"], SERVER_NAME);
+        let instructions = reply["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.chars().count() <= 4000, "{}", instructions.chars().count());
+        assert!(!instructions.contains("bir_call"));
+        assert!(!instructions.contains("000000000"));
     }
 
     #[test]
-    fn tools_list_has_the_bridge_and_no_discovery_or_review() {
-        let listed = tool_list();
-        let names: Vec<&str> = listed["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|tool| tool["name"].as_str())
-            .collect();
-        for wanted in [
-            BIR_STATUS,
-            BIR_CALL,
-            BIR_APP_OPEN,
-            "bir_form_open",
-            "bir_form_fill",
-        ] {
-            assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+    fn tools_list_has_named_app_tools_and_no_generic_bridge() {
+        let names = names();
+        for wanted in [BIR_STATUS, BIR_APP_OPEN, BIR_RESOLVE, BIR_DRAFTS_LIST, "bir_form_open", "bir_form_fill"] {
+            assert!(names.iter().any(|name| name == wanted), "{wanted} missing");
         }
-        for gone in [
-            "bir_list_apps",
-            "bir_connect",
-            "bir_form_review",
-            "bir_form_preview",
-        ] {
-            assert!(!names.contains(&gone), "{gone} must not be offered");
+        for wanted in PAYMENT_TOOLS.iter().chain(DEADLINE_TOOLS.iter()) {
+            assert!(names.iter().any(|name| name == wanted), "{wanted} missing");
         }
-        for wanted in [BIR_RESOLVE, BIR_DRAFTS_LIST] {
-            assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+        for gone in ["bir_call", "bir_list_apps", "bir_connect", "bir_form_review", "bir_form_preview"] {
+            assert!(!names.iter().any(|name| name == gone), "{gone} must not be offered");
         }
-        for wanted in [
-            BIR_CALENDAR_GET,
-            BIR_CALENDAR_SET,
-            BIR_CALENDAR_CHANGES,
-            BIR_CALENDAR_LINK,
-            BIR_CONFIRMATION_SEARCH,
-            BIR_CONFIRM_FILING,
-        ] {
-            assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+        for reserved in v1::RESERVED {
+            assert!(names.iter().any(|name| name == reserved));
         }
-        for wanted in PAYMENT_TOOLS {
-            assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+        // the assistant's tools are not mistaken for the apps' own
+        for agent_tool in [BIR_APP_OPEN, BIR_STATUS, BIR_RESOLVE, "bir_form_open"] {
+            assert!(!is_app_only(agent_tool), "{agent_tool}");
         }
-        for wanted in DEADLINE_TOOLS {
-            assert!(names.contains(&wanted), "{wanted} missing from {names:?}");
+        assert!(is_app_only("bir_app_list_taxpayers") && is_app_only(app_tools::UPLOAD));
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "a tool name is listed twice");
+        for tool in tool_list()["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            if name.starts_with("rox.") {
+                continue;
+            }
+            assert!(name.starts_with("bir_") && name.len() <= 63, "{name}");
+            assert!(tool["annotations"]["readOnlyHint"].is_boolean(), "{name} has no readOnlyHint");
+            assert!(tool["description"].as_str().unwrap().chars().count() <= 1024, "{name}");
         }
-        assert_eq!(
-            names.len(),
-            HOST_TOOLS.len() + 11 + PAYMENT_TOOLS.len() + DEADLINE_TOOLS.len()
-        );
+        // every tool an app or routine names is served
+        let manifest = v1_manifest::unsigned(&Catalog::Embedded).unwrap();
+        for app in manifest["apps"].as_array().unwrap() {
+            for tool in app["permissions"]["tools"].as_array().unwrap() {
+                assert!(names.iter().any(|name| name == tool), "{} names {tool}", app["id"]);
+            }
+        }
+        for routine in manifest["routines"].as_array().unwrap() {
+            let tool = routine["query"]["tool"].as_str().unwrap();
+            assert!(read_only(tool), "{tool} must be read-only for a routine");
+        }
     }
 
     #[test]
-    fn bir_call_returns_text_and_structured_content() {
+    fn app_tools_answer_apps_only_and_only_what_the_app_lists() {
         let mut server = server();
-        let result = call(&mut server, BIR_CALL, json!({"fn": "forms_catalog"}));
-        assert_eq!(result["isError"], false);
-        let forms = &result["structuredContent"]["result"];
-        assert!(forms.as_array().is_some_and(|forms| !forms.is_empty()));
-        let text: Value =
-            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(&text, forms);
-        let bad = call(
-            &mut server,
-            BIR_CALL,
-            json!({"fn": "forms_catalog", "scope": "12"}),
-        );
-        assert_eq!(bad["isError"], true);
-        let extra = call(
-            &mut server,
-            BIR_CALL,
-            json!({"fn": "forms_catalog", "x": 1}),
-        );
-        assert_eq!(extra["isError"], true);
+        let index = call_as(&mut server, app("forms"), "bir_app_screen_forms_index", json!({}));
+        assert_eq!(index["isError"], false, "{index}");
+        assert!(index["structuredContent"]["result"].is_array());
+        // the assistant, or no caller at all, is refused
+        for caller in [agent(), json!(null)] {
+            let refused = call_as(&mut server, caller, "bir_app_screen_forms_index", json!({}));
+            assert_eq!(refused["structuredContent"]["code"], "permission_denied", "{refused}");
+        }
+        // the calendar does not list it
+        let other = call_as(&mut server, app("calendar"), "bir_app_screen_forms_index", json!({}));
+        assert_eq!(other["structuredContent"]["code"], "permission_denied");
+        // an app may not call a tool its manifest entry leaves out
+        let profiles = call_as(&mut server, app("deadlines"), "bir_profiles_list", json!({}));
+        assert_eq!(profiles["structuredContent"]["code"], "permission_denied");
     }
 
     #[test]
-    fn bir_call_async_functions_are_answered_later() {
+    fn a_ticket_is_the_mandatory_scope_of_an_app_call() {
         let mut server = server();
-        save_taxpayer(&mut server);
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        save_taxpayer(&mut server, &format!("{OTHER}00000"), "Other Taxpayer");
+        let mine = ticket_of(ROOT);
+        // naming a taxpayer needs a ticket
+        let bare = call_as(&mut server, app("forms"), "bir_app_list_tax_years", json!({"args": [TIN]}));
+        assert_eq!(bare["isError"], true, "{bare}");
+        let held = call_as(
+            &mut server,
+            app("forms"),
+            "bir_app_list_tax_years",
+            json!({"args": [TIN], "ticket": mine}),
+        );
+        assert_eq!(held["isError"], false, "{held}");
+        // the ticket's taxpayer and no other
+        let other = call_as(
+            &mut server,
+            app("forms"),
+            "bir_app_list_tax_years",
+            json!({"args": [format!("{OTHER}00000")], "ticket": mine}),
+        );
+        assert_eq!(other["isError"], true);
+        assert!(other["content"][0]["text"].as_str().unwrap().contains("outside this app's scope"));
+        // a ticket BIR did not issue
+        let forged = call_as(
+            &mut server,
+            app("forms"),
+            "bir_app_list_tax_years",
+            json!({"args": [TIN], "ticket": format!("tkt_{}", "0".repeat(26))}),
+        );
+        assert_eq!(forged["isError"], true);
+        // a list across taxpayers carries each one's ticket; with a ticket, only that one
+        let all = call_as(&mut server, app("forms"), "bir_app_list_taxpayers", json!({}));
+        let rows = all["structuredContent"]["result"].as_array().unwrap().clone();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row["ticket"].as_str().is_some_and(tickets::is_ticket)));
+        let scoped = call_as(&mut server, app("forms"), "bir_app_list_taxpayers", json!({"ticket": mine}));
+        let rows = scoped["structuredContent"]["result"].as_array().unwrap().clone();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["ticket"], mine);
+        // the app learns its ticket's TIN from BIR, the assistant does not
+        let subject = call_as(&mut server, app("forms"), app_tools::TICKET_SUBJECT, json!({"ticket": mine}));
+        assert_eq!(subject["structuredContent"]["result"]["tin"], TIN, "{subject}");
+        assert_eq!(subject["structuredContent"]["result"]["title"], "Scratch Taxpayer");
+        let refused = call_as(&mut server, agent(), app_tools::TICKET_SUBJECT, json!({"ticket": mine}));
+        assert_eq!(refused["isError"], true);
+    }
+
+    #[test]
+    fn async_app_tools_are_answered_later() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let ticket = ticket_of(ROOT);
         let reply = server.handle(json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
             "params": {
-                "name": BIR_CALL,
-                "arguments": {"fn": "screen_form_open", "args": [TIN, "0619E", 2026, 1], "scope": ROOT},
+                "name": "bir_app_screen_form_open",
+                "arguments": {"args": [TIN, "0619E", 2026, 1], "ticket": ticket},
+                "_meta": { "rox/caller": app("forms") },
             },
         }));
         assert!(matches!(reply, Reply::Later(_)));
         let reply = reply.wait().unwrap();
         assert_eq!(reply["id"], 7);
-        assert_eq!(
-            reply["result"]["structuredContent"]["result"]["form_code"],
-            "0619E"
-        );
+        assert_eq!(reply["result"]["structuredContent"]["result"]["form_code"], "0619E");
     }
 
     #[test]
-    fn bir_app_open_names_the_resource_and_the_scope() {
+    fn bir_app_open_hands_rox_a_v1_card_with_a_ticket() {
         let mut server = server();
-        save_taxpayer(&mut server);
-        let result = call(
-            &mut server,
-            BIR_APP_OPEN,
-            json!({"app": "forms", "tin": ROOT}),
-        );
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let ticket = ticket_of(ROOT);
+        let result = call_as(&mut server, agent(), BIR_APP_OPEN, json!({"app": "forms", "tin": ticket}));
         assert_eq!(result["isError"], false, "{result}");
         assert_eq!(
             result["_meta"]["rox/open"],
-            json!({"uri": "nsh://bir/forms", "props": {"tin": TIN}})
+            json!({"app": "forms", "props": {"ticket": ticket}, "ticket": ticket, "title": "BIR Forms", "placement": "full"})
         );
-        assert_eq!(
-            result["content"][0]["text"],
-            "Opening BIR Forms for Scratch Taxpayer…"
-        );
-        let plain = call(&mut server, BIR_APP_OPEN, json!({"app": "forms"}));
+        assert_eq!(result["content"][0]["text"], "Opening BIR Forms for Scratch Taxpayer…");
+        let plain = call(&mut server, BIR_APP_OPEN, json!({"app": "calendar"}));
         assert_eq!(
             plain["_meta"]["rox/open"],
-            json!({"uri": "nsh://bir/forms", "props": {}})
+            json!({"app": "calendar", "props": {}, "title": "BIR Calendar", "placement": "full"})
         );
-        let missing = call(
+        // a return: its own ticket, the form and period as props
+        let form = call_as(
             &mut server,
+            agent(),
             BIR_APP_OPEN,
-            json!({"app": "forms", "tin": "999999999"}),
+            json!({"app": "forms", "tin": ticket, "form": "2551Q", "period": "2026-Q3", "action": "submit"}),
         );
-        assert_eq!(missing["isError"], true);
-        let unknown = call(&mut server, BIR_APP_OPEN, json!({"app": "settings"}));
-        assert_eq!(unknown["isError"], true);
-    }
-
-    #[test]
-    fn bir_app_open_takes_the_contract_props() {
-        let mut server = server();
-        save_taxpayer(&mut server);
-        let opened = call(
-            &mut server,
-            BIR_APP_OPEN,
-            json!({"app": "forms", "tin": ROOT, "form": "2551Q", "period": "2026-Q3", "action": "submit"}),
-        );
-        assert_eq!(opened["isError"], false, "{opened}");
-        assert_eq!(
-            opened["_meta"]["rox/open"]["props"],
-            json!({"tin": TIN, "form": "2551Q", "period": "2026-Q3", "action": "submit"})
-        );
-        // A token's value names the taxpayer and the period.
-        let token = call(
-            &mut server,
-            BIR_APP_OPEN,
-            json!({"app": "forms", "form": format!("{ROOT}/2551Q-2026-Q3"), "draft_id": 7}),
-        );
-        assert_eq!(
-            token["_meta"]["rox/open"]["props"],
-            json!({"tin": TIN, "form": "2551Q", "period": "2026-Q3", "action": "file", "draft_id": 7})
-        );
-        let profile = call(
-            &mut server,
-            BIR_APP_OPEN,
-            json!({"app": "tax-profile", "tin": TIN, "branch": "1"}),
-        );
-        assert_eq!(profile["_meta"]["rox/open"]["uri"], "nsh://bir/tax-profile");
-        assert_eq!(
-            profile["_meta"]["rox/open"]["props"],
-            json!({"tin": ROOT, "branch": "00001"})
-        );
-        assert_eq!(
-            profile["_meta"]["rox/open"]["token"],
-            format!("@bir:branchcode:{ROOT}/00001")
-        );
-        assert!(
-            profile["_meta"]["rox/open"]["link"]
-                .as_str()
-                .unwrap()
-                .ends_with("&token=%40bir%3Abranchcode%3A123456788%2F00001")
-        );
-        assert_eq!(
-            opened["_meta"]["rox/open"]["token"],
-            format!("@bir:taxform:{ROOT}/2551Q-2026-Q3")
-        );
-        let calendar = call(&mut server, BIR_APP_OPEN, json!({"app": "calendar", "tin": ROOT}));
-        assert_eq!(calendar["_meta"]["rox/open"]["uri"], "nsh://bir/calendar", "{calendar}");
-        assert_eq!(calendar["_meta"]["rox/open"]["props"], json!({"tin": TIN}));
+        let open = &form["_meta"]["rox/open"];
+        assert_ne!(open["ticket"], ticket, "a return has its own ticket");
+        assert_eq!(open["props"]["form"], "2551Q");
+        assert_eq!(open["props"]["action"], "submit");
+        assert!(!open.to_string().contains(ROOT), "{open}");
+        // the deadline card opens inline
+        let card = call_as(&mut server, agent(), BIR_APP_OPEN, json!({"app": "deadlines", "tin": ticket}));
+        assert_eq!(card["_meta"]["rox/open"]["placement"], "inline");
+        assert_eq!(card["_meta"]["rox/open"]["props"]["ticket"], ticket);
         for bad in [
-            json!({"app": "tax-profile", "tin": ROOT, "form": "2551Q"}),
-            json!({"app": "forms", "tin": ROOT, "period": "2026-Q3"}),
-            json!({"app": "forms", "tin": ROOT, "form": "2551Q", "action": "send"}),
-            json!({"app": "forms", "tin": ROOT, "form": "1601C", "period": "Q3 2026"}),
-            json!({"app": "forms", "form": "2551Q"}),
+            json!({"app": "tax-profile", "tin": ticket, "form": "2551Q"}),
+            json!({"app": "forms", "tin": ticket, "period": "2026-Q3"}),
+            json!({"app": "settings"}),
+            json!({"app": "forms", "tin": format!("{OTHER}00000")}),
         ] {
-            assert_eq!(
-                call(&mut server, BIR_APP_OPEN, bad.clone())["isError"],
-                true,
-                "{bad}"
-            );
+            assert_eq!(call(&mut server, BIR_APP_OPEN, bad.clone())["isError"], true, "{bad}");
         }
     }
 
     #[test]
-    fn bir_resolve_answers_locally_and_remembers_the_current_taxpayer() {
+    fn bir_resolve_answers_v1_results_locally() {
         let mut server = server();
-        save_taxpayer(&mut server);
-        let result = call(
-            &mut server,
-            BIR_RESOLVE,
-            json!({"name": "taxprofile", "args": ROOT}),
-        );
-        assert_eq!(result["isError"], false, "{result}");
-        let answer = &result["structuredContent"]["result"];
-        assert_eq!(answer["ok"], true, "{answer}");
-        assert_eq!(answer["token"], format!("@bir:taxprofile:{ROOT}"));
-        let form = call(
-            &mut server,
-            BIR_RESOLVE,
-            json!({"name": "taxform", "args": "2551Q Q3 2026 file"}),
-        );
-        let answer = &form["structuredContent"]["result"];
-        assert_eq!(
-            answer["token"],
-            format!("@bir:taxform:{ROOT}/2551Q-2026-Q3")
-        );
-        let missing = call(
-            &mut server,
-            BIR_RESOLVE,
-            json!({"name": "taxform", "args": "999999999/2551Q-2026-Q3"}),
-        );
-        assert_eq!(
-            missing["structuredContent"]["result"],
-            json!({"ok": false, "error": "No taxpayer with TIN 999-999-999"})
-        );
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let resolve = json!({ "origin": "resolve", "plugin": "dev.goldcoders.bir", "ts": 1 });
+        let token = call_as(&mut server, resolve.clone(), BIR_RESOLVE, json!({"kind": "scope", "name": "taxprofile", "value": ROOT}));
+        let answer = &token["structuredContent"];
+        assert_eq!(answer["result"], "token", "{token}");
+        assert!(tickets::is_ticket(answer["ticket"].as_str().unwrap()));
+        assert!(!answer.to_string().contains(ROOT));
         // A closed license does not stop it: it never leaves this computer.
         server.set_license(License::settled(Err(UNAUTHENTICATED.to_string())));
-        let suggested = call(
+        let suggested = call_as(
             &mut server,
+            resolve.clone(),
             BIR_RESOLVE,
-            json!({"name": "taxform", "args": "255", "complete": true}),
+            json!({"kind": "scope", "name": "taxform", "value": "255", "complete": true}),
         );
-        assert!(
-            suggested["structuredContent"]["result"]["choices"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|choice| choice["value"] == format!("{ROOT}/2551Q")),
-            "{suggested}"
+        assert_eq!(suggested["structuredContent"]["result"], "choices", "{suggested}");
+        let missing = call_as(
+            &mut server,
+            resolve,
+            BIR_RESOLVE,
+            json!({"kind": "command", "name": "taxform", "value": "999999999/2551Q-2026-Q3"}),
         );
         assert_eq!(
-            call(&mut server, BIR_RESOLVE, json!({"args": "x"}))["isError"],
-            true
+            missing["structuredContent"],
+            json!({"result": "error", "message": "No taxpayer with TIN 999-999-999"})
         );
     }
 
     #[test]
     fn the_assistant_cannot_send_without_the_users_grant() {
         let mut server = server();
-        save_taxpayer(&mut server);
-        // The current taxpayer stands in for a missing TIN, and the token
-        // names the return.
-        call(
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let ticket = ticket_of(ROOT);
+        let opened = call_as(
             &mut server,
-            BIR_RESOLVE,
-            json!({"name": "taxprofile", "args": ROOT}),
-        );
-        let opened = call(
-            &mut server,
+            agent(),
             "bir_form_open",
-            json!({"code": "@bir:taxform:2551Q-2026-Q1"}),
+            json!({"tin": ticket, "code": "2551Q-2026-Q1"}),
         );
         assert_eq!(opened["isError"], false, "{opened}");
-        let refused = call(&mut server, "bir_form_send", json!({}));
-        let text: Value =
-            serde_json::from_str(refused["content"][0]["text"].as_str().unwrap()).unwrap();
+        let refused = call_as(&mut server, agent(), "bir_form_send", json!({}));
+        let text: Value = serde_json::from_str(refused["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text["status"], "approval_required");
         assert_eq!(text["queued"], false);
-        assert!(
-            text["message"].as_str().unwrap().starts_with(
-                "Needs you: press Submit in the Forms app, or grant the assistant permission"
-            ),
-            "{text}"
-        );
-        // The Forms app's toggle grants it, through the scoped bridge.
-        let granted = call(
+        // The Forms app's toggle grants it, held to its ticket.
+        let granted = call_as(
             &mut server,
-            BIR_CALL,
-            json!({"fn": "grant_send", "args": [TIN, "2551Q"], "scope": ROOT}),
+            app("forms"),
+            "bir_app_grant_send",
+            json!({"args": [TIN, "2551Q"], "ticket": ticket}),
         );
         assert_eq!(granted["isError"], false, "{granted}");
-        let checked = call(&mut server, "bir_form_send", json!({}));
-        let text: Value =
-            serde_json::from_str(checked["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            text["status"], "invalid",
-            "past the grant, the page's Validate decides"
-        );
-        assert_eq!(text["queued"], false);
-        // Revoked, it refuses again.
-        call(
-            &mut server,
-            BIR_CALL,
-            json!({"fn": "revoke_send", "args": [TIN, "2551Q"], "scope": ROOT}),
-        );
-        let again = call(&mut server, "bir_form_send", json!({}));
-        let text: Value =
-            serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+        let checked = call_as(&mut server, agent(), "bir_form_send", json!({}));
+        let text: Value = serde_json::from_str(checked["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text["status"], "invalid", "past the grant, the page's Validate decides");
+        call_as(&mut server, app("forms"), "bir_app_revoke_send", json!({"args": [TIN, "2551Q"], "ticket": ticket}));
+        let again = call_as(&mut server, agent(), "bir_form_send", json!({}));
+        let text: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text["status"], "approval_required");
-        let drafts = call(&mut server, BIR_DRAFTS_LIST, json!({"form": "2551Q"}));
+        // what the assistant reads names the taxpayer by ticket
+        let drafts = call_as(&mut server, agent(), BIR_DRAFTS_LIST, json!({"tin": ticket, "form": "2551Q"}));
         let listed = &drafts["structuredContent"]["result"]["drafts"];
         assert_eq!(listed[0]["period"], "2026-Q1", "{drafts}");
-        assert_eq!(
-            listed[0]["token"],
-            format!("@bir:taxform:{ROOT}/2551Q-2026-Q1")
-        );
+        assert!(listed[0]["token"].as_str().unwrap().starts_with("@bir:taxform:tkt_"));
+        assert!(!drafts.to_string().contains(ROOT), "{drafts}");
     }
 
     #[test]
-    fn a_closed_license_stops_model_tools_but_not_the_account_bridge() {
+    fn routines_and_resolvers_cause_no_side_effects() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let routine = json!({ "origin": "routine", "plugin": "dev.goldcoders.bir", "ts": 1 });
+        let search = call_as(&mut server, routine.clone(), BIR_CONFIRMATION_SEARCH, json!({}));
+        assert_eq!(search["isError"], false, "{search}");
+        assert!(search["structuredContent"]["result"]["query"].is_string());
+        for (tool, args) in [
+            (BIR_CALENDAR_SET, json!({"tin": ROOT, "forms": ["2551Q"], "enabled": false})),
+            (BIR_MARK_PAID, json!({"tin": ROOT, "form": "2551Q", "period": "2026-Q3"})),
+            ("bir_form_send", json!({})),
+        ] {
+            let refused = call_as(&mut server, routine.clone(), tool, args);
+            assert_eq!(refused["structuredContent"]["code"], "permission_denied", "{tool}");
+        }
+    }
+
+    #[test]
+    fn a_closed_license_stops_model_tools_but_not_the_app_tools() {
         let mut server = server();
         server.set_license(License::settled(Err(UNAUTHENTICATED.to_string())));
         let refused = call(&mut server, "bir_profiles_list", json!({}));
@@ -1483,48 +1645,106 @@ mod tests {
         assert_eq!(refused["content"][0]["text"], UNAUTHENTICATED);
         let opened = call(&mut server, BIR_APP_OPEN, json!({"app": "forms"}));
         assert_eq!(opened["isError"], true);
-        let status = call(&mut server, BIR_CALL, json!({"fn": "cloud_account_status"}));
-        assert_eq!(status["isError"], false, "{status}");
+        // (bir_app_list_rdos, not the account status: that reads the
+        // Buwiz account from the Keychain, which tests leave alone)
+        let rdos = call_as(&mut server, app("register"), "bir_app_list_rdos", json!({}));
+        assert_eq!(rdos["isError"], false, "{rdos}");
     }
 
     #[test]
-    fn resources_list_and_read_over_json_rpc() {
+    fn resources_serve_the_manifest_and_apps_whose_bytes_match_their_fingerprints() {
         let mut server = server();
         let listed = server
             .handle(json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}))
             .wait()
             .unwrap();
-        assert!(
-            listed["result"]["resources"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|resource| resource["uri"] == "nsh://bir/forms")
-        );
-        assert!(
-            listed["result"]["resources"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|resource| resource["uri"] == resolve::MANIFEST_URI)
-        );
-        let manifest = server
-            .handle(json!({"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": resolve::MANIFEST_URI}}))
-            .wait()
-            .unwrap();
-        assert_eq!(
-            manifest["result"]["contents"][0]["mimeType"],
-            "application/json"
-        );
+        let resources = listed["result"]["resources"].as_array().unwrap().clone();
+        assert!(resources.iter().any(|resource| resource["uri"] == "rox-app://forms"));
+        assert!(resources.iter().any(|resource| resource["uri"] == v1_manifest::MANIFEST_URI));
         let read = server
-            .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": "nsh://bir/forms"}}))
+            .handle(json!({"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": v1_manifest::MANIFEST_URI}}))
             .wait()
             .unwrap();
-        assert_eq!(read["result"]["contents"][0]["mimeType"], apps::MIME_TYPE);
+        assert_eq!(read["result"]["contents"][0]["mimeType"], "application/json");
+        let manifest: Value =
+            serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        for app in manifest["apps"].as_array().unwrap() {
+            let source = server
+                .handle(json!({"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": app["entry"]}}))
+                .wait()
+                .unwrap();
+            let content = &source["result"]["contents"][0];
+            assert_eq!(content["mimeType"], apps::MIME_TYPE);
+            assert_eq!(
+                app["fingerprint"],
+                v1_manifest::fingerprint(content["text"].as_str().unwrap()),
+                "{}",
+                app["id"]
+            );
+        }
         let missing = server
-            .handle(json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": "nsh://bir/none"}}))
+            .handle(json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": "rox-app://none"}}))
             .wait()
             .unwrap();
         assert_eq!(missing["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn rox_provision_comes_first_and_certifies_opens() {
+        let mut server = rox_server();
+        save_taxpayer(&mut server, TIN, "Dela Cruz Jane");
+        // nothing before provision; an unknown rox.* is method-not-found
+        let early = request(&mut server, json!({"name": BIR_STATUS, "arguments": {}}));
+        assert_eq!(early["error"]["code"], INVALID_REQUEST);
+        let early = request(&mut server, json!({"name": "rox.ticket.resolve", "arguments": {"ticket": "x"}}));
+        assert_eq!(early["error"]["code"], INVALID_REQUEST);
+        let unknown = request(&mut server, json!({"name": "rox.revoke", "arguments": {}}));
+        assert_eq!(unknown["error"]["code"], METHOD_NOT_FOUND);
+        // provision: the manifest's JCS hash; again with the same key is fine
+        let args = Value::Object(keys::tests::provision_args([5; 32]));
+        let provisioned = call(&mut server, "rox.provision", args.clone());
+        let expected = jcs::sha256_hex(&v1_manifest::served(&Catalog::Embedded).unwrap()).unwrap();
+        assert_eq!(provisioned["structuredContent"], json!({"ok": true, "manifest_sha256": expected}));
+        assert_eq!(call(&mut server, "rox.provision", args)["structuredContent"]["ok"], true);
+        let other = call(&mut server, "rox.provision", Value::Object(keys::tests::provision_args([6; 32])));
+        assert_eq!(other["structuredContent"]["code"], "invalid_args");
+        assert!(!other.to_string().contains(&b64url(&[6; 32])), "the seed is never echoed");
+        // a session certificate over the open, signed by the plugin key
+        let forms = v1_manifest::served_app(&Catalog::Embedded, "forms").unwrap().unwrap();
+        let open = json!({
+            "app": "forms", "open_id": b64url(&[9; 16]), "ks_pub": b64url(&[3; 32]),
+            "perms_sha256": v1_manifest::permissions_digest(&forms).unwrap(),
+            "not_after": chrono::Utc::now().timestamp_millis() + 60_000,
+        });
+        let cert = call(&mut server, "rox.session.open", open.clone());
+        let cert = &cert["structuredContent"];
+        assert_eq!(cert["cert"]["typ"], "rox-session");
+        assert_eq!(cert["cert"]["plugin"], "dev.goldcoders.bir");
+        assert_eq!(cert["cert"]["perms_sha256"], open["perms_sha256"]);
+        let public = server.v1.public_key().unwrap();
+        assert!(keys::tests::verify(&public, &cert["cert"], cert["cert_sig"].as_str().unwrap()));
+        let mut unknown_app = open.clone();
+        unknown_app["app"] = json!("nope");
+        assert_eq!(call(&mut server, "rox.session.open", unknown_app)["structuredContent"]["code"], "invalid_args");
+        let mut wrong = open.clone();
+        wrong["perms_sha256"] = json!("0".repeat(64));
+        assert_eq!(call(&mut server, "rox.session.open", wrong)["structuredContent"]["code"], "invalid_args");
+        // a certified open may call; an uncertified one may not
+        assert_eq!(call_as(&mut server, app("forms"), "bir_app_screen_forms_index", json!({}))["isError"], false);
+        let mut stranger = app("forms");
+        stranger["open_id"] = json!(b64url(&[8; 16]));
+        let refused = call_as(&mut server, stranger, "bir_app_screen_forms_index", json!({}));
+        assert_eq!(refused["structuredContent"]["code"], "permission_denied");
+        // tickets: a title and nothing else; uninstall forgets them
+        let ticket = ticket_of(ROOT);
+        let title = call(&mut server, "rox.ticket.resolve", json!({"ticket": ticket}));
+        assert_eq!(title["structuredContent"], json!({"valid": true, "title": "Dela Cruz Jane"}));
+        assert_eq!(
+            call(&mut server, "rox.session.close", json!({"open_id": b64url(&[9; 16])}))["structuredContent"],
+            json!({"ok": true})
+        );
+        assert_eq!(call(&mut server, "rox.uninstall", json!({}))["structuredContent"], json!({"ok": true}));
+        let gone = call(&mut server, "rox.ticket.resolve", json!({"ticket": ticket}));
+        assert_eq!(gone["structuredContent"], json!({"valid": false}));
     }
 }

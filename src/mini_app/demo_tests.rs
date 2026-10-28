@@ -119,25 +119,35 @@ fn tool(server: &mut MiniServer, name: &str, arguments: Value) -> Value {
     serde_json::from_str(text).unwrap_or(Value::String(text.to_string()))
 }
 
-/// Dela Cruz Jane, the made-up test taxpayer, on a scratch database.
+/// Dela Cruz Jane, the made-up test taxpayer, on a scratch database,
+/// created the way the Buwiz sign-in app creates one (`bir_app_create_taxpayer`).
 fn jane() -> MiniServer {
     let mut server = MiniServer::for_tests();
-    tool(
-        &mut server,
-        "bir_call",
-        json!({"fn": "create_taxpayer", "args": [{
-            "tin_root": ROOT,
-            "name": "Dela Cruz Jane",
-            "taxpayer_type": "Individual",
-            "head_office": {
-                "rdo_code": "018",
-                "registered_address": "12 Sampaguita Street, Barangay Barretto, Olongapo City",
-                "zip_code": "2200",
-                "phone": "09170000000",
-                "email": "jane.delacruz@example.com"
-            }
-        }]}),
-    );
+    let reply = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "bir_app_create_taxpayer",
+                "arguments": {"args": [{
+                    "tin_root": ROOT,
+                    "name": "Dela Cruz Jane",
+                    "taxpayer_type": "Individual",
+                    "head_office": {
+                        "rdo_code": "018",
+                        "registered_address": "12 Sampaguita Street, Barangay Barretto, Olongapo City",
+                        "zip_code": "2200",
+                        "phone": "09170000000",
+                        "email": "jane.delacruz@example.com"
+                    }
+                }]},
+                "_meta": { "rox/caller": { "origin": "app", "app": "register" } },
+            },
+        }))
+        .wait()
+        .expect("answered");
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
     server
 }
 

@@ -3,10 +3,16 @@
 //! It owns the live database and the submission worker the way bir-shell
 //! does (same account gate, same single-owner lock), and answers MCP itself:
 //!
-//! - `bir-mini-app mcp` speaks MCP on stdin/stdout (Rox spawns it).
+//! - `bir-mini-app mcp` speaks MCP on stdin/stdout. Rox spawns it as the v1
+//!   plugin `dev.goldcoders.bir` ([`v1`]): it answers nothing before
+//!   `rox.provision`, and serves the signed manifest `BIR_V1_MANIFEST`
+//!   names. stdio is Rox's only transport (spec 14.3).
 //! - `bir-mini-app serve --http 127.0.0.1:PORT` is a long-lived daemon on
 //!   bir-mcp's loopback Streamable HTTP door (OAuth bearer per request), so
-//!   queued filings keep going when Rox is closed.
+//!   queued filings keep going when Rox is closed. It is for the BIR desktop
+//!   side, not for Rox: no provisioning, and the apps' tools refuse it.
+//! - `bir-mini-app print-v1-manifest` prints the unsigned v1 manifest of
+//!   this build's apps, for `scripts/sign-v1-manifest.sh`.
 //!
 //! Everything that touches the database runs on the main thread: the `bir`
 //! module keeps its handle thread-local. See [`server`] for the tools,
@@ -23,6 +29,7 @@ mod demo_tests;
 mod resolve;
 mod scope;
 mod server;
+mod v1;
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -32,9 +39,13 @@ use server::{MiniServer, Reply};
 
 const USAGE: &str = "bir-mini-app: BIR without a window, as an MCP server for Rox mini apps.
 
-Usage: bir-mini-app mcp                          speak MCP (JSON-RPC 2.0, one message per line) on stdin/stdout
+Usage: bir-mini-app mcp                          speak MCP (JSON-RPC 2.0, one message per line) on stdin/stdout,
+                                                 as Rox's Mini App Protocol v1 plugin dev.goldcoders.bir
        bir-mini-app serve --http 127.0.0.1:PORT  serve MCP Streamable HTTP at http://127.0.0.1:PORT/mcp
-                                                 (loopback only; OAuth protected resource, as bir-mcp --http)
+                                                 (loopback only; OAuth protected resource, as bir-mcp --http;
+                                                 for the BIR desktop side, not a Rox transport)
+       bir-mini-app print-v1-manifest            print this build's unsigned v1 manifest (app fingerprints
+                                                 from the sources it serves) for scripts/sign-v1-manifest.sh
        bir-mini-app --version
        bir-mini-app --help
 
@@ -45,6 +56,8 @@ Environment:
   BIR_DATABASE_PATH    database file (default: the app's data directory)
   BIR_MINI_APPS_DIR    read the TSX mini apps and apps.json from this directory
                        instead of the copies built into the binary
+  BIR_V1_MANIFEST      the signed v1 manifest to serve at rox://manifest (without it the
+                       unsigned one is served, and Rox refuses the plugin)
   BUWIZ_ACCESS_TOKEN   stdio only: license tools with this agent token instead of
                        the Buwiz account saved on this computer";
 
@@ -58,6 +71,16 @@ pub fn main() -> ExitCode {
         .as_slice()
     {
         ["mcp"] => run(Transport::Stdio),
+        ["print-v1-manifest"] => match v1::manifest::unsigned(&apps::Catalog::from_env()) {
+            Ok(manifest) => {
+                println!("{}", serde_json::to_string_pretty(&manifest).expect("json value"));
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("bir-mini-app: {error}");
+                ExitCode::from(1)
+            }
+        },
         ["serve", "--http", addr] => run(Transport::Http(addr.to_string())),
         ["serve", ..] => {
             eprintln!("serve needs --http 127.0.0.1:PORT\n\n{USAGE}");
@@ -98,7 +121,12 @@ fn run(transport: Transport) -> ExitCode {
     if crate::account_gate::is_unlocked() {
         crate::bir_module::open_database_at_launch();
     }
-    let mut server = MiniServer::new(apps::Catalog::from_env());
+    let catalog = apps::Catalog::from_env();
+    if let Some(problem) = v1::manifest::staleness(&catalog) {
+        eprintln!("bir-mini-app: {problem}");
+    }
+    let rox = matches!(transport, Transport::Stdio);
+    let mut server = MiniServer::new(catalog, rox);
     let code = match transport {
         Transport::Stdio => match serve_stdio(&mut server) {
             Ok(()) => ExitCode::SUCCESS,
@@ -117,9 +145,23 @@ fn run(transport: Transport) -> ExitCode {
 /// Open the database file now, signed in or not, so a second owner fails at
 /// start with the database's own "already open" sentence rather than on the
 /// first tool call. The account functions use this same handle.
+///
+/// Rox respawns this process back to back (an install reviews one spawn,
+/// then starts another), and the previous process may still hold the
+/// owner lock for a moment after it was told to stop: wait up to two
+/// seconds for it before giving up.
 fn claim_database() -> Result<(), String> {
-    crate::bir_module::with_account_database(|_| Ok(()))
-        .map_err(|error| error.message().to_string())
+    let mut tries = 0;
+    loop {
+        match crate::bir_module::with_account_database(|_| Ok(())) {
+            Ok(()) => return Ok(()),
+            Err(error) if tries < 20 && error.message().contains("Single live-DB owner") => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => return Err(error.message().to_string()),
+        }
+    }
 }
 
 /// One line in, one line out. A `Later` reply (an async host call such as a

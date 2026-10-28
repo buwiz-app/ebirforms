@@ -15,6 +15,11 @@
     "description": "See when each taxpayer's BIR returns are due and where each one stands, month by month, and move a deadline (or put it back) for every taxpayer."
   },
   {
+    "id": "deadlines",
+    "title": "BIR Deadlines",
+    "description": "The next BIR returns due for one taxpayer (or all of them), as a small card in the chat, each with a button that opens it in BIR Forms."
+  },
+  {
     "id": "register",
     "title": "Buwiz Sign-in",
     "description": "Sign in to Buwiz (or create an account) on this computer so BIR can open the taxpayer database."

@@ -1,12 +1,13 @@
-//! `rox://manifest` and `bir_resolve`: the slash commands and `@` scopes
-//! this server announces to Rox, and what they name.
+//! `bir_resolve`'s resolver: the slash commands and `@` scopes the v1
+//! manifest announces to Rox, and what they name.
 //!
-//! Rox knows nothing about BIR. It reads the manifest, and when the user
-//! types `/taxform 2551Q Q3 2026` or a `@bir:taxform:...` token it calls
-//! the tool the manifest names, here, and never the model. Every answer
-//! reads the local database only (no network), so an unknown TIN comes back
-//! at once. A resolved answer is a `rox://app/bir/<app>?props=` link, its
-//! title, and the canonical token (TIN included) Rox can pin and reuse.
+//! Rox knows nothing about BIR. When the user types `/taxform 2551Q Q3
+//! 2026` or a `@bir:taxform:...` token it calls the tool the manifest names,
+//! here, and never the model. Every answer reads the local database only
+//! (no network), so an unknown TIN comes back at once. This module answers
+//! in TINs (a v0 `rox://app/bir/<app>?props=` link, its title and the
+//! canonical TIN token); [`super::v1::resolve`] turns that into the spec's
+//! `result` shapes with tickets, so nothing Rox stores names a TIN.
 //!
 //! `/taxprofile <tin>` and `@bir:branchcode:` set the current taxpayer,
 //! kept in the database's settings so it survives restarts; a taxform
@@ -20,10 +21,8 @@ use bir_core::forms::FormDraftSummary;
 use bir_core::forms::taxform::{self, Cadence, TaxPeriod, TaxformAction, TaxformArgs};
 use bir_core::tax_profile::{BranchField, ResolvedBranch, TaxpayerWithBranches};
 use chrono::{Datelike, NaiveDate};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
-pub(crate) const MANIFEST_URI: &str = "rox://manifest";
-pub(crate) const MANIFEST_MIME: &str = "application/json";
 pub(crate) const RESOLVE_TOOL: &str = "bir_resolve";
 /// Settings key of the current taxpayer: one branch's full TIN.
 pub(crate) const CURRENT_TAXPAYER_KEY: &str = "mini_app.current_taxpayer";
@@ -32,117 +31,6 @@ const SERVER: &str = "bir";
 const MAX_CHOICES: usize = 20;
 /// Periods offered for one form while typing.
 const MAX_PERIODS: usize = 12;
-
-/// The manifest Rox reads from `resources/read rox://manifest`.
-pub(crate) fn manifest() -> Value {
-    json!({
-        "title": "BIR",
-        "commands": [
-            { "name": "taxprofile", "args": "[tin]", "description": "Set or open the current taxpayer", "resolve": RESOLVE_TOOL },
-            { "name": "taxform", "args": "[form] [period] [view|file|submit]", "description": "Open a BIR return", "resolve": RESOLVE_TOOL },
-        ],
-        "scopes": [
-            { "name": "taxprofile", "description": "Taxpayer by TIN", "resolve": RESOLVE_TOOL, "attach": true, "hint": TAXPROFILE_HINT },
-            { "name": "branchcode", "description": "Taxpayer branch", "resolve": RESOLVE_TOOL, "attach": true, "hint": BRANCHCODE_HINT },
-            { "name": "taxform", "description": "Return: form and period", "resolve": RESOLVE_TOOL, "hint": TAXFORM_HINT },
-        ],
-        "routines": routines(),
-    })
-}
-
-/// Routine templates Rox can turn into routines: every `every_s` seconds
-/// the Rox server calls `query.tool` (no AI), reads the Gmail search from
-/// its `query.field`, searches the server `needs` names, and runs `prompt`
-/// with each email it has not seen.
-fn routines() -> Value {
-    json!([
-        {
-            "id": "bir-confirmations",
-            "name": "BIR filing confirmations",
-            "description": "Checks Gmail for BIR's eBIRForms confirmation emails and marks each filed return confirmed in BIR.",
-            "every_s": 300,
-            "needs": "gmail",
-            "query": { "tool": "bir_confirmation_search", "field": "query" },
-            "prompt": CONFIRMATIONS_PROMPT,
-        },
-        {
-            "id": "bir-payments",
-            "name": "BIR payments (MyEG and banks)",
-            "description": "Checks Gmail for payment emails (MyEG, banks, GCash, Maya, LandBank Link.BizPortal) and records each payment on its BIR return.",
-            "every_s": 300,
-            "needs": "gmail",
-            "query": { "tool": "bir_payment_search", "field": "query" },
-            "prompt": PAYMENTS_PROMPT,
-        },
-    ])
-}
-
-const CONFIRMATIONS_PROMPT: &str = "New emails matched the BIR confirmation search. For each one: \
-read it through the Google Workspace tools and find BIR's File name (e.g. \
-00000000000000-2551Qv2018-092026Q3.xml) and the Date and Time received by BIR. The file name \
-starts with the TIN (with the branch) and names the form and period (092026Q3 is Q3 2026, 092026 \
-is September 2026). Call bir_confirm_filing with tin, form, period, reference (the File name), \
-received_at (BIR's date and time, Manila) and message_id (the email's id). If the email is not a \
-filing confirmation, skip it. Then post a short summary, one line per email: the return (form, \
-period, taxpayer) and the result: confirmed, already confirmed, or not confirmed with the tool's \
-reason. Do not file, submit or change anything else.";
-
-const PAYMENTS_PROMPT: &str = "New emails matched the BIR payment search. For each one: read it \
-through the Google Workspace tools and pass its text (subject and body) to bir_payment_parse. If \
-it returns a payment, call bir_record_payment with its `record` plus message_id (the email's id) \
-and raw (the email's text). If it returns null, read the email yourself: when it is a payment of a \
-BIR return, call bir_record_payment with tin (and branch), form, period (the return period; its \
-last day such as 09/30/2026 is fine), channel (who took it), reference, amount (the tax, without \
-fees), fee, paid_at, message_id and raw; when it is not, skip it. A payment never confirms a filing: \
-leave confirmation to BIR's own email. Then post a short summary, one line per payment: the return \
-(form, period, taxpayer), amount and channel, and whether it was recorded, already recorded, or \
-for a return not in BIR.";
-
-/// What the agent is told when a message holds an `@bir:taxform:` token.
-const TAXFORM_HINT: &str = "For an `@bir:taxform:` token: call bir_form_open with its value as `code`, \
-then bir_form_needs_you and bir_form_fields. Walk the user through what the return still needs, one \
-item at a time, with the official rule for each (bir_form_validate's messages). Offer to read an \
-attached Excel or CSV and fill from it with bir_form_fill (`source: document`). Never submit \
-unless a send grant exists (bir_form_send answers approval_required otherwise); then tell the user \
-to press Submit in the Forms app. bir_app_open with `form` set to the token's value shows the return.";
-
-/// What the agent is told when a taxpayer token is in a message or attached.
-const TAXPROFILE_HINT: &str = "An `@bir:taxprofile:<tin>` token names one taxpayer (a 9-digit TIN is \
-the head office). Attached to this chat, BIR tools default to that taxpayer: pass its TIN as `tin` \
-to bir_drafts_list, bir_form_open, bir_calendar_get, bir_calendar_set and bir_app_open (forms, \
-tax-profile, calendar), and in `tins` to bir_confirmation_search, unless the user names another \
-taxpayer. bir_dues_list and bir_profiles_list read deadlines and profiles; bir_app_open \
-{\"app\": \"calendar\", \"tin\": ...} shows the filing schedule. For payments pass it to \
-bir_payments_list, bir_mark_paid, bir_record_payment and bir_filing_record, and in `tins` to \
-bir_payment_search.";
-
-/// The same, for one branch (`@bir:branchcode:<root>/<code>`).
-const BRANCHCODE_HINT: &str = "An `@bir:branchcode:<tin>/<branch>` token names one branch of a \
-taxpayer; its full TIN is the 9-digit root followed by the 5-digit branch code. Attached to this \
-chat, BIR tools default to that branch: pass that 14-digit TIN as `tin` to bir_drafts_list, \
-bir_form_open, bir_calendar_get and bir_app_open, unless the user names another taxpayer.";
-
-/// The manifest's `resources/list` entry.
-pub(crate) fn descriptor() -> Value {
-    json!({
-        "uri": MANIFEST_URI,
-        "name": "manifest",
-        "title": "BIR commands and scopes",
-        "description": "The slash commands and @ scopes this server announces to Rox, and the tool that resolves them.",
-        "mimeType": MANIFEST_MIME,
-    })
-}
-
-/// `resources/read rox://manifest`.
-pub(crate) fn read() -> Value {
-    json!({
-        "contents": [{
-            "uri": MANIFEST_URI,
-            "mimeType": MANIFEST_MIME,
-            "text": manifest().to_string(),
-        }],
-    })
-}
 
 /// One `bir_resolve` call.
 pub(crate) struct Request {
@@ -154,59 +42,10 @@ pub(crate) struct Request {
     pub attached: Vec<String>,
 }
 
-pub(crate) fn request(arguments: &Map<String, Value>) -> Result<Request, String> {
-    if let Some(key) = arguments
-        .keys()
-        .find(|key| !["name", "args", "complete", "context"].contains(&key.as_str()))
-    {
-        return Err(format!(
-            "unknown argument `{key}` (allowed: name, args, complete, context)"
-        ));
-    }
-    let attached = match arguments.get("context") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Object(context)) => match context.get("attached") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(tokens)) => tokens
-                .iter()
-                .filter_map(Value::as_str)
-                .filter_map(attached_tin)
-                .collect(),
-            Some(other) => {
-                return Err(format!(
-                    "`context.attached` must be a list of tokens (got {other})"
-                ));
-            }
-        },
-        Some(other) => return Err(format!("`context` must be an object (got {other})")),
-    };
-    let name = arguments
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or("`name` is required: a command or scope name from rox://manifest")?
-        .trim()
-        .to_ascii_lowercase();
-    let args = match arguments.get("args") {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(args)) => args.clone(),
-        Some(other) => return Err(format!("`args` must be a string (got {other})")),
-    };
-    let complete = match arguments.get("complete") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(complete)) => *complete,
-        Some(other) => return Err(format!("`complete` must be true or false (got {other})")),
-    };
-    Ok(Request {
-        name,
-        args,
-        complete,
-        attached,
-    })
-}
-
 /// The TIN an attached token names: `@bir:taxprofile:<tin>` (a 9-digit TIN
 /// is the head office) or `@bir:branchcode:<root>/<code>`. Other tokens
 /// name no taxpayer to default to.
+#[cfg(test)]
 pub(crate) fn attached_tin(token: &str) -> Option<String> {
     let token = token.trim();
     if let Some(value) = token.strip_prefix("@bir:taxprofile:") {
@@ -480,6 +319,56 @@ pub(crate) fn app_token(app: &str, props: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The start of a v0 app link, as [`app_link`] writes it.
+pub(crate) const V0_LINK_PREFIX: &str = "rox://app/bir/";
+
+/// A v0 link's app and props: `rox://app/bir/<app>?props=<JSON>`.
+pub(crate) fn parse_v0_link(link: &str) -> Option<(String, Value)> {
+    let rest = link.strip_prefix(V0_LINK_PREFIX)?;
+    let (app, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let props = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("props="))
+        .and_then(decode_component)
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    Some((app.to_string(), props))
+}
+
+/// The inverse of [`encode_component`]; `None` for broken escapes.
+pub(crate) fn decode_component(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut input = text.bytes();
+    while let Some(byte) = input.next() {
+        if byte == b'%' {
+            let hex = [input.next()?, input.next()?];
+            bytes.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// A saved branch's names, for a ticket's title.
+pub(crate) struct WhoNames {
+    pub name: String,
+    pub branch_name: String,
+    pub branch_code: String,
+}
+
+/// The names of the branch `tin` names (a 9-digit root is the head
+/// office), while it is saved.
+pub(crate) fn who_names(db: &Database, tin: &str) -> Option<WhoNames> {
+    let book = Book::read(db).ok()?;
+    let who = book.find(&only_digits(tin))?;
+    Some(WhoNames {
+        name: who.name().to_string(),
+        branch_name: who.branch.name.clone(),
+        branch_code: who.branch.branch_code.clone(),
+    })
 }
 
 /// JavaScript's `encodeURIComponent`.
@@ -1627,29 +1516,6 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_names_the_commands_scopes_and_resolver() {
-        let manifest = manifest();
-        let names = |list: &str| -> Vec<String> {
-            manifest[list]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|entry| {
-                    assert_eq!(entry["resolve"], RESOLVE_TOOL);
-                    entry["name"].as_str().unwrap().to_string()
-                })
-                .collect()
-        };
-        assert_eq!(names("commands"), ["taxprofile", "taxform"]);
-        assert_eq!(names("scopes"), ["taxprofile", "branchcode", "taxform"]);
-        let read = read();
-        assert_eq!(read["contents"][0]["mimeType"], MANIFEST_MIME);
-        let text: Value =
-            serde_json::from_str(read["contents"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(text, manifest);
-    }
-
-    #[test]
     fn taxform_resolves_to_a_forms_link_and_a_canonical_token() {
         let db = db();
         db.set_setting(CURRENT_TAXPAYER_KEY, TIN).unwrap();
@@ -2005,48 +1871,6 @@ mod tests {
                 .unwrap()
                 .ends_with("&token=%40bir%3Ataxform%3A123456788%2F2551Q-2026-Q2")
         );
-    }
-
-    #[test]
-    fn the_manifest_marks_attachable_scopes_and_hints() {
-        let manifest = manifest();
-        let scope = |name: &str| {
-            manifest["scopes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|scope| scope["name"] == name)
-                .unwrap()
-                .clone()
-        };
-        assert_eq!(scope("taxprofile")["attach"], true);
-        assert_eq!(scope("branchcode")["attach"], true);
-        assert!(scope("taxform").get("attach").is_none());
-        assert!(scope("taxform")["hint"].as_str().unwrap().contains("bir_form_needs_you"));
-        assert!(scope("taxprofile")["hint"].as_str().unwrap().contains("bir_calendar_get"));
-        assert!(scope("taxprofile")["description"].as_str().unwrap().starts_with("Taxpayer"));
-    }
-
-    #[test]
-    fn the_manifest_ships_the_gmail_routine_templates() {
-        let manifest = manifest();
-        let routines = manifest["routines"].as_array().unwrap();
-        let ids: Vec<&str> = routines.iter().map(|r| r["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["bir-confirmations", "bir-payments"]);
-        for (routine, tool, records) in [
-            (&routines[0], "bir_confirmation_search", "bir_confirm_filing"),
-            (&routines[1], "bir_payment_search", "bir_record_payment"),
-        ] {
-            assert_eq!(routine["needs"], "gmail");
-            assert_eq!(routine["every_s"], 300);
-            assert_eq!(routine["query"], json!({"tool": tool, "field": "query"}));
-            assert!(!routine["name"].as_str().unwrap().is_empty());
-            assert!(!routine["description"].as_str().unwrap().is_empty());
-            let prompt = routine["prompt"].as_str().unwrap();
-            assert!(prompt.contains(records), "{prompt}");
-            assert!(prompt.contains("summary"), "{prompt}");
-        }
-        assert!(routines[1]["prompt"].as_str().unwrap().contains("bir_payment_parse"));
     }
 
     #[test]
