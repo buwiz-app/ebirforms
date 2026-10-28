@@ -24,9 +24,12 @@ use serde_json::{Map, Value, json};
 use super::{answers, calendar, lookup, return_view, taxpayer};
 
 /// The inline size a card app declares (the host clamps it): each app
-/// draws cards of about one height, so its card fits what it shows. The
-/// short ones (a question, a few facts and a button or two) are their own
-/// apps rather than leaving a tall frame half empty.
+/// draws cards of about one height, so its first frame is near what it
+/// shows. The short ones (a question, a few facts and a button or two) are
+/// their own apps rather than leaving a tall frame half empty. From there
+/// the card kit reports its content height (`rox.fit`) and Rox sizes the
+/// card to it within `min_height`..`max_height`: a status line or button
+/// that appears grows the card, and only a list past 640 scrolls.
 pub(crate) fn inline(app: &str) -> Value {
     let height = match app {
         "card-quick" => 230,
@@ -35,7 +38,7 @@ pub(crate) fn inline(app: &str) -> Value {
         "card-money" | "card-people" | "card-forms" => 320,
         _ => 360,
     };
-    json!({ "width": 560, "height": height, "min_width": 320, "resizable": true })
+    json!({ "width": 560, "height": height, "min_width": 320, "min_height": 120, "max_height": 640, "resizable": true })
 }
 
 /// Card kinds: id, app, small.
