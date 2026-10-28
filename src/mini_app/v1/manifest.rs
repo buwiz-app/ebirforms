@@ -27,7 +27,7 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.0.0";
+pub(crate) const VERSION: &str = "2.1.0";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
