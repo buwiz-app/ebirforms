@@ -348,7 +348,7 @@ impl MiniServer {
         if caller.origin == Origin::Agent && caller.routine.is_some() {
             let today = taxform::today();
             let backed = match name {
-                BIR_RECORD_PAYMENT => database(|db| payments::email_backed(db, &mut arguments, today)),
+                BIR_RECORD_PAYMENT => payments::email_backed(&mut arguments, today),
                 BIR_CONFIRM_FILING => confirm::email_backed(&arguments, today),
                 _ => Ok(()),
             };
@@ -381,7 +381,9 @@ impl MiniServer {
                 // Signed out or offline, in plain words.
                 plain::rewrite(name, &mut result, caller.origin == Origin::App);
                 // The answer's card (spec 9.8), for the assistant's answers.
-                if caller.origin == Origin::Agent {
+                // A routine's turn reads each email and records it itself:
+                // a Payment found card there would only pile up.
+                if caller.origin == Origin::Agent && !(caller.routine.is_some() && name == BIR_PAYMENT_PARSE) {
                     cards::decorate(name, &asked, &mut result);
                 }
                 // What the model or an app reads names taxpayers by ticket.
@@ -707,6 +709,9 @@ impl MiniServer {
             // Payments and the printable filing record.
             BIR_PAYMENT_SEARCH => Ok(now(routine_query(self.on_database(name, arguments, payments::search)))),
             BIR_PAYMENT_PARSE => Ok(now(self.on_database(name, arguments, |db, arguments, today| {
+                if let (Some(Value::String(id)), Some(Value::String(text))) = (arguments.get("message_id"), arguments.get("text")) {
+                    payments::remember_email(id, text);
+                }
                 payments::parse(arguments, today).map(|parsed| payments::with_recorded(db, parsed, today))
             }))),
             BIR_RECORD_PAYMENT => Ok(now(self.on_database(name, arguments, |db, arguments, today| {
@@ -2228,6 +2233,27 @@ mod tests {
         result["content"][0]["text"].as_str().unwrap().to_string()
     }
 
+    /// MyEG's real layout (Gmail's plain text): each label in asterisks,
+    /// the TIN without dashes, and the model sends `record` as it got it.
+    #[test]
+    fn a_routine_turn_records_myeg_as_gmail_prints_it() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        let email = "MyEG Philippines Centralized Management Portal\n\nTransaction Success\n\nDear Customer,\n\nThank you for using our service, the following details have been submitted to BUREAU OF INTERNAL REVENUE(BIR):\n\n*Agency Name* BUREAU OF INTERNAL REVENUE (BIR) *TIN* 123456788 *Branch Code* 00000 *RDO Code* 040 - PASIG *Form Type* 2551Q *Tax Type* PT *Return Period* 09/30/2026 *Transaction Date* 10/26/2026 18:54:10 *Transaction Number* TEST2026102618542400000002 *Reference Number* TESTREF002 *Payment Channel* Mobile *Transaction Amount* PHP 992.10 *Bank Fee* PHP 0.00 *Transaction Fee* PHP 20.00 *Total Amount* PHP 1,012.10\n\nSincerely,\n\nMYEG Philippines Inc.";
+        let turn = routine_turn("bir-payments");
+        let parsed = call_as(&mut server, turn.clone(), BIR_PAYMENT_PARSE, json!({"text": email, "message_id": "msg-2"}));
+        let record = parsed["structuredContent"]["result"]["record"].clone();
+        assert!(record.is_object(), "{parsed}");
+        // a routine's turn shows no Payment found card
+        assert!(parsed["_meta"]["rox/open"].is_null(), "{parsed}");
+        let recorded = call_as(&mut server, turn, BIR_RECORD_PAYMENT, record.clone());
+        assert_eq!(recorded["isError"], false, "record {record}\n→ {recorded}");
+        // in a chat, the same email once recorded shows no card either
+        let again = call_as(&mut server, agent(), BIR_PAYMENT_PARSE, json!({"text": email}));
+        assert_eq!(again["structuredContent"]["result"]["recorded"], true, "{again}");
+        assert!(again["_meta"]["rox/open"].is_null(), "{again}");
+    }
+
     #[test]
     fn a_routine_turn_records_the_payment_its_email_says() {
         let mut server = server();
@@ -2263,6 +2289,8 @@ mod tests {
         save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
         save_taxpayer(&mut server, OTHER, "Other Taxpayer");
         let turn = routine_turn("bir-payments");
+        // the routine read this email first: BIR keeps what it said
+        crate::mini_app::payments::remember_email("msg-TESTREF002", &payment_email("TESTREF002"));
         let edited = |key: &str, value: Value| {
             let mut record = payment_record("TESTREF002");
             record[key] = value;
@@ -2281,15 +2309,16 @@ mod tests {
             assert!(message.contains("a routine records only what the email says"), "{message}");
             assert!(message.contains(field), "{key}: {message}");
         }
-        // the email itself is required, and it is the only proof
-        for (key, value) in [("message_id", Value::Null), ("raw", Value::Null), ("raw", json!(""))] {
-            let message = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited(key, value)));
-            assert!(message.contains("`message_id` and its text as `raw`"), "{message}");
-        }
+        // the email is required, read first, and it is the only proof
+        let message = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("message_id", Value::Null)));
+        assert!(message.contains("pass the email's `message_id`"), "{message}");
+        let unread = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("message_id", json!("never-read"))));
+        assert!(unread.contains("read the email with bir_payment_parse first"), "{unread}");
         let proof = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("proof_path", json!("/etc/hosts"))));
         assert!(proof.contains("proof_path"), "{proof}");
-        // an email bir cannot read records nothing
-        let unknown = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("raw", json!("Thanks for paying."))));
+        // an email bir cannot read records nothing, whatever `raw` the model sends
+        crate::mini_app::payments::remember_email("msg-thanks", "Thanks for paying.");
+        let unknown = denied(&call_as(&mut server, turn.clone(), BIR_RECORD_PAYMENT, edited("message_id", json!("msg-thanks"))));
         assert!(unknown.contains("does not know this email's format"), "{unknown}");
         // nothing was recorded
         let listed = call(&mut server, BIR_PAYMENTS_LIST, json!({"tin": TIN}));

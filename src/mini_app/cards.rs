@@ -386,7 +386,8 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             vec![],
         ),
         // The email's text stays out of the card (it names the TIN, 6.6).
-        "bir_payment_parse" if data.is_object() => {
+        // Nothing new to show: the payment is on its return already.
+        "bir_payment_parse" if data.is_object() && data["recorded"] != true => {
             let mut snapshot = without(&data, &["raw"]);
             if let Some(record) = snapshot.get_mut("record").and_then(Value::as_object_mut) {
                 record.remove("raw");
@@ -399,7 +400,8 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             open("receipt", &format!("Receipt · {}", data["label"].as_str().unwrap_or("")), ticket.as_deref(), without(&data, &["title"]), "", args_value),
             vec![],
         ),
-        "bir_confirm_filing" => (
+        // A confirmation BIR already had shows no second card.
+        "bir_confirm_filing" if data["already"] != true => (
             // BIR's file name starts with the TIN: the card shows the return
             // and when BIR received it, never the file name.
             open("confirm", "BIR confirmation", None, without(&data, &["reference", "message_id", "filename"]), "", args_value),

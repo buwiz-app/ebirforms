@@ -535,40 +535,6 @@ impl<'a> Scrubber<'a> {
     }
 }
 
-/// Text the model hands back after reading it in a BIR answer (a payment
-/// email's `raw`): each ticket BIR issued becomes the formatted TIN it
-/// stands for, as the text read before [`Scrubber::text`]; anything else,
-/// an unknown ticket too, stays.
-pub(crate) fn untickets(db: &Database, text: &str) -> Result<String, String> {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\btkt_[0-9A-HJKMNP-TV-Z]{26}\b").expect("regex"));
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for found in re.find_iter(text) {
-        out.push_str(&text[last..found.start()]);
-        match tickets::subject(db, found.as_str())? {
-            Some(subject) => out.push_str(&dashed(&subject.tin())),
-            None => out.push_str(found.as_str()),
-        }
-        last = found.end();
-    }
-    out.push_str(&text[last..]);
-    Ok(out)
-}
-
-/// A TIN as BIR prints it: `000-000-000`, with `-00000` for a branch.
-fn dashed(tin: &str) -> String {
-    if tin.len() < 9 || !tin.bytes().all(|byte| byte.is_ascii_digit()) {
-        return tin.to_string();
-    }
-    let mut out = format!("{}-{}-{}", &tin[..3], &tin[3..6], &tin[6..9]);
-    if tin.len() > 9 {
-        out.push('-');
-        out.push_str(&tin[9..]);
-    }
-    out
-}
-
 // ------------------------------------------------------------ opening apps
 
 /// An app's v1 props and the ticket of what it opens on.

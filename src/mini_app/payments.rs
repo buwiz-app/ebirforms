@@ -878,21 +878,25 @@ fn full_tin(tin: &str) -> Option<String> {
 /// the email has one. The model read `raw` in bir's answer with tickets for
 /// TINs: they are read back first, and `raw` is kept that way.
 pub(crate) fn email_backed(
-    db: &Database,
     arguments: &mut Map<String, Value>,
     today: NaiveDate,
 ) -> Result<(), String> {
     const RULE: &str = "a routine records only what the email says";
-    let message_id = optional_text(arguments, "message_id")?;
-    let (Some(_), Some(raw)) = (message_id, optional_text(arguments, "raw")?) else {
+    let Some(message_id) = optional_text(arguments, "message_id")? else {
         return Err(format!(
-            "{RULE}: pass the email's `message_id` and its text as `raw` (bir_payment_parse's `record` carries both)"
+            "{RULE}: pass the email's `message_id` (bir_payment_parse's `record` carries it)"
         ));
     };
     if optional_text(arguments, "proof_path")?.is_some() {
         return Err(format!("{RULE}: the email is the proof, so a routine passes no `proof_path`"));
     }
-    let raw = super::v1::untickets(db, &raw)?;
+    // the email as bir_payment_parse read it, not the copy the model sends
+    // back (that one has its TIN hidden, and could be changed)
+    let Some(raw) = read_email(&message_id) else {
+        return Err(format!(
+            "{RULE}: read the email with bir_payment_parse first, with the same `message_id`"
+        ));
+    };
     let mut email = Map::new();
     email.insert("text".into(), json!(raw));
     let parsed = parse(&email, today)?;
@@ -930,6 +934,28 @@ pub(crate) fn email_backed(
     }
     arguments.insert("raw".into(), json!(raw));
     Ok(())
+}
+
+/// The payment emails bir_payment_parse read lately, by message_id: what a
+/// routine's record is checked against ([`email_backed`]). In memory only,
+/// the last [`READ_KEPT`].
+static READ: std::sync::Mutex<std::collections::VecDeque<(String, String)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+const READ_KEPT: usize = 64;
+
+/// Keep `text` as the email `message_id` says, for [`email_backed`].
+pub(crate) fn remember_email(message_id: &str, text: &str) {
+    let mut read = READ.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    read.retain(|(id, _)| id != message_id);
+    if read.len() == READ_KEPT {
+        read.pop_front();
+    }
+    read.push_back((message_id.to_string(), text.to_string()));
+}
+
+fn read_email(message_id: &str) -> Option<String> {
+    let read = READ.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    read.iter().find(|(id, _)| id == message_id).map(|(_, text)| text.clone())
 }
 
 /// `text` cut to at most `max` bytes, at a character boundary.
@@ -1017,7 +1043,7 @@ fn labelled<'a>(text: &str, labels: &[&'a str]) -> Vec<(&'a str, String)> {
     for (i, (_, end, label)) in found.iter().enumerate() {
         let stop = found.get(i + 1).map_or(flat.len(), |next| next.0);
         let value = flat[*end..stop.max(*end)]
-            .trim_matches(|c: char| c.is_whitespace() || c == '|' || c == ':')
+            .trim_matches(|c: char| c.is_whitespace() || c == '|' || c == ':' || c == '*')
             .to_string();
         out.push((*label, value));
     }
