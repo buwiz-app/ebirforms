@@ -26,7 +26,7 @@ mod calendar;
 mod cards;
 mod confirm;
 mod lookup;
-mod payments;
+pub(crate) mod payments;
 mod plain;
 #[cfg(test)]
 mod demo_tests;

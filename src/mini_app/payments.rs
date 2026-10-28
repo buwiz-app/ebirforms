@@ -155,6 +155,19 @@ fn load(db: &Database) -> Result<Vec<Payment>, String> {
     serde_json::from_str(&stored).map_err(|error| format!("the stored payments are unreadable: {error}"))
 }
 
+/// Whether a payment is recorded for the return `tin` (9 or 14 digits)
+/// files as `form` for `period` (its canonical text, `2026-Q3`).
+pub(crate) fn recorded_for(db: &Database, tin: &str, form: &str, period: &str) -> bool {
+    let branch = |tin: &str| {
+        let digits: String = tin.chars().filter(char::is_ascii_digit).collect();
+        if digits.len() == 9 { format!("{digits}00000") } else { digits }
+    };
+    let tin = branch(tin);
+    load(db).is_ok_and(|payments| {
+        payments.iter().any(|payment| branch(&payment.tin) == tin && payment.form.eq_ignore_ascii_case(form) && payment.period == period)
+    })
+}
+
 fn save(db: &Database, payments: &[Payment]) -> Result<(), String> {
     let json = serde_json::to_string(payments).map_err(|error| error.to_string())?;
     db.set_setting(PAYMENTS_KEY, &json)
