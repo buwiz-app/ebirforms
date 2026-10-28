@@ -199,10 +199,12 @@ fn specs() -> Vec<AppSpec> {
         })),
         card("card-quick", json!({
             "tools": [
-                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_app_upload",
+                "bir_card_allow_send", "bir_mark_paid", "bir_record_payment", "bir_payments_list", "bir_app_upload",
                 "bir_status", "bir_deadline", "bir_deadline_override_set", "bir_deadline_override_remove", "bir_calendar_set",
             ],
             "open": { "apps": ["forms", "register", "calendar"] },
+            // Payment found remembers "Not this return"
+            "storage": {},
             "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
         })),
         card("card-calc", json!({

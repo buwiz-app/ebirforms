@@ -323,6 +323,26 @@ function Match() {
   const record = () =>
     Object.fromEntries(Object.entries((s().record || {}) as Record<string, unknown>).filter(([, v]) => v != null).map(([k, v]) => [k, typeof v === "number" ? String(v) : v]));
   const state = signal<"" | "recorded" | "already" | "no">(s().recorded ? "already" : "");
+  const rec = () => record() as Record<string, string>;
+  // "Not this return", kept per payment (a storage key allows [A-Za-z0-9._:-])
+  const kept = () => `match:${rec().form || ""}:${rec().period || ""}:${rec().channel || ""}:${rec().reference || ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 128);
+  // a card made before the payment was recorded learns it when it opens
+  (async () => {
+    try {
+      if ((await rox.storage?.get(kept())) === "no") return state.set("no");
+    } catch {}
+    if (state() !== "" || !rec().reference) return;
+    try {
+      const listed = answerOf(await rox.call("bir_payments_list", { tin: rec().tin, form: rec().form, period: rec().period }));
+      const same = (p: any) =>
+        String(p.reference || "").toLowerCase() === String(rec().reference).toLowerCase() && String(p.channel || "").toLowerCase() === String(rec().channel || "").toLowerCase();
+      if (state() === "" && ((listed?.payments || []) as any[]).some(same)) state.set("already");
+    } catch {}
+  })();
+  const notThis = () => {
+    state.set("no");
+    rox.storage?.set(kept(), "no").catch(() => {});
+  };
   const yes = () =>
     act(async () => {
       const r = answerOf(await rox.call("bir_record_payment", record() as any));
@@ -331,7 +351,7 @@ function Match() {
   const said = { recorded: "Recorded on the return.", already: "Already recorded on the return.", no: "Left alone. Tell the assistant which return it pays." };
   return (
     <Card title={`${s().channel || "Payment"} · ${peso(s().total ?? s().amount)}`} sub={`${s().form || ""} · ${s().period || ""}${s().reference ? ` · ref ${s().reference}` : ""}`}
-      foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={() => state.set("no")} />] : undefined}>
+      foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={notThis} />] : undefined}>
       <Row title="Paid on" sub={String(s().paid_at || "").replace("T", " ").slice(0, 16)} />
       <Row title="Tax and fee" sub={`${peso(s().amount)} tax · ${peso(s().fee)} fee`} />
       <If when={state() !== ""}>
