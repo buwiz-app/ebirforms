@@ -177,7 +177,9 @@ pub(crate) fn read_only(tool: &str) -> bool {
         || function_of(tool).is_some_and(|function| READ_ONLY.contains(&function))
 }
 
-/// `tools/list` entries.
+/// `tools/list` entries. Every `bir_app_*` tool carries
+/// `_meta["rox/audience"]: ["app"]` (spec 10.1): Rox keeps it off the
+/// model's surface and refuses model calls to it.
 pub(crate) fn descriptors() -> Vec<Value> {
     let mut list = vec![
         json!({
@@ -215,6 +217,7 @@ pub(crate) fn descriptors() -> Vec<Value> {
                 "additionalProperties": false
             },
             "annotations": { "readOnlyHint": false },
+            "_meta": { "rox/audience": ["app"] },
         }),
     ];
     for function in functions() {
@@ -230,6 +233,7 @@ pub(crate) fn descriptors() -> Vec<Value> {
                 "additionalProperties": false
             },
             "annotations": { "readOnlyHint": READ_ONLY.contains(&function) },
+            "_meta": { "rox/audience": ["app"] },
         }));
     }
     list

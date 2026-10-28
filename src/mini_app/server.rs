@@ -1391,6 +1391,17 @@ mod tests {
             assert!(!is_app_only(agent_tool), "{agent_tool}");
         }
         assert!(is_app_only("bir_app_list_taxpayers") && is_app_only(app_tools::UPLOAD));
+        // 10.1: every bir_app_* tool, and nothing else, is for apps only
+        for tool in tool_list()["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let app_only = name.starts_with(app_tools::PREFIX) && name != BIR_APP_OPEN;
+            let audience = &tool["_meta"]["rox/audience"];
+            if app_only {
+                assert_eq!(audience, &json!(["app"]), "{name}");
+            } else {
+                assert!(audience.is_null(), "{name} must stay on the agent's surface");
+            }
+        }
         let unique: std::collections::HashSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "a tool name is listed twice");
         for tool in tool_list()["tools"].as_array().unwrap() {
