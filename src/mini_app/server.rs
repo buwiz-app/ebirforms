@@ -27,7 +27,7 @@ use serde_json::{Map, Value, json};
 use super::apps::{self, Catalog};
 use super::bridge::{Bridge, Call};
 use super::v1::{self, Caller, Origin, app_tools, manifest as v1_manifest};
-use super::{calendar, confirm, payments, plain, resolve, scope, taxpayer};
+use super::{answers, calendar, cards, confirm, payments, plain, resolve, scope, taxpayer};
 use crate::agent::{Session, UiQueue};
 
 pub(crate) const SERVER_NAME: &str = "bir-mini-app";
@@ -158,6 +158,8 @@ pub(crate) struct MiniServer {
     catalog: Catalog,
     gate: Gate,
     v1: v1::Host,
+    /// Send grants the user gave on an approve card, for the next send only.
+    once_grants: Vec<(String, String)>,
 }
 
 impl MiniServer {
@@ -186,6 +188,7 @@ impl MiniServer {
             catalog,
             gate,
             v1: v1::Host::new(rox),
+            once_grants: Vec::new(),
         }
     }
 
@@ -326,6 +329,7 @@ impl MiniServer {
                 other => other,
             });
         }
+        let asked = arguments.clone();
         let mut arguments = arguments.clone();
         let has_ticket = Value::Object(arguments.clone()).to_string().contains("tkt_");
         if (has_ticket || caller.origin == Origin::App)
@@ -337,26 +341,80 @@ impl MiniServer {
             Ok(upload) => upload,
             Err(message) => return Ok(now(tool_error(format!("{name}: {message}")))),
         };
-        let reply = self.dispatch(name, &arguments);
+        // The assistant does not mark a return paid: it offers the card the
+        // user presses Save on (P5, spec 9.8).
+        let reply = if name == BIR_MARK_PAID && caller.origin == Origin::Agent {
+            Ok(now(cards::mark_paid_card(&arguments)))
+        } else {
+            self.dispatch(name, &arguments)
+        };
         if let Some(path) = upload {
             let _ = std::fs::remove_file(path);
         }
         match reply {
             Ok(Reply::Now(Some(mut result))) => {
+                // An "allow this once" lasts until the next send.
+                if name == "bir_form_send" && !result.to_string().contains("approval_required") {
+                    self.end_once_grants();
+                }
                 // Signed out or offline, in plain words.
                 plain::rewrite(name, &mut result, caller.origin == Origin::App);
+                // The answer's card (spec 9.8), for the assistant's answers.
+                if caller.origin == Origin::Agent {
+                    cards::decorate(name, &asked, &mut result);
+                }
                 // What the model or an app reads names taxpayers by ticket.
                 if matches!(caller.origin, Origin::Agent | Origin::App) {
                     let today = taxform::today();
                     let _ = database(|db| {
-                        v1::Scrubber::new(db, today).result(&mut result);
+                        let mut scrubber = v1::Scrubber::new(db, today);
+                        scrubber.result(&mut result);
+                        if let Some(props) = result.pointer_mut("/_meta/rox~1open/props") {
+                            scrubber.value(props);
+                        }
                         Ok(())
                     });
+                    cards::fit(&mut result);
                 }
                 Ok(now(result))
             }
             other => other,
         }
+    }
+
+    /// The approve card's "Allow this once" (`bir_card_allow_send {tin:
+    /// ticket, form}`): a send grant for that taxpayer and form that ends
+    /// with the next send, whatever it answers. The user pressed it; the
+    /// assistant cannot.
+    fn allow_send_once(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
+        let form = arguments
+            .get("form")
+            .and_then(Value::as_str)
+            .and_then(taxform::form_code_of)
+            .ok_or("`form` must be a BIR form code")?;
+        let ticket = arguments.get("tin").and_then(Value::as_str).ok_or("`tin` must be the taxpayer's ticket")?;
+        let tin = database(|db| {
+            let subject = app_tools::subject_of(db, ticket)?;
+            let tin = subject.full_tin();
+            db.grant_send(&tin, form).map_err(|error| error.to_string())?;
+            Ok(tin)
+        })?;
+        self.once_grants.push((tin, form.to_string()));
+        Ok(json!({ "allowed": true, "form": form, "once": true }))
+    }
+
+    /// Take back the "allow this once" grants.
+    fn end_once_grants(&mut self) {
+        let grants = std::mem::take(&mut self.once_grants);
+        if grants.is_empty() {
+            return;
+        }
+        let _ = database(|db| {
+            for (tin, form) in &grants {
+                db.revoke_send(tin, form).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        });
     }
 
     /// Whether `caller` may call `name` at all (P1, P5, P6): app-only tools
@@ -407,6 +465,7 @@ impl MiniServer {
                 app_tools::ticket_issue(db, arguments, today)
             }))),
             app_tools::UPLOAD => now(call_result(self.v1.uploads.append(arguments))),
+            app_tools::ALLOW_SEND => now(call_result(self.allow_send_once(arguments))),
             _ => {
                 let request = match app_tools::request(name, arguments) {
                     Ok(request) => request,
@@ -487,6 +546,11 @@ impl MiniServer {
             BIR_DRAFTS_LIST => Ok(now(self.drafts_list(arguments))),
             BIR_CALENDAR_GET => Ok(now(self.on_database(name, arguments, calendar::get))),
             taxpayer::PROFILE_FORMS => Ok(now(self.on_database(name, arguments, taxpayer::profile_forms))),
+            answers::FIND_TAXPAYER => Ok(now(self.on_database(name, arguments, answers::find_taxpayer))),
+            answers::TAXPAYER => Ok(now(self.on_database(name, arguments, answers::taxpayer))),
+            answers::PENALTY => Ok(now(self.on_database(name, arguments, answers::penalty))),
+            answers::UNPAID => Ok(now(self.on_database(name, arguments, answers::unpaid))),
+            answers::BOARD => Ok(now(self.on_database(name, arguments, answers::board))),
             taxpayer::RETURNS_LIST => Ok(now(self.on_database(name, arguments, taxpayer::returns_list))),
             BIR_CALENDAR_SET => Ok(now(self.on_database(name, arguments, |db, arguments, _| {
                 calendar::set(db, arguments)
@@ -906,7 +970,7 @@ fn now(result: Value) -> Reply {
 /// assistant's, not one of them).
 fn is_app_only(name: &str) -> bool {
     app_tools::function_of(name).is_some()
-        || [app_tools::TICKET_SUBJECT, app_tools::TICKET_ISSUE, app_tools::UPLOAD].contains(&name)
+        || [app_tools::TICKET_SUBJECT, app_tools::TICKET_ISSUE, app_tools::UPLOAD, app_tools::ALLOW_SEND].contains(&name)
 }
 
 /// This server's tools that change nothing (`readOnlyHint`, P8): the ones a
@@ -932,7 +996,7 @@ const READ_ONLY: [&str; 17] = [
 ];
 
 fn read_only(name: &str) -> bool {
-    READ_ONLY.contains(&name) || app_tools::read_only(name)
+    READ_ONLY.contains(&name) || answers::TOOLS.contains(&name) || app_tools::read_only(name)
 }
 
 /// The manifest's `resources/list` entry.
@@ -1140,6 +1204,7 @@ fn tool_list() -> Value {
         },
     }));
     list.extend(taxpayer::descriptors());
+    list.extend(answers::descriptors());
     list.extend(app_tools::descriptors());
     for name in v1::RESERVED {
         list.push(json!({
@@ -1421,7 +1486,7 @@ mod tests {
             let name = tool["name"].as_str().unwrap();
             let app_only = is_app_only(name);
             assert_eq!(app_only, name.starts_with(app_tools::PREFIX) && name != BIR_APP_OPEN
-                || name == app_tools::TICKET_SUBJECT || name == app_tools::TICKET_ISSUE, "{name}");
+                || name == app_tools::TICKET_SUBJECT || name == app_tools::TICKET_ISSUE || name == app_tools::ALLOW_SEND, "{name}");
             let audience = &tool["_meta"]["rox/audience"];
             if app_only {
                 assert_eq!(audience, &json!(["app"]), "{name}");
@@ -1682,10 +1747,10 @@ mod tests {
         let refused = call(&mut server, "bir_profiles_list", json!({}));
         assert_eq!(refused["isError"], false, "{refused}");
         assert_eq!(refused["content"][0]["text"], plain::signed_out_text("bir_profiles_list"));
-        assert_eq!(refused["_meta"]["rox/open"]["app"], "register");
+        assert_eq!(refused["_meta"]["rox/open"]["props"]["card"], "signin");
         let opened = call(&mut server, BIR_APP_OPEN, json!({"app": "forms"}));
         assert_eq!(opened["isError"], false);
-        assert_eq!(opened["_meta"]["rox/open"]["app"], "register", "{opened}");
+        assert_eq!(opened["_meta"]["rox/open"]["props"]["card"], "signin", "{opened}");
         // (bir_app_list_rdos, not the account status: that reads the
         // Buwiz account from the Keychain, which tests leave alone)
         let rdos = call_as(&mut server, app("register"), "bir_app_list_rdos", json!({}));
@@ -1728,6 +1793,72 @@ mod tests {
             .wait()
             .unwrap();
         assert_eq!(missing["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn answers_carry_their_inline_card_with_a_small_snapshot() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Dela Cruz Jane");
+        crate::bir_module::with_database(|db| {
+            db.set_yearly_forms(TIN, 2026, &["2551Q", "1601C"]).map_err(|error| HostError::new(error.to_string()))?;
+            Ok(())
+        })
+        .unwrap();
+        let ticket = ticket_of(ROOT);
+        let cases = [
+            ("bir_profile_forms", json!({"ticket": ticket, "year": 2026}), "forms"),
+            ("bir_returns_list", json!({"ticket": ticket, "year": 2026}), "matrix"),
+            ("bir_returns_list", json!({"ticket": ticket, "form": "2551Q", "period": "2026-Q3"}), "status"),
+            (BIR_CALENDAR_GET, json!({"tin": ticket, "from": "2026-11-01", "to": "2026-11-30"}), "month"),
+            (BIR_CALENDAR_GET, json!({"tin": ticket}), "dues"),
+            ("bir_taxpayer", json!({"ticket": ticket}), "taxpayer"),
+            ("bir_find_taxpayer", json!({"name": "jane deli cruz"}), "pick"),
+            ("bir_penalty", json!({"ticket": ticket}), "overdue"),
+            ("bir_penalty", json!({"form": "0619E", "due": "2026-09-10", "filed_on": "2026-11-10", "tax_due": 10000}), "penalty"),
+            ("bir_unpaid", json!({}), "unpaid"),
+            ("bir_board", json!({}), "board"),
+            (BIR_MARK_PAID, json!({"tin": ticket, "form": "2551Q", "period": "2026-Q3"}), "markpaid"),
+        ];
+        for (tool, args, card) in cases {
+            let result = call_as(&mut server, agent(), tool, args.clone());
+            assert_eq!(result["isError"], false, "{tool} {args}: {result}");
+            let open = &result["_meta"]["rox/open"];
+            assert_eq!(open["placement"], "inline", "{tool}: {open}");
+            assert_eq!(open["props"]["card"], card, "{tool} {args}");
+            assert!(open["app"].as_str().unwrap().starts_with("card-"));
+            assert!(open["props"]["snapshot"].is_object(), "{tool}");
+            // only a card that can re-read its answer has "as of" and Refresh
+            assert_eq!(open["props"]["as_of"].is_i64(), !open["props"]["tool"].is_null(), "{tool}");
+            // the card may re-read its answer: the tool is in its app's grants
+            let granted = v1_manifest::served_app(&Catalog::Embedded, open["app"].as_str().unwrap()).unwrap().unwrap();
+            if !open["props"]["tool"].is_null() {
+                assert!(
+                    granted["permissions"]["tools"].as_array().unwrap().iter().any(|t| *t == open["props"]["tool"]),
+                    "{} cannot refresh with {}", open["app"], open["props"]["tool"]
+                );
+            }
+            let props = open["props"].to_string();
+            assert!(props.len() <= 8 * 1024, "{tool}: {} bytes", props.len());
+            assert!(!props.contains(ROOT) && !result["content"].to_string().contains(ROOT), "{tool} names the TIN: {props}");
+            if let Some(chips) = result["_meta"]["rox/suggest"].as_array() {
+                assert!(chips.len() <= 3);
+            }
+        }
+        // the penalty is BIR's own engine: late tax costs something
+        let estimate = call_as(&mut server, agent(), "bir_penalty", json!({"form": "0619E", "due": "2026-09-10", "filed_on": "2026-11-10", "tax_due": 10000}));
+        assert!(estimate["structuredContent"]["result"]["total_penalties"].as_f64().unwrap() > 0.0, "{estimate}");
+        // the assistant's mark paid records nothing: the user presses Save
+        let payments = call_as(&mut server, agent(), BIR_PAYMENTS_LIST, json!({"tin": ticket}));
+        assert_eq!(payments["structuredContent"]["result"]["payments"], json!([]));
+        // a ticket BIR did not issue
+        let forged = format!("tkt_{}", "0".repeat(26));
+        for tool in ["bir_profile_forms", "bir_returns_list", "bir_taxpayer", "bir_penalty", "bir_unpaid"] {
+            let refused = call_as(&mut server, agent(), tool, json!({"ticket": forged}));
+            assert_eq!(refused["isError"], true, "{tool}");
+        }
+        // apps get no card: they draw their own
+        let from_app = call_as(&mut server, app("card-forms"), "bir_profile_forms", json!({"ticket": ticket}));
+        assert!(from_app["_meta"]["rox/open"].is_null());
     }
 
     #[test]

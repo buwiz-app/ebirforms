@@ -359,6 +359,13 @@ pub(crate) struct WhoNames {
     pub branch_code: String,
 }
 
+/// The RDO of the branch `tin` names, while it is saved.
+pub(crate) fn who_rdo(db: &Database, tin: &str) -> Option<String> {
+    let book = Book::read(db).ok()?;
+    let who = book.find(&only_digits(tin))?;
+    Some(who.branch.value(BranchField::RdoCode).to_string())
+}
+
 /// The names of the branch `tin` names (a 9-digit root is the head
 /// office), while it is saved.
 pub(crate) fn who_names(db: &Database, tin: &str) -> Option<WhoNames> {

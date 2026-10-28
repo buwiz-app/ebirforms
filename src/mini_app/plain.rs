@@ -9,10 +9,10 @@
 //!
 //! - signed out (no account, an expired or ended sign-in, the filing
 //!   database locked): "You're signed out of Buwiz, so BIR can't ...".
-//!   For the assistant this is not an error, and it carries
-//!   `_meta["rox/open"]` for the Buwiz Sign-in app, so Rox shows an Open
-//!   button under it (an error result's card is dropped, spec 9.6). An app
-//!   gets the same words as its error.
+//!   For the assistant this is not an error, and it carries the sign-in
+//!   answer card (`_meta["rox/open"]`, spec 9.8: Sign in opens Buwiz
+//!   Sign-in, Try again re-checks); an error result's card would be
+//!   dropped (9.6). An app gets the same words as its error.
 //! - the server unreachable: "BIR can't reach the Buwiz server (host:port).
 //!   Start it, then try again." It stays an error.
 //!
@@ -114,16 +114,20 @@ pub(crate) fn rewrite(tool: &str, result: &mut Value, for_app: bool) {
             });
         }
         Some(Refusal::SignedOut) => {
+            let message = signed_out_text(tool);
+            let card = super::cards::open(
+                "signin",
+                "Buwiz sign-in",
+                None,
+                json!({ "message": message }),
+                "bir_status",
+                json!({}),
+            );
             *result = json!({
-                "content": [{ "type": "text", "text": signed_out_text(tool) }],
-                "structuredContent": { "signed_in": false, "message": signed_out_text(tool) },
+                "content": [{ "type": "text", "text": message }],
+                "structuredContent": { "signed_in": false, "message": message },
                 "isError": false,
-                "_meta": { "rox/open": {
-                    "app": "register",
-                    "props": {},
-                    "title": "Buwiz Sign-in",
-                    "placement": "full",
-                } },
+                "_meta": { "rox/open": card },
             });
         }
     }
@@ -165,8 +169,9 @@ mod tests {
                 result["content"][0]["text"],
                 "You're signed out of Buwiz, so BIR can't read this computer's taxpayers and their returns. Open Buwiz Sign-in to sign in again."
             );
-            assert_eq!(result["_meta"]["rox/open"]["app"], "register");
-            assert_eq!(result["_meta"]["rox/open"]["placement"], "full");
+            assert_eq!(result["_meta"]["rox/open"]["app"], "card-help");
+            assert_eq!(result["_meta"]["rox/open"]["props"]["card"], "signin");
+            assert_eq!(result["_meta"]["rox/open"]["placement"], "inline");
         }
         // an app keeps the error, in the same words
         let mut result = refused(crate::account_gate::LOCKED_MESSAGE);

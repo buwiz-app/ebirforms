@@ -150,10 +150,22 @@ pub(crate) fn returns_list(
     arguments: &Map<String, Value>,
     today: NaiveDate,
 ) -> Result<Value, String> {
-    check_keys(arguments, &["ticket", "year", "form"])?;
+    check_keys(arguments, &["ticket", "year", "form", "period"])?;
     let branch = branch_of(db, arguments)?;
     let year = year_of(arguments, today)?;
     let form = arguments.get("form").and_then(Value::as_str);
+    // One return: its form and period.
+    let period = match (form, arguments.get("period").and_then(Value::as_str)) {
+        (Some(form), Some(raw)) => {
+            let code = taxform::form_code_of(form).ok_or_else(|| format!("`form` `{form}` is not a BIR form code"))?;
+            let named = taxform::parse(raw, today)
+                .period
+                .ok_or_else(|| format!("`period` `{raw}` is not a period (e.g. 2026-Q3, 2026-09, 2025)"))?;
+            Some(named.for_form(code, today).map_err(|ask| ask.to_string())?.canonical())
+        }
+        (None, Some(_)) => return Err("`period` needs `form`".into()),
+        _ => None,
+    };
     let stored = resolve::drafts_list(db, Some(&branch.tin), form, true, today)?;
     let mut paid_args = Map::new();
     paid_args.insert("tin".into(), json!(branch.tin));
@@ -171,6 +183,7 @@ pub(crate) fn returns_list(
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|row| period.as_ref().is_none_or(|period| row["period"] == *period))
         .filter(|row| {
             year.is_none_or(|year| {
                 row["period"]
@@ -228,7 +241,8 @@ pub(crate) fn descriptors() -> Vec<Value> {
                 "properties": {
                     "ticket": { "type": "string", "description": "The taxpayer's ticket." },
                     "year": { "type": "integer", "description": "Tax year, e.g. 2026." },
-                    "form": { "type": "string", "description": "A form code, e.g. 2551Q." }
+                    "form": { "type": "string", "description": "A form code, e.g. 2551Q." },
+                    "period": { "type": "string", "description": "With `form`: one return's period (2026-Q3, 2026-09), for \"did her 2551Q go through?\"." }
                 },
                 "required": ["ticket"],
                 "additionalProperties": false

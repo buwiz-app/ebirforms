@@ -37,6 +37,8 @@ pub(crate) const PREFIX: &str = "bir_app_";
 pub(crate) const TICKET_SUBJECT: &str = "bir_ticket_subject";
 pub(crate) const TICKET_ISSUE: &str = "bir_ticket_issue";
 pub(crate) const UPLOAD: &str = "bir_app_upload";
+/// The approve card's "Allow this once" (spec 9.8).
+pub(crate) const ALLOW_SEND: &str = "bir_card_allow_send";
 /// One receipt, as `bir_mark_paid` takes it.
 pub(crate) const UPLOAD_MAX_BYTES: usize = 25 * 1024 * 1024;
 /// Uploads kept at once; the oldest goes first.
@@ -223,6 +225,18 @@ pub(crate) fn descriptors() -> Vec<Value> {
             "_meta": { "rox/audience": ["app"] },
         }),
     ];
+    list.push(json!({
+        "name": ALLOW_SEND,
+        "description": "Mini apps only (refused for the assistant): the approve card's Allow this once, a send grant for one taxpayer and form that ends with the next send.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "tin": { "type": "string" }, "form": { "type": "string" } },
+            "required": ["tin", "form"],
+            "additionalProperties": false
+        },
+        "annotations": { "readOnlyHint": false },
+        "_meta": { "rox/audience": ["app"] },
+    }));
     for function in functions() {
         list.push(json!({
             "name": tool_name(function),

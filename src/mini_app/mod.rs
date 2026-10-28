@@ -19,9 +19,11 @@
 //! [`apps`] for the TSX mini apps it serves as resources and [`resolve`] for
 //! the commands and `@` scopes it announces to Rox.
 
+mod answers;
 mod apps;
 mod bridge;
 mod calendar;
+mod cards;
 mod confirm;
 mod payments;
 mod plain;

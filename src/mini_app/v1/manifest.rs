@@ -27,7 +27,7 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.1.0";
+pub(crate) const VERSION: &str = "2.2.0";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -62,6 +62,28 @@ fn ticket_schema() -> Value {
 /// The `bir_app_*` tool of each host function an app calls.
 fn host_tools(functions: &[&str]) -> Vec<String> {
     functions.iter().map(|name| app_tools::tool_name(name)).collect()
+}
+
+/// An answer card app (spec 9.8, [`super::super::cards`]): inline, its
+/// props the card kind, the snapshot and how Refresh re-reads it.
+fn card(id: &'static str, permissions: Value) -> AppSpec {
+    AppSpec {
+        id,
+        placement: &["inline"],
+        inline: Some(super::super::cards::inline()),
+        props: json!({
+            "type": "object",
+            "properties": {
+                "card": { "type": "string", "maxLength": 32 },
+                "ticket": ticket_schema(),
+                "snapshot": { "type": "object" },
+                "as_of": { "type": "integer" },
+                "tool": { "type": "string", "maxLength": 64 },
+                "args": { "type": "object" }
+            }
+        }),
+        permissions,
+    }
 }
 
 fn specs() -> Vec<AppSpec> {
@@ -143,6 +165,28 @@ fn specs() -> Vec<AppSpec> {
                 "open": { "apps": ["forms", "calendar"] },
             }),
         },
+        card("card-people", json!({
+            "tools": ["bir_find_taxpayer", "bir_taxpayer", "bir_board"],
+            "open": { "apps": ["tax-profile", "forms", "register", "deadlines"] },
+            "attach": ["taxprofile"],
+        })),
+        card("card-forms", json!({
+            "tools": ["bir_profile_forms", "bir_returns_list", "bir_form_needs_you", "bir_card_allow_send", "bir_mark_paid"],
+            "open": { "apps": ["forms", "calendar", "tax-profile"] },
+        })),
+        card("card-dates", json!({
+            "tools": ["bir_calendar_get", "bir_penalty"],
+            "open": { "apps": ["forms", "calendar"] },
+        })),
+        card("card-money", json!({
+            "tools": ["bir_unpaid", "bir_mark_paid", "bir_record_payment", "bir_app_upload", "bir_confirm_filing"],
+            "open": { "apps": ["forms"] },
+            "pick_file": { "extensions": RECEIPT_EXTENSIONS, "max_bytes": RECEIPT_MAX_BYTES, "multiple": false },
+        })),
+        card("card-help", json!({
+            "tools": ["bir_status"],
+            "open": { "apps": ["register"] },
+        })),
         AppSpec {
             id: "register",
             placement: &["full"],
@@ -390,7 +434,10 @@ mod tests {
         let m = unsigned(&catalog).unwrap();
         let apps = m["apps"].as_array().unwrap();
         let ids: Vec<&str> = apps.iter().map(|app| app["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["forms", "tax-profile", "calendar", "deadlines", "register"]);
+        assert_eq!(
+            ids,
+            ["forms", "tax-profile", "calendar", "deadlines", "card-people", "card-forms", "card-dates", "card-money", "card-help", "register"]
+        );
         for app in apps {
             let id = app["id"].as_str().unwrap();
             assert_eq!(app["entry"], format!("rox-app://{id}"));

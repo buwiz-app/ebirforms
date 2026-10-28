@@ -20,6 +20,31 @@
     "description": "The next BIR returns due for one taxpayer (or all of them), as a small card in the chat, each with a button that opens it in BIR Forms."
   },
   {
+    "id": "card-people",
+    "title": "BIR answer: taxpayers",
+    "description": "Answer cards about taxpayers: which one you mean, one taxpayer at a glance, and how every taxpayer stands."
+  },
+  {
+    "id": "card-forms",
+    "title": "BIR answer: returns",
+    "description": "Answer cards about returns: a taxpayer's forms, the year at a glance, one return's progress, what blocks it, and the approval before sending."
+  },
+  {
+    "id": "card-dates",
+    "title": "BIR answer: deadlines",
+    "description": "Answer cards about deadlines: what's due next, a month, late returns and a penalty estimate."
+  },
+  {
+    "id": "card-money",
+    "title": "BIR answer: payments",
+    "description": "Answer cards about payments: returns not paid, a payment email matched to its return, marking a return paid, and BIR's confirmations."
+  },
+  {
+    "id": "card-help",
+    "title": "BIR answer: help",
+    "description": "Answer cards that get you unstuck, like signing in to Buwiz again."
+  },
+  {
     "id": "register",
     "title": "Buwiz Sign-in",
     "description": "Sign in to Buwiz (or create an account) on this computer so BIR can open the taxpayer database."
