@@ -350,14 +350,35 @@ function Match() {
     Object.fromEntries(Object.entries((s().record || {}) as Record<string, unknown>).filter(([, v]) => v != null).map(([k, v]) => [k, typeof v === "number" ? String(v) : v]));
   const state = signal<"" | "recorded" | "already" | "no">(s().recorded ? "already" : "");
   const rec = () => record() as Record<string, string>;
+  // An email bir could not read (a channel that masks it with `*`) names
+  // no return to record: older cards say so from their own record.
+  const readable = () =>
+    s().readable !== false &&
+    /^\d{4}[A-Z]{0,3}$/i.test(rec().form || "") &&
+    /[A-Za-z0-9]/.test(rec().reference || "") &&
+    Number(String(rec().amount || "").replace(/,/g, "")) > 0;
+  // the return the payment went on, when the card learns it by its email
+  const found = signal<{ tin: string; form: string; period: string } | null>(null);
   // "Not this return", kept per payment (a storage key allows [A-Za-z0-9._:-])
   const kept = () => `match:${rec().form || ""}:${rec().period || ""}:${rec().channel || ""}:${rec().reference || ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 128);
-  // a card made before the payment was recorded learns it when it opens
+  // a card made before the payment was recorded learns it when it opens:
+  // by its email first, then by the return and reference it names
   (async () => {
     try {
       if ((await rox.storage?.get(kept())) === "no") return state.set("no");
     } catch {}
-    if (state() !== "" || !rec().reference) return;
+    if (state() !== "") return;
+    if (rec().message_id) {
+      try {
+        const byEmail = answerOf(await rox.call("bir_payments_list", { message_id: rec().message_id }));
+        const hit = ((byEmail?.payments || []) as any[])[0];
+        if (hit && state() === "") {
+          found.set({ tin: String(hit.tin || ""), form: String(hit.form || ""), period: String(hit.period || "") });
+          return state.set("already");
+        }
+      } catch {}
+    }
+    if (!readable()) return;
     try {
       const listed = answerOf(await rox.call("bir_payments_list", { tin: rec().tin, form: rec().form, period: rec().period }));
       const same = (p: any) =>
@@ -376,14 +397,27 @@ function Match() {
     });
   const said = { recorded: "Recorded on the return.", already: "Already recorded on the return.", no: "Left alone. Tell the assistant which return it pays." };
   // once recorded, BIR's receipt page in Rox's document view
-  const viewReceipt = () => act(() => rox.preview({ tool: "bir_payment_receipt", args: { tin: rec().tin, form: rec().form, period: rec().period } }));
+  const onReturn = () => found() || { tin: rec().tin, form: rec().form, period: rec().period };
+  const viewReceipt = () => act(() => rox.preview({ tool: "bir_payment_receipt", args: onReturn() }));
   const paid = () => (state() === "recorded" || state() === "already") && Boolean(rox.preview);
+  const amount = () => peso(s().total ?? s().amount);
+  const where = () => `${onReturn().form || ""} · ${onReturn().period || ""}`;
+  // On its return already: one line and View receipt, nothing to decide.
+  // An email bir could not read: what happened, and no button.
+  const unread = () => state() === "" && !readable();
   return (
-    <Card title={`${s().channel || "Payment"} · ${peso(s().total ?? s().amount)}`} sub={`${s().form || ""} · ${s().period || ""}${s().reference ? ` · ref ${s().reference}` : ""}`}
-      foot={state() === "" ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={notThis} />] : paid() ? [<Btn label="View receipt" onPress={viewReceipt} />] : undefined}>
-      <Row title="Paid on" sub={String(s().paid_at || "").replace("T", " ").slice(0, 16)} />
-      <Row title="Tax and fee" sub={`${peso(s().amount)} tax · ${peso(s().fee)} fee`} />
-      <If when={state() !== ""}>
+    <Card
+      title={state() === "already" ? `Already recorded · ${s().channel || "Payment"} ${amount()}` : unread() ? "Couldn't read this email" : `${s().channel || "Payment"} · ${amount()}`}
+      sub={state() === "already" ? where() : unread() ? String(s().channel || "Payment email") : `${s().form || ""} · ${s().period || ""}${s().reference ? ` · ref ${s().reference}` : ""}`}
+      foot={state() === "" && readable() ? [<Btn label="Yes, mark paid" primary onPress={yes} />, <Btn label="Not this return" onPress={notThis} />] : paid() ? [<Btn label="View receipt" onPress={viewReceipt} />] : undefined}>
+      <If when={unread()}>
+        <Text class={`text-sm ${K.fg2}`}>BIR couldn't read the form, amount or reference in this email, so there is nothing to mark paid here. Ask the assistant to record it from a chat.</Text>
+      </If>
+      <If when={state() !== "already" && !unread()}>
+        <Row title="Paid on" sub={String(s().paid_at || "").replace("T", " ").slice(0, 16)} />
+        <Row title="Tax and fee" sub={`${peso(s().amount)} tax · ${peso(s().fee)} fee`} />
+      </If>
+      <If when={state() === "recorded" || state() === "no"}>
         <Text class={`text-sm ${state() === "no" ? K.fg2 : K.ok}`}>{said[state() as keyof typeof said] || ""}</Text>
       </If>
     </Card>
@@ -419,6 +453,10 @@ function MarkPaid() {
 
 function Confirm() {
   const s = () => snap() || {};
+  const open = <If when={Boolean(s().token)}><Btn label="Open the return" onPress={() => openApp("forms", ticketOf(s().token))} /></If>;
+  // A confirmation BIR already had: one line that opens the return.
+  if (s().already)
+    return <Card title={`Already confirmed · ${s().form || ""} ${s().period || ""}`} sub={String(s().taxpayer || "")} foot={open} />;
   // BIR's file name starts with the TIN, so the card shows when BIR
   // received the return, never the file name (spec 6.6).
   return (

@@ -27,7 +27,7 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.6.2";
+pub(crate) const VERSION: &str = "2.6.3";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -311,6 +311,7 @@ fn routine(id: &str, name: &str, description: &str, tool: &str, prompt: &str) ->
         "prompt": prompt,
         "reads": [{ "plugin": GWS_PLUGIN, "tools": ["gws_search_mail", "gws_read_mail"] }],
         "writes": routine_writes(id),
+        "params": super::super::watch::schema(),
     })
 }
 

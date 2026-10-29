@@ -17,6 +17,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde_json::{Map, Value, json};
 
 use super::resolve;
+use super::watch::Watch;
 
 /// The sender of eBIRForms confirmations (as the IMAP poller searches).
 const BIR_SENDER: &str = "ebirforms-noreply@bir.gov.ph";
@@ -81,6 +82,22 @@ fn awaiting(db: &Database, branches: &[resolve::Branch], today: NaiveDate) -> Ve
 
 /// The branches `tins` names (a 9-digit root is every branch of that
 /// taxpayer), or every saved branch without it.
+/// A search's taxpayers: `tins` when given, else the routine instance's
+/// `taxpayers` param, else every taxpayer.
+pub(crate) fn watched_branches(
+    db: &Database,
+    arguments: &Map<String, Value>,
+    watch: &Watch,
+) -> Result<Vec<resolve::Branch>, String> {
+    if arguments.get("tins").is_some_and(|tins| tins.as_array().is_some_and(|tins| !tins.is_empty())) {
+        return named_branches(db, arguments);
+    }
+    match watch.branches(db)? {
+        Some(branches) => Ok(branches),
+        None => named_branches(db, arguments),
+    }
+}
+
 pub(crate) fn named_branches(
     db: &Database,
     arguments: &Map<String, Value>,
@@ -121,8 +138,9 @@ pub(crate) fn search(
     arguments: &Map<String, Value>,
     today: NaiveDate,
 ) -> Result<Value, String> {
-    check_keys(arguments, &["tins"])?;
-    let branches = named_branches(db, arguments)?;
+    check_keys(arguments, &["tins", "taxpayers", "forms"])?;
+    let watch = Watch::of(arguments)?;
+    let branches = watched_branches(db, arguments, &watch)?;
     let since = today - chrono::Duration::days(SEARCH_DAYS);
     let mut tins: Vec<String> = Vec::new();
     for branch in &branches {
@@ -147,7 +165,11 @@ pub(crate) fn search(
         "query": format!("from:{BIR_SENDER} after:{}{names}", since.format("%Y/%m/%d")),
         "since": since.format("%Y-%m-%d").to_string(),
         "tins": tins,
-        "awaiting": awaiting(db, &branches, today),
+        "forms": watch.forms(),
+        "awaiting": awaiting(db, &branches, today)
+            .into_iter()
+            .filter(|item| watch.has_form(item["form"].as_str().unwrap_or("")))
+            .collect::<Vec<_>>(),
     }))
 }
 

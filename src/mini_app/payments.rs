@@ -33,7 +33,8 @@ use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use super::confirm::{check_keys, named_branches, text};
+use super::confirm::{check_keys, text, watched_branches};
+use super::watch::Watch;
 use super::resolve::{self, Branch};
 
 /// Settings key of every recorded payment (a JSON list).
@@ -644,7 +645,8 @@ pub(crate) fn list(
     arguments: &Map<String, Value>,
     today: NaiveDate,
 ) -> Result<Value, String> {
-    check_keys(arguments, &["tin", "form", "period", "year"])?;
+    check_keys(arguments, &["tin", "form", "period", "year", "message_id"])?;
+    let message_id = optional_text(arguments, "message_id")?;
     let year = match arguments.get("year") {
         None | Some(Value::Null) => None,
         Some(value) => Some(
@@ -685,6 +687,7 @@ pub(crate) fn list(
             Some(tin) => payment.tin == *tin,
             None => true,
         })
+        .filter(|payment| message_id.is_none() || payment.message_id == message_id)
         .filter(|payment| form.is_none_or(|code| payment.form == code))
         .filter(|payment| period.as_ref().is_none_or(|period| payment.period == *period))
         .filter(|payment| {
@@ -778,8 +781,9 @@ pub(crate) fn search(
     arguments: &Map<String, Value>,
     today: NaiveDate,
 ) -> Result<Value, String> {
-    check_keys(arguments, &["tins"])?;
-    let branches = named_branches(db, arguments)?;
+    check_keys(arguments, &["tins", "taxpayers", "forms"])?;
+    let watch = Watch::of(arguments)?;
+    let branches = watched_branches(db, arguments, &watch)?;
     let since = today - chrono::Duration::days(SEARCH_DAYS);
     // Payment channels print the 9-digit TIN, plain or dashed.
     let mut tins: Vec<String> = Vec::new();
@@ -815,6 +819,9 @@ pub(crate) fn search(
     for branch in &branches {
         for kind in AgentFormKind::all() {
             let code = kind.form_code();
+            if !watch.has_form(code) {
+                continue;
+            }
             for (period, summary) in resolve::stored_returns(db, &branch.tin, code, today) {
                 if !matches!(
                     summary.status,
@@ -842,6 +849,7 @@ pub(crate) fn search(
         "since": since.format("%Y-%m-%d").to_string(),
         "channels": CHANNELS.iter().map(|channel| json!({"name": channel.name, "senders": channel.senders})).collect::<Vec<_>>(),
         "tins": tins,
+        "forms": watch.forms(),
         "awaiting": awaiting,
     }))
 }
@@ -974,8 +982,12 @@ pub(crate) fn with_recorded(db: &Database, mut parsed: Value, today: NaiveDate) 
     let Some(record) = parsed.get("record") else { return parsed };
     let field = |name: &str| record[name].as_str().unwrap_or("");
     let (reference, channel) = (field("reference"), field("channel"));
-    let recorded = !reference.is_empty()
-        && target(db, field("tin"), field("form"), field("period"), today).is_ok_and(|target| {
+    let message_id = field("message_id");
+    let readable = readable(record);
+    let same_email = !message_id.is_empty()
+        && load(db).is_ok_and(|payments| payments.iter().any(|payment| payment.message_id.as_deref() == Some(message_id)));
+    let recorded = same_email
+        || readable && target(db, field("tin"), field("form"), field("period"), today).is_ok_and(|target| {
             let key = target.key();
             load(db).is_ok_and(|payments| {
                 payments.iter().any(|payment| {
@@ -986,7 +998,23 @@ pub(crate) fn with_recorded(db: &Database, mut parsed: Value, today: NaiveDate) 
             })
         });
     parsed["recorded"] = json!(recorded);
+    parsed["readable"] = json!(readable);
     parsed
+}
+
+/// Whether a parsed `record` names a payment: a BIR form code, a TIN, an
+/// amount and a reference. A channel that masks its email (`*`) leaves
+/// none, and a card offers nothing to record from it.
+pub(crate) fn readable(record: &Value) -> bool {
+    let field = |name: &str| record[name].as_str().unwrap_or("").trim().to_string();
+    let amount = record["amount"]
+        .as_f64()
+        .or_else(|| record["amount"].as_str().and_then(|raw| raw.replace(',', "").parse().ok()))
+        .unwrap_or(0.0);
+    taxform::form_code_of(&field("form")).is_some()
+        && taxform::tin_digits(&field("tin")).is_some()
+        && amount > 0.0
+        && field("reference").chars().any(|c| c.is_ascii_alphanumeric())
 }
 
 /// The labels of MyEG's "BIR Transaction Success" email, in its order.
@@ -1643,6 +1671,36 @@ mod tests {
         assert!(query.contains("\"123456788\" OR \"123-456-788\""), "{query}");
         assert_eq!(found["awaiting"], json!([]));
         assert!(search(&db, &args(json!({"tins": ["999999999"]})), today()).is_err());
+    }
+
+    #[test]
+    fn a_masked_email_is_unreadable_and_found_by_its_email() {
+        let db = db();
+        let receipts = scratch("masked");
+        let parsed = parse(&args(json!({"text": MYEG})), today()).unwrap();
+        assert_eq!(parsed["record"]["form"], "2551Q");
+        assert!(readable(&parsed["record"]));
+        let mut call = parsed["record"].as_object().unwrap().clone();
+        call.insert("message_id".into(), json!("gmail-masked"));
+        record(&db, &call, today(), &receipts).unwrap();
+        // what an older parse kept of MyEG's masked layout: `*` for each field
+        let masked = json!({"record": {
+            "tin": "*", "form": "*", "period": "", "channel": "MyEG", "reference": "*",
+            "amount": "992.10", "message_id": "gmail-masked",
+        }});
+        assert!(!readable(&masked["record"]));
+        let checked = with_recorded(&db, masked.clone(), today());
+        assert_eq!(checked["readable"], false);
+        // its email is on a return already: found by the message id
+        assert_eq!(checked["recorded"], true);
+        let mut unknown = masked;
+        unknown["record"]["message_id"] = json!("gmail-other");
+        assert_eq!(with_recorded(&db, unknown, today())["recorded"], false);
+        let listed = list(&db, &args(json!({"message_id": "gmail-masked"})), today()).unwrap();
+        assert_eq!(listed["payments"].as_array().map(Vec::len), Some(1), "{listed}");
+        assert_eq!(listed["payments"][0]["form"], "2551Q");
+        let none = list(&db, &args(json!({"message_id": "gmail-other"})), today()).unwrap();
+        assert_eq!(none["payments"], json!([]));
     }
 
     #[test]

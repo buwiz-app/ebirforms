@@ -203,6 +203,11 @@ fn suggest(chips: &[(&str, String)]) -> Value {
 }
 
 /// What a tool answered: its structured result, else its text as JSON.
+/// Whether a tool's answer says its payment is on its return already.
+pub(crate) fn recorded(result: &Value) -> bool {
+    data(result).is_some_and(|data| data["recorded"] == true)
+}
+
 fn data(result: &Value) -> Option<Value> {
     if let Some(value) = result.get("structuredContent").and_then(|structured| structured.get("result")) {
         return Some(value.clone());
@@ -386,13 +391,21 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             vec![],
         ),
         // The email's text stays out of the card (it names the TIN, 6.6).
-        // Nothing new to show: the payment is on its return already.
-        "bir_payment_parse" if data.is_object() && data["recorded"] != true => {
+        // A payment already on its return gets the compact card with View
+        // receipt; an email bir could not read offers nothing to record.
+        "bir_payment_parse" if data.is_object() => {
             let mut snapshot = without(&data, &["raw"]);
             if let Some(record) = snapshot.get_mut("record").and_then(Value::as_object_mut) {
                 record.remove("raw");
             }
-            (open("match", "Payment found", None, snapshot, "", args_value), vec![])
+            let title = if data["recorded"] == true {
+                "Already recorded"
+            } else if data["readable"] == false {
+                "Payment email"
+            } else {
+                "Payment found"
+            };
+            (open("match", title, None, snapshot, "", args_value), vec![])
         }
         // A receipt's page can be larger than a call answers: no Refresh;
         // View receipt shows it.
@@ -400,11 +413,18 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             open("receipt", &format!("Receipt · {}", data["label"].as_str().unwrap_or("")), ticket.as_deref(), without(&data, &["title"]), "", args_value),
             vec![],
         ),
-        // A confirmation BIR already had shows no second card.
-        "bir_confirm_filing" if data["already"] != true => (
-            // BIR's file name starts with the TIN: the card shows the return
-            // and when BIR received it, never the file name.
-            open("confirm", "BIR confirmation", None, without(&data, &["reference", "message_id", "filename"]), "", args_value),
+        // A confirmation BIR already had gets the compact card that opens
+        // the return. BIR's file name starts with the TIN: the card shows
+        // the return and when BIR received it, never the file name.
+        "bir_confirm_filing" => (
+            open(
+                "confirm",
+                if data["already"] == true { "Already confirmed" } else { "BIR confirmation" },
+                None,
+                without(&data, &["reference", "message_id", "filename"]),
+                "",
+                args_value,
+            ),
             vec![],
         ),
         _ => return,

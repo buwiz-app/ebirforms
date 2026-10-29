@@ -38,6 +38,7 @@ mod scope;
 mod server;
 mod taxpayer;
 mod v1;
+mod watch;
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;

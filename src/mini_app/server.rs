@@ -27,6 +27,7 @@ use serde_json::{Map, Value, json};
 use super::apps::{self, Catalog};
 use super::bridge::{Bridge, Call};
 use super::v1::{self, Caller, Origin, app_tools, manifest as v1_manifest};
+use super::watch::Watch;
 use super::{answers, calendar, cards, confirm, lookup, payments, plain, resolve, return_view, scope, taxpayer};
 use crate::agent::{Session, UiQueue};
 
@@ -355,6 +356,14 @@ impl MiniServer {
             if let Err(message) = backed {
                 return Ok(now(v1::fail("permission_denied", &format!("{name}: {message}"))));
             }
+            if matches!(name, BIR_RECORD_PAYMENT | BIR_CONFIRM_FILING) {
+                let text = |key: &str| arguments.get(key).and_then(Value::as_str).map(str::to_string);
+                let inside = Watch::of(&caller.params)
+                    .and_then(|watch| database(|db| watch.allows(db, text("tin").as_deref(), text("form").as_deref())));
+                if let Err(message) = inside {
+                    return Ok(now(v1::fail("permission_denied", &format!("{name}: {message}"))));
+                }
+            }
         }
         let upload = match self.take_upload(name, &mut arguments, caller.origin) {
             Ok(upload) => upload,
@@ -382,8 +391,12 @@ impl MiniServer {
                 plain::rewrite(name, &mut result, caller.origin == Origin::App);
                 // The answer's card (spec 9.8), for the assistant's answers.
                 // A routine's turn reads each email and records it itself:
-                // a Payment found card there would only pile up.
-                if caller.origin == Origin::Agent && !(caller.routine.is_some() && name == BIR_PAYMENT_PARSE) {
+                // a Payment found card there would only pile up; an email
+                // already recorded gets the compact one with View receipt.
+                let routine_parse = caller.routine.is_some()
+                    && name == BIR_PAYMENT_PARSE
+                    && !cards::recorded(&result);
+                if caller.origin == Origin::Agent && !routine_parse {
                     cards::decorate(name, &asked, &mut result);
                 }
                 // What the model or an app reads names taxpayers by ticket.
@@ -1384,7 +1397,9 @@ fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tins": { "type": "array", "items": { "type": "string" }, "description": "Taxpayer TINs (a 9-digit root covers every branch)." }
+                    "tins": { "type": "array", "items": { "type": "string" }, "description": "Taxpayer TINs (a 9-digit root covers every branch)." },
+                    "taxpayers": { "type": "array", "items": { "type": "string" }, "description": "A routine instance's taxpayers, by TIN or name (its params); `tins` wins when both are given." },
+                    "forms": { "type": "array", "items": { "type": "string" }, "description": "A routine instance's forms, e.g. 2551Q (its params): `awaiting` lists only these." }
                 },
                 "additionalProperties": false
             },
@@ -1559,7 +1574,9 @@ fn payment_tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tins": { "type": "array", "items": { "type": "string" }, "description": "Taxpayer TINs (a 9-digit root covers every branch)." }
+                    "tins": { "type": "array", "items": { "type": "string" }, "description": "Taxpayer TINs (a 9-digit root covers every branch)." },
+                    "taxpayers": { "type": "array", "items": { "type": "string" }, "description": "A routine instance's taxpayers, by TIN or name (its params); `tins` wins when both are given." },
+                    "forms": { "type": "array", "items": { "type": "string" }, "description": "A routine instance's forms, e.g. 2551Q (its params): `awaiting` lists only these." }
                 },
                 "additionalProperties": false
             },
@@ -1628,7 +1645,8 @@ fn payment_tools() -> Vec<Value> {
                     "tin": { "type": "string", "description": "Taxpayer TIN." },
                     "year": { "type": "integer", "description": "Paid in this year, e.g. 2026." },
                     "form": { "type": "string", "description": "Form code." },
-                    "period": { "type": "string", "description": "The return's period." }
+                    "period": { "type": "string", "description": "The return's period." },
+                    "message_id": { "type": "string", "description": "Only the payment recorded from this Gmail message, whichever taxpayer it pays." }
                 },
                 "additionalProperties": false
             },
@@ -2248,10 +2266,38 @@ mod tests {
         assert!(parsed["_meta"]["rox/open"].is_null(), "{parsed}");
         let recorded = call_as(&mut server, turn, BIR_RECORD_PAYMENT, record.clone());
         assert_eq!(recorded["isError"], false, "record {record}\n→ {recorded}");
-        // in a chat, the same email once recorded shows no card either
-        let again = call_as(&mut server, agent(), BIR_PAYMENT_PARSE, json!({"text": email}));
-        assert_eq!(again["structuredContent"]["result"]["recorded"], true, "{again}");
-        assert!(again["_meta"]["rox/open"].is_null(), "{again}");
+        // the same email once recorded: the compact card with View receipt,
+        // in the routine's turn and in a chat
+        for caller in [routine_turn("bir-payments"), agent()] {
+            let again = call_as(&mut server, caller, BIR_PAYMENT_PARSE, json!({"text": email, "message_id": "msg-2"}));
+            assert_eq!(again["structuredContent"]["result"]["recorded"], true, "{again}");
+            assert_eq!(again["_meta"]["rox/open"]["title"], "Already recorded", "{again}");
+        }
+    }
+
+    /// One instance of a mail routine (5.9) writes only for the taxpayers
+    /// and forms its params name.
+    #[test]
+    fn a_routine_instance_records_only_inside_its_params() {
+        let mut server = server();
+        save_taxpayer(&mut server, TIN, "Scratch Taxpayer");
+        save_taxpayer(&mut server, OTHER, "Other Taxpayer");
+        let with = |params: Value| {
+            json!({ "origin": "agent", "plugin": "dev.goldcoders.bir", "routine": "bir-payments", "instance": "ri_test", "params": params, "ts": 1 })
+        };
+        crate::mini_app::payments::remember_email("msg-TESTREF004", &payment_email("TESTREF004"));
+        let other = call_as(&mut server, with(json!({"taxpayers": ["Other Taxpayer"]})), BIR_RECORD_PAYMENT, payment_record("TESTREF004"));
+        assert!(denied(&other).contains("does not watch this taxpayer"));
+        let form = call_as(&mut server, with(json!({"forms": ["1601C"]})), BIR_RECORD_PAYMENT, payment_record("TESTREF004"));
+        assert!(denied(&form).contains("watches only 1601C"));
+        let mine = with(json!({"taxpayers": ["Scratch Taxpayer"], "forms": ["2551Q"]}));
+        let recorded = call_as(&mut server, mine.clone(), BIR_RECORD_PAYMENT, payment_record("TESTREF004"));
+        assert_eq!(recorded["isError"], false, "{recorded}");
+        // the instance's search keeps to its taxpayer
+        let query = json!({ "origin": "routine", "plugin": "dev.goldcoders.bir", "routine": "bir-payments", "instance": "ri_test", "ts": 1 });
+        let searched = call_as(&mut server, query, BIR_PAYMENT_SEARCH, json!({"taxpayers": ["Scratch Taxpayer"], "forms": ["2551Q"]}));
+        assert_eq!(searched["isError"], false, "{searched}");
+        assert!(!searched.to_string().contains("Other Taxpayer"), "{searched}");
     }
 
     #[test]

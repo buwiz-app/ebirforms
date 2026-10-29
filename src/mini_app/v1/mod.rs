@@ -62,6 +62,9 @@ pub(crate) struct Caller {
     /// The routine whose turn (origin `agent`) or query (origin `routine`)
     /// this call is (5.9).
     pub routine: Option<String>,
+    /// The routine instance's params (5.9, "Routine instances"); empty
+    /// outside a routine or for an instance made without any.
+    pub params: Map<String, Value>,
 }
 
 impl Caller {
@@ -85,6 +88,11 @@ impl Caller {
             app: text("app"),
             open_id: text("open_id"),
             routine: text("routine"),
+            params: caller
+                .and_then(|caller| caller.get("params"))
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
