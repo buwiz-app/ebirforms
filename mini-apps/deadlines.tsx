@@ -81,8 +81,14 @@ const calendar = resource(
   async () => {
     const args: Record<string, string> = { from: iso(new Date(today.getTime() - 92 * DAY)), to: iso(new Date(today.getTime() + 183 * DAY)) };
     if (TICKET) args.tin = TICKET;
-    const r: any = await rox.call("bir_calendar_get", args);
-    return (r?.result?.events || []) as Due[];
+    try {
+      const r: any = await rox.call("bir_calendar_get", args);
+      return (r?.result?.events || []) as Due[];
+    } finally {
+      // read (or failed): an inline card shows now (`inline.wait_ready`);
+      // a Rox without rox.ready has none
+      (rox as any).ready?.();
+    }
   },
 );
 
