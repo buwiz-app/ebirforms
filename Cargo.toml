@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/ebirforms-mini-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+# Only owner::prepare may be unsafe (it sets the process env before any
+# thread starts); everything else stays safe.
+unsafe_code = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[workspace.dependencies]
+# eBIRForms' domain crates, pinned by commit (no tags or semver yet). Only
+# bir-app-core's BirApp facade is a supported surface; bir-core is reached
+# through its re-export.
+bir-app-core = { git = "https://github.com/eBIRForms/eBIRForms", rev = "adbf8a312c1d695bf83ec19ab8624e46014cf8b4" }
+serde_json = "1"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+tracing = "0.1"

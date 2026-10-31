@@ -1,0 +1,37 @@
+[package]
+name = "ebirforms-mini-app"
+description = "The eBIRForms mini app (app.buwiz.ebirforms): an MCP server on stdio that the Buwiz Bot spawns. It keeps its own data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ebirforms-mini-app"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[[test]]
+name = "mcp_contract"
+path = "../../tests/mcp_contract.rs"
+
+[[test]]
+name = "own_data"
+path = "../../tests/own_data.rs"
+
+[dependencies]
+bir-app-core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+hex = "0.4.3"
+base64 = "0.22"
+ed25519-dalek = "2"
+getrandom = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
