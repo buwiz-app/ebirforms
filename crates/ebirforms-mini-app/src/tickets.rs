@@ -49,17 +49,6 @@ impl Subject {
         })
     }
 
-    /// The return a taxform value names (`<tin>/<FORM>-<period>`, a
-    /// complete one), canonicalized.
-    pub(crate) fn of_return(value: &str, today: NaiveDate) -> Option<Self> {
-        let named = taxform::parse(value, today);
-        let (tin, form, period) = (named.tin?, named.form?, named.period?);
-        named
-            .unknown
-            .is_empty()
-            .then(|| Self::Return(taxform::canonical_value(&tin, form, period)))
-    }
-
     fn encode(&self) -> String {
         match self {
             Self::Taxpayer(root) => format!("tp:{root}"),

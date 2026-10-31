@@ -462,7 +462,7 @@ impl Server {
             "off": pick(&opened.off),
             "options": opened.options.iter()
                 .filter(|(key, _)| keys.as_ref().is_none_or(|keys| keys.contains(key)))
-                .map(|(key, options)| (key.clone(), options.iter().map(|o| json!({"value": o.value, "label": o.label})).collect::<Vec<_>>()))
+                .map(|(key, options)| (key.clone(), Value::Array(options.iter().map(|o| json!({"value": o.value, "label": o.label})).collect())))
                 .collect::<Map<String, Value>>(),
         }))
     }
