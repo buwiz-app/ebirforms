@@ -4,15 +4,15 @@
 //! [`unsigned`] builds it from this build's code and the app source it
 //! serves: the fingerprint is the SHA-256 of the exact bytes
 //! `resources/read` answers, so manifest and app cannot drift.
-//! `buwiz-mcp print-manifest` prints it for signing with the publisher key
+//! `ebirforms-mini-app print-manifest` prints it for signing with the publisher key
 //! (outside this repo). The signed file is what this process serves, byte
-//! for byte, read on every request: `BUWIZ_MCP_MANIFEST`, else
-//! `dev.goldcoders.bir.manifest.json` next to the executable. Without one
+//! for byte, read on every request: `EBIRFORMS_MANIFEST`, else
+//! `app.buwiz.ebirforms.manifest.json` next to the executable. Without one
 //! the unsigned manifest is served and the Bot refuses the plugin, which is
 //! the point: only a signed build runs in the Bot.
 //!
-//! The plugin id stays `dev.goldcoders.bir`, so a Bot install of the old
-//! `bir-mini-app` updates in place.
+//! The plugin id is `app.buwiz.ebirforms` (the owner's `app.buwiz.<repo>`
+//! rule); the publisher is `app.buwiz`, signing with key `gc-2026-01`.
 
 use std::path::PathBuf;
 
@@ -26,18 +26,17 @@ use crate::server::{
 };
 
 pub(crate) const PROTOCOL: &str = "1.0.0";
-pub const PLUGIN_ID: &str = "dev.goldcoders.bir";
-pub(crate) const SHORT: &str = "bir";
-/// Past the last `bir-mini-app` manifest (2.6.3): the first one served by
-/// Buwiz.
-pub(crate) const VERSION: &str = "3.0.0";
+pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
+pub(crate) const SHORT: &str = "ebirforms";
+/// The first version under the plugin id `app.buwiz.ebirforms`.
+pub(crate) const VERSION: &str = "0.1.0";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
-pub const MANIFEST_ENV: &str = "BUWIZ_MCP_MANIFEST";
+pub const MANIFEST_ENV: &str = "EBIRFORMS_MANIFEST";
 /// The signed manifest's file name next to the executable, when
 /// [`MANIFEST_ENV`] is not set.
-pub const MANIFEST_FILE: &str = "dev.goldcoders.bir.manifest.json";
+pub const MANIFEST_FILE: &str = "app.buwiz.ebirforms.manifest.json";
 
 /// The Forms app: `rox-app://forms`, the TSX module the Bot renders.
 pub(crate) const FORMS_ID: &str = "forms";
@@ -49,7 +48,7 @@ pub(crate) const APP_MIME: &str = "text/x-nsh-tsx";
 
 /// What the agent is told when a taxpayer token is in a message or attached.
 const TAXPROFILE_HINT: &str = "An `@bir:taxprofile:<ticket>` token names one taxpayer; the \
-ticket stands for its TIN, which you never see. Attached to this chat, Buwiz tools default to \
+ticket stands for its TIN, which you never see. Attached to this chat, eBIRForms tools default to \
 that taxpayer: pass the ticket as `tin` to bir_drafts_list, bir_dues_list, bir_form_open and \
 bir_app_open (forms), unless the user names another taxpayer. bir_profiles_list lists the \
 taxpayers (as tickets).";
@@ -110,9 +109,9 @@ pub fn unsigned() -> Value {
         "id": PLUGIN_ID,
         "short": SHORT,
         "version": VERSION,
-        "title": "BIR",
-        "description": "Philippine BIR returns for the taxpayers kept in Buwiz on this computer.",
-        "publisher": { "id": "dev.goldcoders", "key_id": "gc-2026-01", "name": "Goldcoders" },
+        "title": "eBIRForms",
+        "description": "Philippine BIR returns for the taxpayers kept in the eBIRForms mini app on this computer.",
+        "publisher": { "id": "app.buwiz", "key_id": "gc-2026-01", "name": "eBIRForms" },
         "commands": [],
         "scopes": [
             { "name": "taxprofile", "description": "Taxpayer by TIN or name", "resolve": RESOLVE, "attach": true, "hint": TAXPROFILE_HINT },
@@ -193,7 +192,7 @@ impl ManifestSource {
             map.remove("signature");
         }
         (jcs::canonical(&body).ok() != jcs::canonical(&unsigned()).ok()).then(|| {
-            "the signed manifest is not this build's (its app or tools changed): print it with `buwiz-mcp print-manifest` and sign it again".to_string()
+            "the signed manifest is not this build's (its app or tools changed): print it with `ebirforms-mini-app print-manifest` and sign it again".to_string()
         })
     }
 }
@@ -211,7 +210,7 @@ mod tests {
     #[test]
     fn the_manifest_keeps_the_plugin_id_and_names_only_forms() {
         let m = unsigned();
-        assert_eq!(m["id"], "dev.goldcoders.bir");
+        assert_eq!(m["id"], "app.buwiz.ebirforms");
         assert_eq!(m["protocol"], PROTOCOL);
         let apps = m["apps"].as_array().unwrap();
         assert_eq!(apps.len(), 1);

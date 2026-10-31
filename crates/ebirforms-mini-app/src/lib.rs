@@ -1,16 +1,14 @@
-//! `buwiz-mcp`: Buwiz without a window, as the MCP server Buwiz Bot spawns
-//! for the Forms mini app (plugin `dev.goldcoders.bir`, Mini App Protocol
-//! v1, stdio only).
+//! The eBIRForms mini app (`app.buwiz.ebirforms`): the MCP server the eBIRForms
+//! Bot spawns over stdio.
 //!
-//! It opens the Buwiz app's own database (same data dir, same keychain key)
-//! through [`bir_app_core::BirApp`] and shares it with the app by the
-//! owner-lock rules in [`owner`]. stdout carries MCP; every log line goes to
-//! stderr.
+//! It keeps its own taxpayer database ([`owner`]) and works on it through
+//! eBIRForms' [`bir_app_core::BirApp`]. stdout carries MCP; log lines go to
+//! stderr and to the mini app's own `logs/` folder.
 
 mod jcs;
 mod keys;
 pub mod manifest;
-mod owner;
+pub mod owner;
 mod protocol;
 mod scope;
 mod scrub;
@@ -33,6 +31,5 @@ pub fn serve_stdio(server: &mut Server) -> std::io::Result<()> {
             out.flush()?;
         }
     }
-    server.finish();
     Ok(())
 }

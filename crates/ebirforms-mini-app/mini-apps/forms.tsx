@@ -127,10 +127,6 @@ const H = {
   cancelQueue: (code: string, draft: any) => bir<null>("screen_form_cancel_queue", code, draft),
   queuePeriod: (tin: string, code: string, year: number, quarter: number | null) => bir<number>("queue_form_draft", tin, code, year, quarter),
   cancelQueued: (tin: string, code: string, year: number, quarter: number | null) => bir<null>("cancel_queued", tin, code, year, quarter),
-  // the assistant's standing OK to submit a form for this taxpayer
-  grants: (tin: string) => bir<{ tin: string; form: string; granted_at: string }[]>("list_send_grants", tin),
-  grant: (tin: string, code: string) => bir<any>("grant_send", tin, code),
-  revoke: (tin: string, code: string) => bir<null>("revoke_send", tin, code),
   // payments and the printable filing record (the server's own tools)
   payments: (form: string, period: string) => tool<{ payments: Payment[] }>("bir_payments_list", { tin: BRANCH, form, period }),
   recordPayment: (form: string, period: string, d: { paid_at: string; amount: string; channel: string; reference: string }) =>
@@ -208,7 +204,6 @@ interface FS extends Opts {
   editSeq: number; validateSeq: number; chain: Promise<unknown>;
   picker: Picker | null; printResult: { sample: boolean; error: string } | null;
   /** Whether the assistant may submit this form for this taxpayer (null: not read yet). */
-  assistantMay: boolean | null;
   /** This return's recorded payments (null: not read yet, or not a stored return). */
   payments: Payment[] | null;
   /** Why the payments could not be read (signed out, server down), in plain words. */
@@ -570,7 +565,7 @@ function newState(opts: Opts): FS {
     periodComplete: false, periodInFlight: null, periodSeq: 0, periodToken: 0, opens: null, existing: null, saveAfterAnswer: null,
     submittedAt: null, confirmedAt: null, amends: null, filedOriginal: null, filedOriginalView: null,
     removal: null, chosenFrom: {}, editSeq: 0, validateSeq: 0, chain: Promise.resolve(),
-    picker: null, printResult: null, assistantMay: null, payments: null, paying: false,
+    picker: null, printResult: null, payments: null, paying: false,
   };
 }
 
@@ -625,7 +620,6 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
       bump();
       then?.(null);
       recordNotesWhenShown(s, token);
-      readGrant(s, token);
       readPayments(s, token);
       if (s.submitAsk && s.editable && !s.sample) validate(s);
     } catch (e) {
@@ -1531,35 +1525,7 @@ function reload(s: FS) {
   openForm({ tin: s.tin, code: s.code, year: s.year, period: s.period, sample: s.sample, viewOnly: s.viewOnly, ...(s.returnKey != null ? { returnKey: s.returnKey } : {}) });
 }
 
-// ----- the assistant: its standing OK to submit, and the hand-off to a chat
-
-const grantTin = (s: FS) => (digits(s.tin).length === 9 ? `${digits(s.tin)}00000` : digits(s.tin));
-
-/** Reads whether the assistant may submit this form for this taxpayer. */
-async function readGrant(s: FS, token: number) {
-  if (s.sample) return;
-  try {
-    const grants = await H.grants(grantTin(s));
-    if (!live(s, token)) return;
-    s.assistantMay = grants.some((g) => digits(g.tin) === grantTin(s) && normCode(g.form) === s.code);
-  } catch {
-    if (live(s, token)) s.assistantMay = null;
-  }
-  bump();
-}
-
-/** The toggle: grants or revokes the assistant's standing OK. The user's own Submit never needs it. */
-async function setAssistantMay(s: FS, may: boolean) {
-  try {
-    if (may) await H.grant(grantTin(s), s.code);
-    else await H.revoke(grantTin(s), s.code);
-    s.assistantMay = may;
-    toast(may ? `The assistant may now submit ${s.code} for this taxpayer.` : `The assistant can no longer submit ${s.code} for this taxpayer.`, "success");
-  } catch (e) {
-    toast(errText(e), "danger");
-  }
-  bump();
-}
+// ----- the assistant: the hand-off to a chat
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
@@ -2720,7 +2686,6 @@ function FormPage(p: { s: FS }) {
         <Text class={`text-xs ${C.fg2}`}>Opened to view: nothing here can be changed. Open it from the forms list to edit it.</Text>
       </If>
       <SubmitConfirm s={s} />
-      <AssistantToggle s={s} />
       <PaymentPanel s={s} />
       <If when={(rev(), s.profileUpdates.length > 0)}><Text class={`text-xs ${C.fg2}`}>{`Updated from your tax profile: ${s.profileUpdates.join("; ")}`}</Text></If>
       <Each of={(rev(), s.notes)}>{(n) => <Text class={`text-xs ${C.fg2}`}>{n().text}</Text>}</Each>
@@ -2891,21 +2856,6 @@ function SubmitConfirm(p: { s: FS }) {
           </If>
           <Btn label="Not now" variant="ghost" onPress={close} />
         </View>
-      </View>
-    </If>
-  );
-}
-
-/** "Let the assistant submit <form> for this taxpayer": the standing OK, granted or revoked here. */
-function AssistantToggle(p: { s: FS }) {
-  const s = p.s;
-  const shown = () => (rev(), !s.sample && !s.filedOriginalView && s.assistantMay !== null && digits(s.tin).length >= 9);
-  const on = () => (rev(), s.assistantMay === true);
-  return (
-    <If when={shown()}>
-      <View class="flex-row items-center gap-2 self-start" activeStyle={{ opacity: 0.6 }} onPress={() => setAssistantMay(s, !on())}>
-        <CheckBox on={on()} />
-        <Text class={`text-xs ${C.fg2}`}>{`Let the assistant submit ${s.code} for this taxpayer`}</Text>
       </View>
     </If>
   );

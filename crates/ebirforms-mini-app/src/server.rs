@@ -1,13 +1,13 @@
-//! MCP for `buwiz-mcp`: JSON-RPC 2.0, one message per line.
+//! MCP for the eBIRForms mini app: JSON-RPC 2.0, one message per line.
 //!
-//! Every tool runs in this process over [`BirApp`], the same door the
-//! Buwiz app uses:
+//! Every tool runs in this process over [`BirApp`], eBIRForms' typed door
+//! into forms, on the mini app's own database:
 //!
 //! - the Forms app's calls: `bir_app_<function>` (one per function its
 //!   source calls, held to its ticket by [`crate::scope`]), the ticket
 //!   helpers, the print preview and the payments list;
 //! - the assistant's tools: status, taxpayers, dues, drafts, opening the
-//!   Forms app, and one open return to read, fill, validate, save or send;
+//!   Forms app, and one open return to read, fill, validate or save;
 //! - `bir_resolve` for the manifest's `taxprofile` scope;
 //! - the reserved `rox.*` tools ([`crate::protocol`]).
 //!
@@ -27,13 +27,13 @@ use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::manifest::{self, ManifestSource};
-use crate::owner::{self, Sends};
+use crate::owner;
 use crate::protocol::{self, Caller, Host, Origin};
 use crate::scope::{self, Access, Rule};
 use crate::scrub::{self, Scrubber};
 use crate::tickets::{self, Subject};
 
-pub(crate) const SERVER_NAME: &str = "buwiz-mcp";
+pub(crate) const SERVER_NAME: &str = "ebirforms-mini-app";
 pub(crate) const LATEST_PROTOCOL: &str = "2025-06-18";
 pub(crate) const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -54,7 +54,6 @@ pub(crate) const FORM_FIELDS: &str = "bir_form_fields";
 pub(crate) const FORM_FILL: &str = "bir_form_fill";
 pub(crate) const FORM_VALIDATE: &str = "bir_form_validate";
 pub(crate) const FORM_SAVE: &str = "bir_form_save_draft";
-pub(crate) const FORM_SEND: &str = "bir_form_send";
 pub(crate) const FORM_DISMISS: &str = "bir_form_dismiss";
 
 // The Forms app's own tools (refused for the assistant).
@@ -62,7 +61,7 @@ pub(crate) const APP_PREFIX: &str = "bir_app_";
 pub(crate) const TICKET_SUBJECT: &str = "bir_ticket_subject";
 pub(crate) const TICKET_ISSUE: &str = "bir_ticket_issue";
 pub(crate) const PRINT_PREVIEW: &str = "bir_app_print_preview";
-/// Buwiz keeps no payments yet: the list is empty, so the Forms app's
+/// eBIRForms keeps no payments yet: the list is empty, so the Forms app's
 /// payment section shows nothing paid.
 pub(crate) const PAYMENTS_LIST: &str = "bir_payments_list";
 
@@ -70,8 +69,8 @@ pub(crate) const PAYMENTS_LIST: &str = "bir_payments_list";
 /// a routine or resolve call may run.
 const READ_ONLY: [&str; 7] = [STATUS, RESOLVE, PROFILES_LIST, DUES_LIST, DRAFTS_LIST, FORM_FIELDS, FORM_VALIDATE];
 
-const INSTRUCTIONS: &str = "Buwiz (Philippine BIR tax returns) running headless on this computer \
-over the taxpayer database Buwiz keeps. Taxpayers, branches and returns reach you as tickets \
+const INSTRUCTIONS: &str = "eBIRForms (Philippine BIR tax returns) running headless on this computer \
+over the taxpayer database eBIRForms keeps. Taxpayers, branches and returns reach you as tickets \
 (tkt_...), never as TINs: pass a ticket wherever a tool takes `tin`; a return's ticket also goes \
 in bir_form_open's `code` and bir_app_open's `form`. Never ask the user for a TIN and never write \
 one out; use the taxpayer's name. bir_profiles_list lists the taxpayers, bir_dues_list the returns \
@@ -79,10 +78,7 @@ due, bir_drafts_list a taxpayer's saved returns. To let the user work visually, 
 with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` to open one \
 return). You can draft a return yourself: bir_form_open, bir_form_fields, bir_form_fill (with its \
 `source`), bir_form_validate, bir_form_save_draft, bir_form_dismiss; one return is open at a time. \
-bir_form_send queues it for filing only when the user gave a standing OK for that taxpayer and \
-form in the Forms app; otherwise the user presses Submit in the Forms app. While the Buwiz app is \
-open on this computer, it owns the database: saving and queueing are refused here and the user \
-does them in Buwiz. Tools whose description starts with \"Mini apps only\" and bir_resolve belong \
+Filing is not available here yet: a return can be saved, but nothing is queued or sent. Tools whose description starts with \"Mini apps only\" and bir_resolve belong \
 to the Forms app and to the Bot: do not call them.";
 
 /// The return the assistant has open.
@@ -100,20 +96,20 @@ pub struct Server {
     manifest: ManifestSource,
     host: Host,
     form: Option<OpenForm>,
-    sends: Sends,
 }
 
 impl Server {
-    /// The server the Bot spawns: the live database the Buwiz app uses,
-    /// opened without its owner lock ([`crate::owner`]). A database that
-    /// cannot open (no Buwiz on this computer yet, a key that cannot be
-    /// read) leaves the protocol working and every tool saying why.
-    pub fn open_live(manifest: ManifestSource) -> Self {
-        let db_path = owner::database_path();
-        let app = if db_path.is_file() {
-            BirApp::open_at(&db_path).map(Arc::new).map_err(|error| format!("the Buwiz database did not open: {error}"))
-        } else {
-            Err("Buwiz has no taxpayer database on this computer yet: open the Buwiz app once first.".to_string())
+    /// The server the Bot spawns, over the mini app's own database
+    /// ([`crate::owner`]): `database` is what [`owner::prepare`] gave. A
+    /// database that cannot open leaves the protocol working and every tool
+    /// saying why.
+    pub fn open_own(manifest: ManifestSource, database: Result<PathBuf, String>) -> Self {
+        let (app, db_path) = match database {
+            Ok(path) => (
+                BirApp::open_at(&path).map(Arc::new).map_err(|error| format!("the eBIRForms mini app's database did not open: {error}")),
+                path,
+            ),
+            Err(problem) => (Err(problem), PathBuf::new()),
         };
         if let Err(problem) = &app {
             tracing::warn!("{problem}");
@@ -128,12 +124,7 @@ impl Server {
     }
 
     fn new(app: Result<Arc<BirApp>, String>, db_path: PathBuf, manifest: ManifestSource, require_provision: bool) -> Self {
-        Self { app, db_path, manifest, host: Host::new(require_provision), form: None, sends: Sends::default() }
-    }
-
-    /// Wait for the sends this process started (call before exiting).
-    pub fn finish(&mut self) {
-        self.sends.join();
+        Self { app, db_path, manifest, host: Host::new(require_provision), form: None }
     }
 
     /// One line in, at most one line out.
@@ -241,14 +232,14 @@ impl Server {
     /// queries never cause side effects.
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
         if matches!(caller.origin, Origin::Resolve | Origin::Routine) && !read_only(name) {
-            return Err(format!("{name} changes Buwiz data, so it does not run for a resolve or routine call"));
+            return Err(format!("{name} changes eBIRForms data, so it does not run for a resolve or routine call"));
         }
         if caller.origin != Origin::App {
             return if is_app_only(name) { Err(format!("{name} is for the Forms mini app only")) } else { Ok(()) };
         }
         let app = caller.app.as_deref().ok_or("an app call names no app")?;
         if self.host.provisioned() && self.host.session_app(caller.open_id.as_deref().unwrap_or("")) != Some(app) {
-            return Err("this app open was not certified by Buwiz".into());
+            return Err("this app open was not certified by eBIRForms".into());
         }
         let allowed = self
             .manifest
@@ -288,14 +279,15 @@ impl Server {
         let root = ticket.as_deref().map(|ticket| tickets::subject_of(app, ticket).map(|subject| subject.root())).transpose()?;
         if scope::needs_ticket(rule) && root.is_none() {
             return Err(format!(
-                "`{function}` names a taxpayer: pass the app's `ticket` (an app reaches a taxpayer only through a ticket Buwiz issued)"
+                "`{function}` names a taxpayer: pass the app's `ticket` (an app reaches a taxpayer only through a ticket eBIRForms issued)"
             ));
         }
         if let Some(root) = &root {
             scope::check_args(function, rule, &args, root)?;
         }
-        let lock = match access {
-            Access::Write | Access::Queue => Some(owner::acquire(&self.db_path)?),
+        let _lock = match access {
+            Access::Queue => return Err(owner::NO_SENDING.to_string()),
+            Access::Write => Some(owner::acquire(&self.db_path)?),
             Access::Read | Access::Bookkeeping => None,
         };
         let value = app.call(function, args.clone()).map_err(|error| error.to_string())?;
@@ -303,13 +295,6 @@ impl Server {
             Some(root) => scope::filter_result(function, rule, &args, value, root)?,
             None => value,
         };
-        if let (Access::Queue, Some(lock)) = (access, lock) {
-            match self.sends.start(app, lock) {
-                Ok(true) => tracing::info!("{function}: queued, sending through the relay"),
-                Ok(false) => tracing::info!("{function}: queued; not signed in, so it waits for Buwiz"),
-                Err(error) => tracing::warn!("{function}: queued, not sent: {error}"),
-            }
-        }
         if rule == Rule::Rows {
             return with_tickets(app, value);
         }
@@ -331,7 +316,6 @@ impl Server {
             FORM_FILL => self.form_fill(app, arguments),
             FORM_VALIDATE => no_arguments(arguments).and_then(|()| self.form_validate(app)),
             FORM_SAVE => no_arguments(arguments).and_then(|()| self.form_save(app)),
-            FORM_SEND => no_arguments(arguments).and_then(|()| self.form_send(app)),
             FORM_DISMISS => self.form_dismiss(arguments),
             other => return Err((METHOD_NOT_FOUND, format!("unknown tool: {other}"))),
         };
@@ -339,29 +323,17 @@ impl Server {
     }
 
     fn status(&self, app: &BirApp) -> Value {
-        let custom = std::env::var_os("BUWIZ_DATABASE_PATH").is_some_and(|path| !path.is_empty());
         let mut status = json!({
             "app": SERVER_NAME,
             "mode": "headless",
             "version": env!("CARGO_PKG_VERSION"),
             "plugin_version": manifest::VERSION,
-            "database": if custom { "BUWIZ_DATABASE_PATH" } else { "Buwiz (this computer's taxpayers)" },
-            // false while the Buwiz app is open: it owns the database then
+            // the mini app's own taxpayers, not either desktop app's
+            "database": "eBIRForms mini app (its own data)",
+            // false only for a moment while another process of this mini app saves
             "writable": owner::writable(&self.db_path),
+            "sending": false,
         });
-        match owner::sign_in(app) {
-            Ok(Some(email)) => {
-                status["signed_in"] = json!(true);
-                if let Some(email) = email {
-                    status["account"] = json!(email);
-                }
-            }
-            Ok(None) => status["signed_in"] = json!(false),
-            Err(error) => status["sign_in_error"] = json!(error),
-        }
-        if let Ok(queue) = app.list_queue() {
-            status["queue"] = json!({ "waiting": queue.len() });
-        }
         if let Ok(taxpayers) = app.list_taxpayers() {
             status["taxpayers"] = json!(taxpayers.iter().filter(|taxpayer| !taxpayer.archived).count());
         }
@@ -384,7 +356,7 @@ impl Server {
         let form = named
             .form
             .or_else(|| taxform::form_code_of(&code))
-            .ok_or_else(|| format!("`{code}` names no BIR form Buwiz can open"))?;
+            .ok_or_else(|| format!("`{code}` names no BIR form eBIRForms can open"))?;
         let tin = match text_arg(arguments, "tin")? {
             Some(tin) => taxform::tin_digits(&tin).ok_or_else(|| format!("`tin` must be a ticket from {PROFILES_LIST}"))?,
             None => named.tin.clone().ok_or_else(|| format!("`tin` is required: the taxpayer's ticket from {PROFILES_LIST}"))?,
@@ -534,43 +506,6 @@ impl Server {
         Ok(json!({ "saved": true, "id": saved.id, "status": form.opened.status }))
     }
 
-    fn form_send(&mut self, app: &Arc<BirApp>) -> Result<Value, String> {
-        let form = self.open_form()?;
-        let granted = app
-            .call("list_send_grants", vec![Value::String(form.tin.clone())])
-            .map_err(|error| error.to_string())?
-            .as_array()
-            .is_some_and(|grants| grants.iter().any(|grant| grant["form"].as_str() == Some(form.form.as_str())));
-        if !granted {
-            return Ok(json!({
-                "status": "approval_required",
-                "pending": true,
-                "message": "Nothing was queued: the user has not allowed the assistant to send this form for this taxpayer. They can press Submit in the Forms app themselves, or allow sending there.",
-            }));
-        }
-        let lock = owner::acquire(&self.db_path)?;
-        let checked = self.form_validate(app)?;
-        if checked["ok"] != true {
-            return Ok(json!({ "status": "invalid", "field_errors": checked["field_errors"] }));
-        }
-        let saved = self.save_open(app)?;
-        let form = self.open_form()?;
-        let id = app.queue_return(&form.form, &form.opened.draft).map_err(|error| error.to_string())?;
-        self.form = None;
-        let sending = self.sends.start(app, lock)?;
-        Ok(json!({
-            "status": "queued",
-            "id": id,
-            "saved_id": saved["id"],
-            "sending": sending,
-            "message": if sending {
-                "Queued and going out now through Buwiz's relay."
-            } else {
-                "Queued. This computer is not signed in to Buwiz for sending, so it goes out once the user signs in in the Buwiz app."
-            },
-        }))
-    }
-
     fn form_dismiss(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
         reject_unknown(arguments, &["discard"])?;
         let discard = arguments.get("discard").and_then(Value::as_bool).unwrap_or(false);
@@ -687,7 +622,7 @@ fn ticket_arg(arguments: &Map<String, Value>) -> Result<&str, String> {
 /// `bir_ticket_subject {ticket}`: what the ticket stands for, for the app.
 fn ticket_subject(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
     let subject = tickets::subject_of(app, ticket_arg(arguments)?)?;
-    let title = subject.title(app, today).ok_or("the taxpayer of this ticket is no longer saved in Buwiz")?;
+    let title = subject.title(app, today).ok_or("the taxpayer of this ticket is no longer saved in eBIRForms")?;
     let mut out = subject.describe(today);
     out["title"] = Value::String(title);
     Ok(out)
@@ -702,11 +637,11 @@ fn ticket_issue(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) 
     if subject.root() != root {
         return Err("`tin` is another taxpayer's: a ticket reaches its own taxpayer only".into());
     }
-    let title = subject.title(app, today).ok_or("no such branch is saved in Buwiz")?;
+    let title = subject.title(app, today).ok_or("no such branch is saved in eBIRForms")?;
     Ok(json!({ "ticket": tickets::issue(app, &subject)?, "title": title }))
 }
 
-/// `bir_payments_list {tin, form?, period?}`: Buwiz keeps no payments yet.
+/// `bir_payments_list {tin, form?, period?}`: eBIRForms keeps no payments yet.
 fn payments_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
     let tin = arguments.get("tin").and_then(Value::as_str).ok_or("`tin` is required: the app's ticket")?;
     tickets::subject_of(app, tin)?;
@@ -745,7 +680,7 @@ fn preview_page(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) 
     let subject = tickets::subject_of(app, ticket_arg(arguments)?)?;
     let root = subject.root();
     let form = arguments.get("form").and_then(Value::as_str).ok_or("`form` is required: a BIR form code")?;
-    let form = taxform::form_code_of(form).ok_or_else(|| format!("`{form}` is not a BIR form Buwiz prints"))?;
+    let form = taxform::form_code_of(form).ok_or_else(|| format!("`{form}` is not a BIR form eBIRForms prints"))?;
     let given = ["draft_id", "year", "draft_json", "period"].iter().filter(|key| arguments.contains_key(**key)).count();
     if given != 1 {
         return Err("pass one of `draft_id`, `year` and `quarter` (a saved return), `draft_json` (a sample) or `period`".into());
@@ -765,8 +700,10 @@ fn preview_page(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) 
         app.call("form_print_html", vec![json!(subject.full_tin()), json!(form), json!(year), json!(quarter)])
     } else if let Some(id) = arguments.get("draft_id") {
         let id = id.as_i64().ok_or("`draft_id` must be an integer")?;
-        let draft = app
-            .draft_data(id)
+        // BirApp on eBIRForms main has no draft-by-id read yet: a second
+        // connection to this mini app's own database file reads it.
+        let draft = bir_app_core::bir_core::db::Database::open(app.database_path())
+            .and_then(|db| db.draft_data_json(id))
             .map_err(|error| error.to_string())?
             .filter(Value::is_object)
             .ok_or_else(|| format!("no saved return has id {id}"))?;
@@ -848,7 +785,7 @@ fn tin_matches(filter: &Option<String>, tin: &str) -> bool {
     }
 }
 
-/// `bir_dues_list {tin?, filter?}`: returns due by Buwiz's filing calendar.
+/// `bir_dues_list {tin?, filter?}`: returns due by eBIRForms's filing calendar.
 fn dues_list(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
     reject_unknown(arguments, &["tin", "filter"])?;
     let tin = tin_filter(arguments)?;
@@ -926,7 +863,7 @@ fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> R
     reject_unknown(arguments, &["app", "tin", "form", "period", "action", "draft_id"])?;
     match text_arg(arguments, "app")?.as_deref() {
         Some(manifest::FORMS_ID) => {}
-        _ => return Err("`app` must be forms (the one app Buwiz ships)".into()),
+        _ => return Err("`app` must be forms (the one app eBIRForms ships)".into()),
     }
     let action = text_arg(arguments, "action")?
         .map(|action| {
@@ -949,7 +886,7 @@ fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> R
         (None, None) => (None, manifest::FORMS_TITLE.to_string()),
         (Some(tin), None) => {
             let subject = Subject::of_tin(&tin).ok_or("`tin` is not a taxpayer")?;
-            let name = subject.title(app, today).ok_or_else(|| format!("that taxpayer is not saved in Buwiz; list them with {PROFILES_LIST}"))?;
+            let name = subject.title(app, today).ok_or_else(|| format!("that taxpayer is not saved in eBIRForms; list them with {PROFILES_LIST}"))?;
             (Some(subject), format!("{} · {name}", manifest::FORMS_TITLE))
         }
         (Some(tin), Some(form_text)) => {
@@ -967,7 +904,7 @@ fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> R
             }
             .for_form(form, today)?;
             let subject = Subject::Return(taxform::canonical_value(&tin, form, period));
-            let title = subject.title(app, today).ok_or_else(|| format!("that taxpayer is not saved in Buwiz; list them with {PROFILES_LIST}"))?;
+            let title = subject.title(app, today).ok_or_else(|| format!("that taxpayer is not saved in eBIRForms; list them with {PROFILES_LIST}"))?;
             props.insert("form".into(), json!(form));
             props.insert("period".into(), json!(period.canonical()));
             if let Some(action) = action {
@@ -1010,14 +947,14 @@ fn try_resolve(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
     let kind = arguments.get("kind").and_then(Value::as_str).unwrap_or("scope");
     let name = arguments.get("name").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
     if kind != "scope" || name != "taxprofile" {
-        return Err("Buwiz resolves the taxprofile scope only".into());
+        return Err("eBIRForms resolves the taxprofile scope only".into());
     }
     let value = arguments.get("value").and_then(Value::as_str).unwrap_or("").trim().to_string();
     let complete = arguments.get("complete").and_then(Value::as_bool).unwrap_or(false);
     let today = taxform::today();
     if tickets::is_ticket(&value) {
         let subject = tickets::subject_of(app, &value).map_err(|_| "That taxpayer is no longer available".to_string())?;
-        let title = subject.title(app, today).ok_or("That taxpayer is no longer saved in Buwiz")?;
+        let title = subject.title(app, today).ok_or("That taxpayer is no longer saved in eBIRForms")?;
         return Ok(json!({ "result": "token", "ticket": value, "title": title }));
     }
     let wanted_digits = tickets::digits(&value);
@@ -1046,7 +983,7 @@ fn try_resolve(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
         return Ok(json!({ "result": "token", "ticket": ticket, "title": title }));
     }
     if found.is_empty() && !complete {
-        return Err(format!("No taxpayer in Buwiz matches “{}”", value.chars().take(60).collect::<String>()));
+        return Err(format!("No taxpayer in eBIRForms matches “{}”", value.chars().take(60).collect::<String>()));
     }
     found.truncate(20);
     let subjects: Vec<Option<Subject>> = found.iter().map(|(subject, ..)| Some(subject.clone())).collect();
@@ -1137,9 +1074,9 @@ fn empty_schema() -> Value {
 fn tool_list() -> Value {
     let ticket = json!({ "type": "string", "description": "The taxpayer's ticket (tkt_...) from bir_profiles_list or an @bir:taxprofile token." });
     let mut tools = vec![
-        tool(STATUS, "Report this Buwiz host: headless mode, whether the Buwiz app is open (then `writable` is false and saving or queueing happens in Buwiz), whether this computer is signed in to Buwiz for sending, how many taxpayers are saved and how many returns wait in the sending queue. Use it for \"is Buwiz working?\".", empty_schema(), true),
-        tool(PROFILES_LIST, "List the taxpayers saved in Buwiz with their branches; each comes back as a ticket. Pass a ticket as `tin` to the other tools.", empty_schema(), true),
-        tool(DUES_LIST, "List returns due by Buwiz's filing calendar, with their status. `filter`: upcoming (default, the next 45 days), overdue (past due and not filed) or all. `tin` limits it to one taxpayer.", json!({
+        tool(STATUS, "Report the eBIRForms mini app: its version, that it keeps its own data, whether saving works right now, that sending is off, and how many taxpayers are saved. Use it for \"is eBIRForms working?\".", empty_schema(), true),
+        tool(PROFILES_LIST, "List the taxpayers saved in eBIRForms with their branches; each comes back as a ticket. Pass a ticket as `tin` to the other tools.", empty_schema(), true),
+        tool(DUES_LIST, "List returns due by eBIRForms's filing calendar, with their status. `filter`: upcoming (default, the next 45 days), overdue (past due and not filed) or all. `tin` limits it to one taxpayer.", json!({
             "type": "object",
             "properties": { "tin": ticket, "filter": { "type": "string", "enum": ["upcoming", "overdue", "all"] } },
             "additionalProperties": false
@@ -1163,7 +1100,7 @@ fn tool_list() -> Value {
             "required": ["app"],
             "additionalProperties": false
         }), false),
-        tool(FORM_OPEN, "Open a return for one taxpayer and period, as Buwiz's form page opens it (prefilled from the taxpayer profile; the saved return if there is one). `code`: a form code (1601C, 2551Q, 1701Q, ...) or a return's ticket. `period`: month 1-12, quarter 1-4, 0 for annual, or text (2026-Q3, 2026-01, 2025); omitted, the return to file now. One return is open at a time.", json!({
+        tool(FORM_OPEN, "Open a return for one taxpayer and period, as eBIRForms's form page opens it (prefilled from the taxpayer profile; the saved return if there is one). `code`: a form code (1601C, 2551Q, 1701Q, ...) or a return's ticket. `period`: month 1-12, quarter 1-4, 0 for annual, or text (2026-Q3, 2026-01, 2025); omitted, the return to file now. One return is open at a time.", json!({
             "type": "object",
             "properties": {
                 "code": { "type": "string" },
@@ -1179,7 +1116,7 @@ fn tool_list() -> Value {
             "properties": { "keys": { "type": "array", "items": { "type": "string" } } },
             "additionalProperties": false
         }), true),
-        tool(FORM_FILL, "Fill boxes of the open return: `fields` maps official box keys (from bir_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). Buwiz recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.", json!({
+        tool(FORM_FILL, "Fill boxes of the open return: `fields` maps official box keys (from bir_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.", json!({
             "type": "object",
             "properties": {
                 "fields": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] }, "minProperties": 1 },
@@ -1190,8 +1127,7 @@ fn tool_list() -> Value {
             "additionalProperties": false
         }), false),
         tool(FORM_VALIDATE, "Validate the open return with the form's official rules, as the page's Validate does: `ok`, `error_count` and `field_errors` ({field, message}). Explain each error in plain words.", empty_schema(), true),
-        tool(FORM_SAVE, "Save the open return as a draft in Buwiz. It never queues or files anything. Refused while the Buwiz app is open (it owns the database then).", empty_schema(), false),
-        tool(FORM_SEND, "Queue the open return for filing, after validating and saving it, and send it through Buwiz's relay when this computer is signed in. Needs the user's standing OK for this taxpayer and form (given in the Forms app); without it the result is approval_required and nothing is queued. Refused while the Buwiz app is open.", empty_schema(), false),
+        tool(FORM_SAVE, "Save the open return as a draft in the eBIRForms mini app. It never queues or files anything.", empty_schema(), false),
         tool(FORM_DISMISS, "Close the open return without saving. Refused when it has unsaved edits unless `discard` is true, which you set only after the user said to drop them.", json!({
             "type": "object",
             "properties": { "discard": { "type": "boolean" } },
@@ -1221,7 +1157,7 @@ fn tool_list() -> Value {
             "required": ["ticket", "form"],
             "additionalProperties": false
         }), true),
-        app_only(PAYMENTS_LIST, "a return's recorded payments (Buwiz keeps none yet: always empty).", json!({
+        app_only(PAYMENTS_LIST, "a return's recorded payments (eBIRForms keeps none yet: always empty).", json!({
             "type": "object",
             "properties": { "tin": { "type": "string" }, "form": { "type": "string" }, "period": { "type": "string" } },
             "required": ["tin"],
@@ -1231,7 +1167,7 @@ fn tool_list() -> Value {
     for (function, _, access) in scope::FORMS {
         tools.push(app_only(
             &app_tool_name(function),
-            &format!("Buwiz's `{function}`, held to the taxpayer of the app's ticket."),
+            &format!("eBIRForms's `{function}`, held to the taxpayer of the app's ticket."),
             json!({
                 "type": "object",
                 "properties": {

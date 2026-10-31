@@ -29,7 +29,7 @@ fn dashed_tin_re() -> &'static Regex {
 pub(crate) fn expand(app: &BirApp, tool: &str, arguments: &mut Map<String, Value>, origin: Origin) -> Result<(), String> {
     let lookup = |ticket: &str| -> Result<Subject, String> {
         tickets::subject(app, ticket)?
-            .ok_or_else(|| format!("{tool}: the ticket is not one Buwiz issued, or it was revoked"))
+            .ok_or_else(|| format!("{tool}: the ticket is not one eBIRForms issued, or it was revoked"))
     };
     let mut implied_return = None;
     if let Some(value) = arguments.get("tin").cloned() {

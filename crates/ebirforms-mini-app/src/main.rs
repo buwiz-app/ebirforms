@@ -1,37 +1,36 @@
-//! `buwiz-mcp`: see the library docs.
+//! `ebirforms-mini-app`: see the library docs.
 
 use std::process::ExitCode;
 
-const USAGE: &str = "buwiz-mcp: Buwiz without a window, as the Forms mini app's MCP server for Buwiz Bot.
+use ebirforms_mini_app::owner;
 
-Usage: buwiz-mcp mcp              speak MCP (JSON-RPC 2.0, one message per line) on stdin/stdout,
-                                  as the Mini App Protocol v1 plugin dev.goldcoders.bir
-       buwiz-mcp print-manifest   print this build's unsigned v1 manifest, for signing
-       buwiz-mcp --version
-       buwiz-mcp --help
+const USAGE: &str = "ebirforms-mini-app: the eBIRForms mini app (app.buwiz.ebirforms), the MCP server the Buwiz Bot spawns.
 
-It works on the Buwiz app's taxpayer database. While the Buwiz app is open it
-owns that database: reading works here, saving and queueing are refused.
+Usage: ebirforms-mini-app mcp              speak MCP (JSON-RPC 2.0, one message per line) on stdin/stdout
+       ebirforms-mini-app print-manifest   print this build's unsigned manifest, for signing
+       ebirforms-mini-app --version
+       ebirforms-mini-app --help
+
+It keeps its own taxpayer database, shared with no desktop app, and never reads a
+keychain. Sending returns to BIR is not available yet.
 
 Environment:
-  BUWIZ_MCP_MANIFEST   the signed v1 manifest to serve at rox://manifest (default:
-                       dev.goldcoders.bir.manifest.json next to this executable; without
-                       either the unsigned one is served, and the Bot refuses the plugin)
-  BUWIZ_DATABASE_PATH  the database file (default: the Buwiz app's data directory)
-  BUWIZ_DB_KEY, BUWIZ_DB_KEY_FILE
-                       the database key (default: the Buwiz app's keychain entry)
-  BUWIZ_API_URL        the Buwiz server sending goes through (default: the app's setting)";
+  EBIRFORMS_MANIFEST   the signed manifest to serve (default: app.buwiz.ebirforms.manifest.json
+                       next to this executable; without either the unsigned one is served,
+                       and the Bot refuses the plugin)
+  EBIRFORMS_DATA_DIR   the data folder (default: the platform data folder, app.buwiz.ebirforms):
+                       ebirforms.db, its key ebirforms.key (0600, made on first run) and logs/";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["mcp"] => run(),
         ["print-manifest"] => {
-            println!("{}", serde_json::to_string_pretty(&buwiz_mcp::manifest::unsigned()).expect("json value"));
+            println!("{}", serde_json::to_string_pretty(&ebirforms_mini_app::manifest::unsigned()).expect("json value"));
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {
-            println!("buwiz-mcp {}", env!("CARGO_PKG_VERSION"));
+            println!("ebirforms-mini-app {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         ["--help" | "-h"] => {
@@ -50,27 +49,28 @@ fn main() -> ExitCode {
 }
 
 fn run() -> ExitCode {
-    // stdout carries MCP: the console copy of the log goes to stderr (and
-    // the app's rolling log file, as the app writes it).
+    // SAFETY: first thing in the process, before any other thread starts.
+    let database = unsafe { owner::prepare(&owner::data_dir()) };
+    // stdout carries MCP: the log goes to stderr and to the data folder's logs/.
     use bir_app_core::bir_core::logging;
     let developer_mode = logging::developer_mode_enabled();
     let _ = logging::install_stderr(logging::InstallOptions {
         developer_mode,
         default_filter: if developer_mode {
-            "buwiz_mcp=debug,bir_app_core=debug,bir_core=info,bir_submit=debug,panic=error"
+            "ebirforms_mini_app=debug,bir_app_core=debug,bir_core=info,panic=error"
         } else {
-            "buwiz_mcp=info,bir_app_core=info,bir_core=info,bir_submit=info,panic=error"
+            "ebirforms_mini_app=info,bir_app_core=info,bir_core=info,panic=error"
         },
     });
-    let manifest = buwiz_mcp::ManifestSource::from_env();
+    let manifest = ebirforms_mini_app::ManifestSource::from_env();
     if let Some(problem) = manifest.staleness() {
         tracing::warn!("{problem}");
     }
-    let mut server = buwiz_mcp::Server::open_live(manifest);
-    match buwiz_mcp::serve_stdio(&mut server) {
+    let mut server = ebirforms_mini_app::Server::open_own(manifest, database);
+    match ebirforms_mini_app::serve_stdio(&mut server) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("buwiz-mcp: {error}");
+            eprintln!("ebirforms-mini-app: {error}");
             ExitCode::from(1)
         }
     }

@@ -1,45 +1,117 @@
-//! Sharing the database with the Buwiz app.
+//! The mini app's own data.
 //!
-//! The app holds the live database's owner lock (`bir_data.db.owner.lock`)
-//! for as long as it runs, and refuses to open when another process holds
-//! it. This process therefore never keeps the lock: it opens the database
-//! without it, and reads freely. A call that changes filing data (save, the
-//! queue, a send grant) takes the lock for that call only and lets it go
-//! after, so:
+//! The eBIRForms mini app keeps its own taxpayer database in its own folder:
+//! `EBIRFORMS_DATA_DIR`, else the platform data folder named after the plugin
+//! id (`~/Library/Application Support/app.buwiz.ebirforms` on macOS). It
+//! shares nothing with either eBIRForms desktop app and never reads a
+//! keychain: the database key is a 0600 file in that folder, made on first
+//! run. Old desktop data comes in by export, later.
 //!
-//! - Buwiz open: writes are refused with a sentence that says to make the
-//!   change in Buwiz (or quit it); reads, previews and fills that save
-//!   nothing still work.
-//! - Buwiz closed: writes go through. Buwiz opening during one waits for
-//!   nothing; it only fails if it starts in the instant the call runs.
+//! The database's owner lock is taken per write and let go after, because
+//! the Bot respawns this process back to back: a second process waits for it
+//! briefly, then gets a plain refusal.
 //!
-//! This process's own bookkeeping (its ticket table, a one-time note marked
-//! seen) is written without the lock: the app never reads it.
-//!
-//! Sending: a return queued here goes out through bir-submit's relay, the
-//! same transport the app's queue worker uses, on a thread that keeps the
-//! lock until the queue has run once. There is no queue worker in this
-//! process, so a return that fails to go out is retried by the app's worker
-//! (or the next queue here), never by a timer here.
+//! Nothing is sent from here: sending would need the desktop's keychain
+//! entries (bir-submit), so a return can be saved but not queued.
 
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
-use bir_app_core::BirApp;
 use bir_app_core::bir_core::db::{DbError, try_acquire_live_owner_lock};
-use bir_app_core::bir_submit::SignInStatus;
 
-/// What a refused write says while the app is open.
-pub(crate) const APP_OPEN: &str = "Buwiz is open on this computer, so it owns the taxpayer database: make this change in Buwiz, or quit Buwiz and ask again.";
+use crate::manifest::PLUGIN_ID;
 
-/// How long a write waits for the lock: another `buwiz-mcp` (the Bot
-/// respawns this process back to back) or a send in progress may let go of
-/// it in a moment.
+/// Names the data folder in place of the platform default.
+pub const DATA_DIR_ENV: &str = "EBIRFORMS_DATA_DIR";
+/// The database file in the data folder.
+pub const DATABASE_FILE: &str = "ebirforms.db";
+/// The database key file in the data folder (64 hex digits, mode 0600).
+pub const KEY_FILE: &str = "ebirforms.key";
+
+/// What a refused write says while another process holds the database.
+pub(crate) const IN_USE: &str = "Another eBIRForms mini app process is saving right now: ask again in a moment.";
+
+/// What queueing a return for filing says.
+pub(crate) const NO_SENDING: &str = "Sending is not available in the eBIRForms mini app yet: the return is saved here, and nothing was queued or sent.";
+
+/// How long a write waits for the lock.
 const WAIT: Duration = Duration::from_millis(1000);
 const STEP: Duration = Duration::from_millis(100);
+
+/// The data folder: [`DATA_DIR_ENV`], else the platform's.
+pub fn data_dir() -> PathBuf {
+    match std::env::var_os(DATA_DIR_ENV) {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => platform_data_dir().join(PLUGIN_ID),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_data_dir() -> PathBuf {
+    home().join("Library/Application Support")
+}
+
+#[cfg(target_os = "windows")]
+fn platform_data_dir() -> PathBuf {
+    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn platform_data_dir() -> PathBuf {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home().join(".local/share"),
+    }
+}
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Make the data folder (0700) and its key file (0600) when missing, and
+/// point bir-core at them: the database path, the key file, and no
+/// keychain. Returns the database path.
+///
+/// # Safety
+///
+/// Sets process environment variables, so call it before any other thread
+/// starts (first thing in `main`, or in a test before the server opens).
+pub unsafe fn prepare(dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("the data folder {} could not be made: {error}", dir.display()))?;
+    restrict(dir, 0o700)?;
+    let key = dir.join(KEY_FILE);
+    if !key.is_file() {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| format!("no random bytes for the database key: {error}"))?;
+        let mut file = File::create(&key).map_err(|error| format!("the key file could not be made: {error}"))?;
+        restrict(&key, 0o600)?;
+        file.write_all(hex::encode(bytes).as_bytes()).map_err(|error| format!("the key file could not be written: {error}"))?;
+    }
+    let database = dir.join(DATABASE_FILE);
+    // SAFETY: the caller runs this before any other thread exists.
+    unsafe {
+        std::env::set_var("BUWIZ_NO_KEYCHAIN", "1");
+        std::env::set_var("BUWIZ_DB_KEY_FILE", &key);
+        std::env::remove_var("BUWIZ_DB_KEY");
+        std::env::set_var("BUWIZ_DATABASE_PATH", &database);
+        std::env::set_var("BIR_LOG_DIR", dir.join("logs"));
+    }
+    Ok(database)
+}
+
+#[cfg(unix)]
+fn restrict(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("{} could not be made private: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict(_path: &Path, _mode: u32) -> Result<(), String> {
+    Ok(())
+}
 
 /// The owner lock, held while this value lives.
 pub(crate) struct OwnerLock(#[allow(dead_code)] File);
@@ -54,7 +126,7 @@ pub(crate) fn acquire(path: &Path) -> Result<OwnerLock, String> {
                 std::thread::sleep(STEP);
                 waited += STEP;
             }
-            Err(DbError::LiveDatabaseInUse(_)) => return Err(APP_OPEN.to_string()),
+            Err(DbError::LiveDatabaseInUse(_)) => return Err(IN_USE.to_string()),
             Err(error) => return Err(format!("the database lock: {error}")),
         }
     }
@@ -64,65 +136,4 @@ pub(crate) fn acquire(path: &Path) -> Result<OwnerLock, String> {
 /// let go again at once.
 pub(crate) fn writable(path: &Path) -> bool {
     try_acquire_live_owner_lock(path).is_ok()
-}
-
-/// Whether this computer is signed in to Buwiz for sending (`Some`, with
-/// the account's email when known).
-/// With `BUWIZ_NO_KEYCHAIN` set the keychain, where the sign-in lives, is
-/// not read.
-pub(crate) fn sign_in(app: &BirApp) -> Result<Option<Option<String>>, String> {
-    if bir_app_core::bir_core::keychain_disabled() {
-        return Err("BUWIZ_NO_KEYCHAIN is set, so the sign-in in the keychain is not read".into());
-    }
-    let submission = app.submission().map_err(|error| error.to_string())?;
-    Ok(match submission.sign_in_status() {
-        SignInStatus::SignedIn { email } => Some(email),
-        _ => None,
-    })
-}
-
-/// Sends started by this process, joined before it exits so a send is never
-/// cut off halfway.
-#[derive(Default)]
-pub(crate) struct Sends {
-    running: Vec<JoinHandle<()>>,
-}
-
-impl Sends {
-    /// Run the queue once through the relay on its own thread, holding
-    /// `lock` until it is done. `Ok(false)`: not signed in, nothing sent
-    /// (the return stays queued for the app's worker).
-    pub(crate) fn start(&mut self, app: &Arc<BirApp>, lock: OwnerLock) -> Result<bool, String> {
-        self.running.retain(|send| !send.is_finished());
-        if bir_app_core::bir_core::keychain_disabled() {
-            return Ok(false);
-        }
-        let submission = app.submission().map_err(|error| error.to_string())?;
-        if !matches!(submission.sign_in_status(), SignInStatus::SignedIn { .. }) {
-            return Ok(false);
-        }
-        let app = app.clone();
-        let send = std::thread::Builder::new()
-            .name("buwiz-mcp-send".into())
-            .spawn(move || {
-                app.send_queue_once(&submission);
-                drop(lock);
-            })
-            .map_err(|error| format!("the send did not start: {error}"))?;
-        self.running.push(send);
-        Ok(true)
-    }
-
-    /// Wait for every send to end.
-    pub(crate) fn join(&mut self) {
-        for send in self.running.drain(..) {
-            let _ = send.join();
-        }
-    }
-}
-
-/// The live database's path, as the app opens it (`BUWIZ_DATABASE_PATH`,
-/// else the platform data dir `com.buwiz.oss`).
-pub(crate) fn database_path() -> PathBuf {
-    bir_app_core::bir_core::db::app_database_path()
 }

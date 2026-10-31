@@ -148,7 +148,7 @@ impl Host {
 
     fn provision(&mut self, manifest: &ManifestSource, arguments: &Map<String, Value>) -> Value {
         if arguments.get("plugin").and_then(Value::as_str) != Some(manifest::PLUGIN_ID) {
-            return fail("invalid_args", "this is dev.goldcoders.bir");
+            return fail("invalid_args", "this is app.buwiz.ebirforms");
         }
         let major = arguments
             .get("protocol")

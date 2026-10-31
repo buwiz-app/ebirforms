@@ -146,7 +146,7 @@ pub(crate) mod tests {
         let public = b64url(SigningKey::from_bytes(&seed).verifying_key().as_bytes());
         json!({
             "protocol": "1.0.0",
-            "plugin": "dev.goldcoders.bir",
+            "plugin": crate::manifest::PLUGIN_ID,
             "key": {"alg": "ed25519", "seed": b64url(&seed)},
             "pub": public,
         })

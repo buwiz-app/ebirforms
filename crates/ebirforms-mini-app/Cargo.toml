@@ -1,13 +1,13 @@
 [package]
-name = "buwiz-mcp"
-description = "Buwiz without a window: the Forms mini app's MCP server (stdio) that Buwiz Bot spawns."
+name = "ebirforms-mini-app"
+description = "The eBIRForms mini app (app.buwiz.ebirforms): an MCP server on stdio that the Buwiz Bot spawns. It keeps its own data."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "buwiz-mcp"
+name = "ebirforms-mini-app"
 path = "src/main.rs"
 
 [dependencies]

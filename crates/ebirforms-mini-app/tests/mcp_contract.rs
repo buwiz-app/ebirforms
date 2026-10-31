@@ -8,7 +8,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
-use buwiz_mcp::{ManifestSource, Server};
+use ebirforms_mini_app::{ManifestSource, Server};
 use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::{Value, json};
 
@@ -90,7 +90,7 @@ fn the_bot_contract_over_a_scratch_database() {
     // initialize, and nothing before rox.provision
     let init = bot.send("initialize", json!({ "protocolVersion": "2025-06-18" }));
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(init["result"]["serverInfo"]["name"], "buwiz-mcp");
+    assert_eq!(init["result"]["serverInfo"]["name"], "ebirforms-mini-app");
     assert!(init["result"]["capabilities"]["resources"].is_object());
     assert_eq!(bot.send("tools/call", json!({ "name": "bir_status" }))["error"]["code"], -32600);
     assert_eq!(bot.send("tools/call", json!({ "name": "rox.nope" }))["error"]["code"], -32601);
@@ -99,13 +99,13 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(parse["error"]["code"], -32700);
     assert!(bot.server.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
 
-    // rox.provision: the plugin id stays dev.goldcoders.bir
+    // rox.provision: the plugin id is app.buwiz.ebirforms
     let seed = [7u8; 32];
     let signing = SigningKey::from_bytes(&seed);
     let public = b64(signing.verifying_key().as_bytes());
-    let provision = json!({ "protocol": "1.0.0", "plugin": "dev.goldcoders.bir", "key": { "alg": "ed25519", "seed": b64(&seed) }, "pub": public });
+    let provision = json!({ "protocol": "1.0.0", "plugin": "app.buwiz.ebirforms", "key": { "alg": "ed25519", "seed": b64(&seed) }, "pub": public });
     let mut wrong = provision.clone();
-    wrong["plugin"] = json!("dev.goldcoders.other");
+    wrong["plugin"] = json!("dev.goldcoders.bir");
     assert_eq!(bot.call_as(json!({}), "rox.provision", wrong)["isError"], true);
     let provisioned = bot.call_as(json!({}), "rox.provision", provision);
     assert_eq!(provisioned["structuredContent"]["ok"], true, "{provisioned}");
@@ -114,7 +114,8 @@ fn the_bot_contract_over_a_scratch_database() {
     // tools and resources
     let tools = bot.send("tools/list", json!({}))["result"]["tools"].as_array().unwrap().clone();
     let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).cloned().unwrap_or_else(|| panic!("no {name}"));
-    for name in ["bir_status", "bir_profiles_list", "bir_form_open", "bir_form_send", "bir_app_open", "bir_resolve"] {
+    assert!(tools.iter().all(|tool| tool["name"] != "bir_form_send"), "no sending from the mini app");
+    for name in ["bir_status", "bir_profiles_list", "bir_form_open", "bir_app_open", "bir_resolve"] {
         assert!(tool(name)["_meta"].is_null(), "{name} is the assistant's");
     }
     for name in ["bir_app_screen_form_open", "bir_app_screen_form_save", "bir_ticket_subject", "bir_app_print_preview"] {
@@ -129,7 +130,7 @@ fn the_bot_contract_over_a_scratch_database() {
         bot.send("resources/read", json!({ "uri": "rox://manifest" }))["result"]["contents"][0]["text"].as_str().unwrap(),
     )
     .unwrap();
-    assert_eq!(manifest["id"], "dev.goldcoders.bir");
+    assert_eq!(manifest["id"], "app.buwiz.ebirforms");
     let forms = bot.send("resources/read", json!({ "uri": "rox-app://forms" }))["result"]["contents"][0].clone();
     assert_eq!(forms["mimeType"], "text/x-nsh-tsx");
     assert!(forms["text"].as_str().unwrap().contains("bir_app_"));
@@ -184,7 +185,7 @@ fn the_bot_contract_over_a_scratch_database() {
 
     // an app open certified by the plugin key
     let perms = {
-        let digest = buwiz_mcp::manifest::unsigned()["apps"][0]["permissions"].clone();
+        let digest = ebirforms_mini_app::manifest::unsigned()["apps"][0]["permissions"].clone();
         // sha256 of the JCS bytes, as the Bot computes it
         jcs_sha256(&digest)
     };
@@ -194,7 +195,7 @@ fn the_bot_contract_over_a_scratch_database() {
         "app": "forms", "open_id": open_id, "ks_pub": b64(&[2u8; 32]), "perms_sha256": perms, "not_after": not_after,
     }));
     let cert = session["structuredContent"]["cert"].clone();
-    assert_eq!(cert["plugin"], "dev.goldcoders.bir", "{session}");
+    assert_eq!(cert["plugin"], "app.buwiz.ebirforms", "{session}");
     let signature: [u8; 64] = URL_SAFE_NO_PAD.decode(session["structuredContent"]["cert_sig"].as_str().unwrap()).unwrap().try_into().unwrap();
     let verifying = VerifyingKey::from_bytes(&signing.verifying_key().to_bytes()).unwrap();
     assert!(verifying.verify(jcs(&cert).as_bytes(), &Signature::from_bytes(&signature)).is_ok());
@@ -241,17 +242,16 @@ fn the_bot_contract_over_a_scratch_database() {
     // unsaved edits keep it open
     assert!(error_text(&bot.agent("bir_form_dismiss", json!({}))).contains("unsaved"));
 
-    // the Buwiz app open: it owns the database, so saving is refused here
+    // another process of this mini app saving: refused for that moment
     let held = bir_app_core::bir_core::db::try_acquire_live_owner_lock(&path).unwrap();
     let status = bot.agent("bir_status", json!({}));
     assert_eq!(result_of(&status)["writable"], false);
+    assert_eq!(result_of(&status)["sending"], false);
     let refused = bot.agent("bir_form_save_draft", json!({}));
-    assert!(error_text(&refused).contains("Buwiz is open"), "{refused}");
-    let refused = bot.call_as(forms_app.clone(), "bir_app_grant_send", json!({ "args": [tin, "2551Q"], "ticket": ticket }));
-    assert!(error_text(&refused).contains("Buwiz is open"));
+    assert!(error_text(&refused).contains("Another eBIRForms mini app process"), "{refused}");
     drop(held);
 
-    // the Buwiz app closed: saving goes through
+    // let go: saving goes through
     let saved = bot.agent("bir_form_save_draft", json!({}));
     let saved = result_of(&saved).clone();
     assert_eq!(saved["saved"], true, "{saved}");
@@ -261,13 +261,11 @@ fn the_bot_contract_over_a_scratch_database() {
     assert!(drafts.iter().any(|row| row["draft_id"] == draft_id && row["form"] == "2551Q"), "{drafts:?}");
     assert!(drafts.iter().all(|row| row["tin"] == ticket));
 
-    // sending needs the user's standing OK
-    let send = bot.agent("bir_form_send", json!({}));
-    assert_eq!(result_of(&send)["status"], "approval_required", "{send}");
-    let granted = bot.call_as(forms_app.clone(), "bir_app_grant_send", json!({ "args": [tin, "2551Q"], "ticket": ticket }));
-    assert_eq!(result_of(&granted)["form"], "2551Q", "{granted}");
-    let grants = bot.call_as(forms_app.clone(), "bir_app_list_send_grants", json!({ "args": [tin], "ticket": ticket }));
-    assert_eq!(result_of(&grants).as_array().unwrap().len(), 1);
+    // nothing is queued or sent from the mini app
+    let queued = bot.call_as(forms_app.clone(), "bir_app_queue_form_draft", json!({ "args": [tin, "2551Q", 2026, 1], "ticket": ticket }));
+    assert!(error_text(&queued).contains("Sending is not available"), "{queued}");
+    let gone = bot.call_as(forms_app.clone(), "bir_app_grant_send", json!({ "args": [tin, "2551Q"], "ticket": ticket }));
+    assert_eq!(gone["isError"], true, "{gone}");
 
     // the print preview of the saved return, for the Bot's document view
     let preview = bot.call_as(forms_app.clone(), "bir_app_print_preview", json!({ "ticket": ticket, "form": "2551Q", "draft_id": draft_id }));
@@ -280,7 +278,6 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(bot.call_as(json!({}), "rox.uninstall", json!({}))["structuredContent"]["ok"], true);
     let gone = bot.call_as(json!({}), "rox.ticket.resolve", json!({ "ticket": ticket }));
     assert_eq!(gone["structuredContent"]["valid"], false);
-    bot.server.finish();
 }
 
 /// RFC 8785 for the test's integer-only objects: keys sorted, compact.
