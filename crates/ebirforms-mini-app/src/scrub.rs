@@ -26,10 +26,16 @@ fn dashed_tin_re() -> &'static Regex {
 }
 
 /// Turn the tickets in a tool's arguments into what the tool reads.
-pub(crate) fn expand(app: &BirApp, tool: &str, arguments: &mut Map<String, Value>, origin: Origin) -> Result<(), String> {
+pub(crate) fn expand(
+    app: &BirApp,
+    tool: &str,
+    arguments: &mut Map<String, Value>,
+    origin: Origin,
+) -> Result<(), String> {
     let lookup = |ticket: &str| -> Result<Subject, String> {
-        tickets::subject(app, ticket)?
-            .ok_or_else(|| format!("{tool}: the ticket is not one eBIRForms issued, or it was revoked"))
+        tickets::subject(app, ticket)?.ok_or_else(|| {
+            format!("{tool}: the ticket is not one eBIRForms issued, or it was revoked")
+        })
     };
     let mut implied_return = None;
     if let Some(value) = arguments.get("tin").cloned() {
@@ -40,22 +46,28 @@ pub(crate) fn expand(app: &BirApp, tool: &str, arguments: &mut Map<String, Value
                 arguments.insert("tin".into(), Value::String(subject.full_tin()));
             }
             Some(_) if origin == Origin::App => {
-                return Err(format!("{tool}: `tin` must be a ticket when an app calls (an app never names a TIN)"));
+                return Err(format!(
+                    "{tool}: `tin` must be a ticket when an app calls (an app never names a TIN)"
+                ));
             }
             _ => {}
         }
     }
     for key in RETURN_ARGS {
-        let Some(text) = arguments.get(key).and_then(Value::as_str).map(str::to_string) else {
+        let Some(text) = arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             continue;
         };
         if !tickets::is_ticket(&text) {
             continue;
         }
         let subject = lookup(&text)?;
-        let value = subject
-            .return_value()
-            .ok_or_else(|| format!("{tool}: `{key}` holds a taxpayer's ticket; pass it as `tin`"))?;
+        let value = subject.return_value().ok_or_else(|| {
+            format!("{tool}: `{key}` holds a taxpayer's ticket; pass it as `tin`")
+        })?;
         arguments.insert(key.into(), Value::String(value.to_string()));
     }
     // A return's ticket passed as `tin` names its form and period too.
@@ -83,7 +95,11 @@ pub(crate) struct Scrubber<'a> {
 
 impl<'a> Scrubber<'a> {
     pub(crate) fn new(app: &'a BirApp, today: NaiveDate) -> Self {
-        Self { app, today, issued: HashMap::new() }
+        Self {
+            app,
+            today,
+            issued: HashMap::new(),
+        }
     }
 
     /// The ticket of a saved subject.
@@ -135,7 +151,9 @@ impl<'a> Scrubber<'a> {
                             continue;
                         }
                         if let Some(subject) = Subject::of_tin(text) {
-                            *item = Value::String(self.ticket(&subject).unwrap_or_else(|| "[TIN]".into()));
+                            *item = Value::String(
+                                self.ticket(&subject).unwrap_or_else(|| "[TIN]".into()),
+                            );
                             continue;
                         }
                     }

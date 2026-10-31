@@ -23,10 +23,19 @@ Environment:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["mcp"] => run(),
         ["print-manifest"] => {
-            println!("{}", serde_json::to_string_pretty(&ebirforms_mini_app::manifest::unsigned()).expect("json value"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ebirforms_mini_app::manifest::unsigned())
+                    .expect("json value")
+            );
             ExitCode::SUCCESS
         }
         ["--version" | "-V"] => {

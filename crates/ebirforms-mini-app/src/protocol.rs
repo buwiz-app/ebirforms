@@ -41,7 +41,12 @@ pub(crate) struct Caller {
 impl Caller {
     pub(crate) fn of(params: &Value) -> Self {
         let caller = params.get("_meta").and_then(|meta| meta.get("rox/caller"));
-        let text = |key: &str| caller.and_then(|caller| caller.get(key)).and_then(Value::as_str).map(str::to_string);
+        let text = |key: &str| {
+            caller
+                .and_then(|caller| caller.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
         let origin = match text("origin").as_deref() {
             Some("app") => Origin::App,
             Some("agent") => Origin::Agent,
@@ -49,7 +54,11 @@ impl Caller {
             Some("resolve") => Origin::Resolve,
             _ => Origin::Unknown,
         };
-        Self { origin, app: text("app"), open_id: text("open_id") }
+        Self {
+            origin,
+            app: text("app"),
+            open_id: text("open_id"),
+        }
     }
 }
 
@@ -92,7 +101,11 @@ pub(crate) struct Host {
 
 impl Host {
     pub(crate) fn new(require_provision: bool) -> Self {
-        Self { key: None, sessions: HashMap::new(), require_provision }
+        Self {
+            key: None,
+            sessions: HashMap::new(),
+            require_provision,
+        }
     }
 
     /// Whether ordinary tools may run.
@@ -138,7 +151,9 @@ impl Host {
             "rox.ticket.resolve" => ticket_resolve(app.ok(), arguments),
             _ => {
                 self.sessions.clear();
-                match app.and_then(|app| tickets::forget_all(app).map_err(|_| "the tickets were not forgotten")) {
+                match app.and_then(|app| {
+                    tickets::forget_all(app).map_err(|_| "the tickets were not forgotten")
+                }) {
                     Ok(()) => ok(json!({ "ok": true })),
                     Err(message) => fail("internal", message),
                 }
@@ -200,16 +215,23 @@ impl Host {
             Ok(signature) => signature,
             Err(message) => return fail("invalid_args", &message),
         };
-        self.sessions.insert(request.open_id.clone(), request.app.clone());
+        self.sessions
+            .insert(request.open_id.clone(), request.app.clone());
         ok(json!({ "cert": cert, "cert_sig": signature }))
     }
 }
 
 /// `rox.ticket.resolve`: a title, never the subject (P3).
 fn ticket_resolve(app: Option<&BirApp>, arguments: &Map<String, Value>) -> Value {
-    let ticket = arguments.get("ticket").and_then(Value::as_str).unwrap_or("");
+    let ticket = arguments
+        .get("ticket")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let title = app.and_then(|app| {
-        tickets::subject(app, ticket).ok().flatten()?.title(app, taxform::today())
+        tickets::subject(app, ticket)
+            .ok()
+            .flatten()?
+            .title(app, taxform::today())
     });
     match title {
         Some(title) => ok(json!({ "valid": true, "title": title })),

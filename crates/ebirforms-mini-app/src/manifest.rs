@@ -65,7 +65,11 @@ pub(crate) fn forms_tools() -> Vec<String> {
         .iter()
         .map(|tool| tool.to_string())
         .collect();
-    tools.extend(scope::FORMS.iter().map(|(function, ..)| app_tool_name(function)));
+    tools.extend(
+        scope::FORMS
+            .iter()
+            .map(|(function, ..)| app_tool_name(function)),
+    );
     tools
 }
 
@@ -179,7 +183,9 @@ impl ManifestSource {
     /// Why the signed manifest is not this build's, if it is not: a changed
     /// app, tool or text needs a new signature.
     pub fn staleness(&self) -> Option<String> {
-        let Self::File(_) = self else { return None };
+        let Self::File(_) = self else {
+            return None;
+        };
         let served = match self.served() {
             Ok(served) => served,
             Err(error) => return Some(error),
@@ -218,8 +224,16 @@ mod tests {
         assert_eq!(forms["entry"], "rox-app://forms");
         assert_eq!(forms["fingerprint"], fingerprint(FORMS_SOURCE));
         let tools = forms["permissions"]["tools"].as_array().unwrap();
-        assert!(!tools.is_empty() && tools.len() <= 64, "{} tools", tools.len());
-        assert!(tools.iter().all(|tool| tool.as_str().is_some_and(|t| t.starts_with("bir_"))));
+        assert!(
+            !tools.is_empty() && tools.len() <= 64,
+            "{} tools",
+            tools.len()
+        );
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.as_str().is_some_and(|t| t.starts_with("bir_")))
+        );
         // integers only, so it can be signed, and under 256 KiB
         assert!(jcs::canonical(&m).unwrap().len() < 256 * 1024);
         assert!(ManifestSource::Unsigned.staleness().is_none());

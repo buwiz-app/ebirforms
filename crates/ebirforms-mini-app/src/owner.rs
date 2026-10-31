@@ -31,7 +31,8 @@ pub const DATABASE_FILE: &str = "ebirforms.db";
 pub const KEY_FILE: &str = "ebirforms.key";
 
 /// What a refused write says while another process holds the database.
-pub(crate) const IN_USE: &str = "Another eBIRForms mini app process is saving right now: ask again in a moment.";
+pub(crate) const IN_USE: &str =
+    "Another eBIRForms mini app process is saving right now: ask again in a moment.";
 
 /// What queueing a return for filing says.
 pub(crate) const NO_SENDING: &str = "Sending is not available in the eBIRForms mini app yet: the return is saved here, and nothing was queued or sent.";
@@ -55,7 +56,9 @@ fn platform_data_dir() -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn platform_data_dir() -> PathBuf {
-    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home)
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(home)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -67,7 +70,9 @@ fn platform_data_dir() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Make the data folder (0700) and its key file (0600) when missing, and
@@ -79,15 +84,23 @@ fn home() -> PathBuf {
 /// Sets process environment variables, so call it before any other thread
 /// starts (first thing in `main`, or in a test before the server opens).
 pub unsafe fn prepare(dir: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|error| format!("the data folder {} could not be made: {error}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|error| {
+        format!(
+            "the data folder {} could not be made: {error}",
+            dir.display()
+        )
+    })?;
     restrict(dir, 0o700)?;
     let key = dir.join(KEY_FILE);
     if !key.is_file() {
         let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).map_err(|error| format!("no random bytes for the database key: {error}"))?;
-        let mut file = File::create(&key).map_err(|error| format!("the key file could not be made: {error}"))?;
+        getrandom::fill(&mut bytes)
+            .map_err(|error| format!("no random bytes for the database key: {error}"))?;
+        let mut file = File::create(&key)
+            .map_err(|error| format!("the key file could not be made: {error}"))?;
         restrict(&key, 0o600)?;
-        file.write_all(hex::encode(bytes).as_bytes()).map_err(|error| format!("the key file could not be written: {error}"))?;
+        file.write_all(hex::encode(bytes).as_bytes())
+            .map_err(|error| format!("the key file could not be written: {error}"))?;
     }
     let database = dir.join(DATABASE_FILE);
     // SAFETY: the caller runs this before any other thread exists.

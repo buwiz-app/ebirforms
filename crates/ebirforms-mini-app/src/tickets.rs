@@ -79,7 +79,11 @@ impl Subject {
     /// All 14 digits (a taxpayer is its head office, `00000`).
     pub(crate) fn full_tin(&self) -> String {
         let tin = self.tin();
-        if tin.len() == 9 { format!("{tin}00000") } else { tin }
+        if tin.len() == 9 {
+            format!("{tin}00000")
+        } else {
+            tin
+        }
     }
 
     /// The 9-digit root every call with this ticket is held to.
@@ -117,7 +121,12 @@ impl Subject {
             }
             Self::Return(value) => {
                 let named = taxform::parse(value, today);
-                format!("{} · {} · {}", named.form?, named.period?.label(), taxpayer.name)
+                format!(
+                    "{} · {} · {}",
+                    named.form?,
+                    named.period?.label(),
+                    taxpayer.name
+                )
             }
         };
         Some(clip(&title))
@@ -184,7 +193,9 @@ fn new_ticket() -> Result<String, String> {
 }
 
 fn load(app: &BirApp) -> Result<Map<String, Value>, String> {
-    let stored = app.get_setting(STORE_KEY).map_err(|error| error.to_string())?;
+    let stored = app
+        .get_setting(STORE_KEY)
+        .map_err(|error| error.to_string())?;
     Ok(stored
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|value| value.as_object().cloned())
@@ -200,7 +211,10 @@ fn save(app: &BirApp, map: &Map<String, Value>) -> Result<(), String> {
 pub(crate) fn issue(app: &BirApp, subject: &Subject) -> Result<String, String> {
     let mut map = load(app)?;
     let encoded = subject.encode();
-    if let Some((ticket, _)) = map.iter().find(|(_, stored)| stored.as_str() == Some(&encoded)) {
+    if let Some((ticket, _)) = map
+        .iter()
+        .find(|(_, stored)| stored.as_str() == Some(&encoded))
+    {
         return Ok(ticket.clone());
     }
     let ticket = new_ticket()?;
@@ -211,7 +225,10 @@ pub(crate) fn issue(app: &BirApp, subject: &Subject) -> Result<String, String> {
 
 /// The tickets of many subjects at once (one read, at most one write),
 /// `None` where there is no subject.
-pub(crate) fn issue_all(app: &BirApp, subjects: &[Option<Subject>]) -> Result<Vec<Option<String>>, String> {
+pub(crate) fn issue_all(
+    app: &BirApp,
+    subjects: &[Option<Subject>],
+) -> Result<Vec<Option<String>>, String> {
     let mut map = load(app)?;
     let mut by_subject: std::collections::HashMap<String, String> = map
         .iter()
@@ -256,7 +273,8 @@ pub(crate) fn subject(app: &BirApp, ticket: &str) -> Result<Option<Subject>, Str
 
 /// A ticket this plugin issued, else why not.
 pub(crate) fn subject_of(app: &BirApp, ticket: &str) -> Result<Subject, String> {
-    subject(app, ticket)?.ok_or_else(|| "the ticket is not one eBIRForms issued, or it was revoked".to_string())
+    subject(app, ticket)?
+        .ok_or_else(|| "the ticket is not one eBIRForms issued, or it was revoked".to_string())
 }
 
 /// `rox.uninstall`: every ticket forgotten.
@@ -280,8 +298,17 @@ mod tests {
         ] {
             assert_eq!(Subject::decode(&subject.encode()), Some(subject));
         }
-        assert_eq!(Subject::of_tin("000-123-453-00000"), Some(Subject::Taxpayer("000123453".into())));
-        assert_eq!(Subject::of_tin("00012345300002"), Some(Subject::Branch("00012345300002".into())));
-        assert_eq!(Subject::Taxpayer("000123453".into()).full_tin(), "00012345300000");
+        assert_eq!(
+            Subject::of_tin("000-123-453-00000"),
+            Some(Subject::Taxpayer("000123453".into()))
+        );
+        assert_eq!(
+            Subject::of_tin("00012345300002"),
+            Some(Subject::Branch("00012345300002".into()))
+        );
+        assert_eq!(
+            Subject::Taxpayer("000123453".into()).full_tin(),
+            "00012345300000"
+        );
     }
 }

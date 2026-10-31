@@ -93,14 +93,20 @@ mod tests {
         );
         // U+FF61 sorts after U+1F600's surrogates in UTF-16, before it in UTF-8.
         let value = json!({"\u{ff61}": 1, "\u{1f600}": 2});
-        assert_eq!(canonical(&value).unwrap(), "{\"\u{1f600}\":2,\"\u{ff61}\":1}");
+        assert_eq!(
+            canonical(&value).unwrap(),
+            "{\"\u{1f600}\":2,\"\u{ff61}\":1}"
+        );
     }
 
     #[test]
     fn fractions_and_unsafe_integers_are_refused() {
         assert!(canonical(&json!({"x": 1.5})).is_err());
         assert!(canonical(&json!(9007199254740992u64)).is_err());
-        assert_eq!(canonical(&json!(9007199254740991u64)).unwrap(), "9007199254740991");
+        assert_eq!(
+            canonical(&json!(9007199254740991u64)).unwrap(),
+            "9007199254740991"
+        );
     }
 
     #[test]

@@ -67,7 +67,15 @@ pub(crate) const PAYMENTS_LIST: &str = "bir_payments_list";
 
 /// The assistant's tools that change nothing (`readOnlyHint`, P8): the ones
 /// a routine or resolve call may run.
-const READ_ONLY: [&str; 7] = [STATUS, RESOLVE, PROFILES_LIST, DUES_LIST, DRAFTS_LIST, FORM_FIELDS, FORM_VALIDATE];
+const READ_ONLY: [&str; 7] = [
+    STATUS,
+    RESOLVE,
+    PROFILES_LIST,
+    DUES_LIST,
+    DRAFTS_LIST,
+    FORM_FIELDS,
+    FORM_VALIDATE,
+];
 
 const INSTRUCTIONS: &str = "eBIRForms (Philippine BIR tax returns) running headless on this computer \
 over the taxpayer database eBIRForms keeps. Taxpayers, branches and returns reach you as tickets \
@@ -106,7 +114,9 @@ impl Server {
     pub fn open_own(manifest: ManifestSource, database: Result<PathBuf, String>) -> Self {
         let (app, db_path) = match database {
             Ok(path) => (
-                BirApp::open_at(&path).map(Arc::new).map_err(|error| format!("the eBIRForms mini app's database did not open: {error}")),
+                BirApp::open_at(&path).map(Arc::new).map_err(|error| {
+                    format!("the eBIRForms mini app's database did not open: {error}")
+                }),
                 path,
             ),
             Err(problem) => (Err(problem), PathBuf::new()),
@@ -119,12 +129,28 @@ impl Server {
 
     /// A server over `app` (whose file is `db_path`). `require_provision`:
     /// answer no tool before `rox.provision`, as the Bot expects.
-    pub fn with_app(app: Arc<BirApp>, db_path: PathBuf, manifest: ManifestSource, require_provision: bool) -> Self {
+    pub fn with_app(
+        app: Arc<BirApp>,
+        db_path: PathBuf,
+        manifest: ManifestSource,
+        require_provision: bool,
+    ) -> Self {
         Self::new(Ok(app), db_path, manifest, require_provision)
     }
 
-    fn new(app: Result<Arc<BirApp>, String>, db_path: PathBuf, manifest: ManifestSource, require_provision: bool) -> Self {
-        Self { app, db_path, manifest, host: Host::new(require_provision), form: None }
+    fn new(
+        app: Result<Arc<BirApp>, String>,
+        db_path: PathBuf,
+        manifest: ManifestSource,
+        require_provision: bool,
+    ) -> Self {
+        Self {
+            app,
+            db_path,
+            manifest,
+            host: Host::new(require_provision),
+            form: None,
+        }
     }
 
     /// One line in, at most one line out.
@@ -134,7 +160,11 @@ impl Server {
         }
         let reply = match serde_json::from_str::<Value>(line) {
             Ok(message) => self.handle(message),
-            Err(error) => Some(error_response(Value::Null, PARSE_ERROR, &format!("parse error: {error}"))),
+            Err(error) => Some(error_response(
+                Value::Null,
+                PARSE_ERROR,
+                &format!("parse error: {error}"),
+            )),
         };
         reply.map(|value| value.to_string())
     }
@@ -142,7 +172,11 @@ impl Server {
     /// One JSON-RPC message; `None` for a notification.
     pub fn handle(&mut self, message: Value) -> Option<Value> {
         let Some(object) = message.as_object() else {
-            return Some(error_response(Value::Null, INVALID_REQUEST, "expected a single JSON-RPC object"));
+            return Some(error_response(
+                Value::Null,
+                INVALID_REQUEST,
+                "expected a single JSON-RPC object",
+            ));
         };
         let id = object.get("id").cloned();
         let Some(method) = object.get("method").and_then(Value::as_str) else {
@@ -178,10 +212,10 @@ impl Server {
     }
 
     fn tools_call(&mut self, params: &Value) -> Result<Value, (i64, String)> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or((INVALID_PARAMS, "tools/call requires params.name".to_string()))?;
+        let name = params.get("name").and_then(Value::as_str).ok_or((
+            INVALID_PARAMS,
+            "tools/call requires params.name".to_string(),
+        ))?;
         let empty = Map::new();
         let arguments = match params.get("arguments") {
             None | Some(Value::Null) => &empty,
@@ -191,7 +225,10 @@ impl Server {
         if name.starts_with("rox.") {
             let app = self.app.as_deref().map_err(String::as_str);
             return match self.host.reserved(&self.manifest, app, name, arguments) {
-                None => Err((METHOD_NOT_FOUND, format!("{name} is not a tool of this plugin"))),
+                None => Err((
+                    METHOD_NOT_FOUND,
+                    format!("{name} is not a tool of this plugin"),
+                )),
                 Some(Err(message)) => Err((INVALID_REQUEST, message)),
                 Some(Ok(result)) => Ok(result),
             };
@@ -211,7 +248,9 @@ impl Server {
             return Ok(self.app_tool(&app, name, arguments));
         }
         let mut arguments = arguments.clone();
-        let has_ticket = Value::Object(arguments.clone()).to_string().contains("tkt_");
+        let has_ticket = Value::Object(arguments.clone())
+            .to_string()
+            .contains("tkt_");
         if (has_ticket || caller.origin == Origin::App)
             && let Err(message) = scrub::expand(&app, name, &mut arguments, caller.origin)
         {
@@ -232,13 +271,24 @@ impl Server {
     /// queries never cause side effects.
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
         if matches!(caller.origin, Origin::Resolve | Origin::Routine) && !read_only(name) {
-            return Err(format!("{name} changes eBIRForms data, so it does not run for a resolve or routine call"));
+            return Err(format!(
+                "{name} changes eBIRForms data, so it does not run for a resolve or routine call"
+            ));
         }
         if caller.origin != Origin::App {
-            return if is_app_only(name) { Err(format!("{name} is for the Forms mini app only")) } else { Ok(()) };
+            return if is_app_only(name) {
+                Err(format!("{name} is for the Forms mini app only"))
+            } else {
+                Ok(())
+            };
         }
         let app = caller.app.as_deref().ok_or("an app call names no app")?;
-        if self.host.provisioned() && self.host.session_app(caller.open_id.as_deref().unwrap_or("")) != Some(app) {
+        if self.host.provisioned()
+            && self
+                .host
+                .session_app(caller.open_id.as_deref().unwrap_or(""))
+                != Some(app)
+        {
             return Err("this app open was not certified by eBIRForms".into());
         }
         let allowed = self
@@ -270,13 +320,21 @@ impl Server {
     /// One `bir_app_<function>` call: arguments read, the ticket turned into
     /// the scope, the owner lock taken for a write, the answer held to the
     /// scope and a list's rows given their tickets.
-    fn host_call(&mut self, app: &Arc<BirApp>, name: &str, arguments: &Map<String, Value>) -> Result<Value, String> {
+    fn host_call(
+        &mut self,
+        app: &Arc<BirApp>,
+        name: &str,
+        arguments: &Map<String, Value>,
+    ) -> Result<Value, String> {
         let (function, rule, access) = name
             .strip_prefix(APP_PREFIX)
             .and_then(scope::find)
             .ok_or_else(|| format!("unknown tool: {name}"))?;
         let (args, ticket) = host_arguments(arguments)?;
-        let root = ticket.as_deref().map(|ticket| tickets::subject_of(app, ticket).map(|subject| subject.root())).transpose()?;
+        let root = ticket
+            .as_deref()
+            .map(|ticket| tickets::subject_of(app, ticket).map(|subject| subject.root()))
+            .transpose()?;
         if scope::needs_ticket(rule) && root.is_none() {
             return Err(format!(
                 "`{function}` names a taxpayer: pass the app's `ticket` (an app reaches a taxpayer only through a ticket eBIRForms issued)"
@@ -290,7 +348,9 @@ impl Server {
             Access::Write => Some(owner::acquire(&self.db_path)?),
             Access::Read | Access::Bookkeeping => None,
         };
-        let value = app.call(function, args.clone()).map_err(|error| error.to_string())?;
+        let value = app
+            .call(function, args.clone())
+            .map_err(|error| error.to_string())?;
         let value = match &root {
             Some(root) => scope::filter_result(function, rule, &args, value, root)?,
             None => value,
@@ -303,11 +363,20 @@ impl Server {
 
     // ------------------------------------------------- the assistant's tools
 
-    fn agent_tool(&mut self, app: &Arc<BirApp>, name: &str, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, (i64, String)> {
+    fn agent_tool(
+        &mut self,
+        app: &Arc<BirApp>,
+        name: &str,
+        arguments: &Map<String, Value>,
+        today: NaiveDate,
+    ) -> Result<Value, (i64, String)> {
         let answer = match name {
             STATUS => Ok(self.status(app)),
             RESOLVE => return Ok(protocol::ok(resolve(app, arguments))),
-            APP_OPEN => return Ok(app_open(app, arguments, today).unwrap_or_else(|message| tool_error(format!("{APP_OPEN}: {message}")))),
+            APP_OPEN => {
+                return Ok(app_open(app, arguments, today)
+                    .unwrap_or_else(|message| tool_error(format!("{APP_OPEN}: {message}"))));
+            }
             PROFILES_LIST => no_arguments(arguments).and_then(|()| profiles_list(app)),
             DUES_LIST => dues_list(app, arguments, today),
             DRAFTS_LIST => drafts_list(app, arguments),
@@ -319,7 +388,9 @@ impl Server {
             FORM_DISMISS => self.form_dismiss(arguments),
             other => return Err((METHOD_NOT_FOUND, format!("unknown tool: {other}"))),
         };
-        Ok(call_result(answer.map_err(|message| format!("{name}: {message}"))))
+        Ok(call_result(
+            answer.map_err(|message| format!("{name}: {message}")),
+        ))
     }
 
     fn status(&self, app: &BirApp) -> Value {
@@ -335,64 +406,98 @@ impl Server {
             "sending": false,
         });
         if let Ok(taxpayers) = app.list_taxpayers() {
-            status["taxpayers"] = json!(taxpayers.iter().filter(|taxpayer| !taxpayer.archived).count());
+            status["taxpayers"] = json!(
+                taxpayers
+                    .iter()
+                    .filter(|taxpayer| !taxpayer.archived)
+                    .count()
+            );
         }
         status
     }
 
     fn open_form(&self) -> Result<&OpenForm, String> {
-        self.form.as_ref().ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))
+        self.form
+            .as_ref()
+            .ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))
     }
 
-    fn form_open(&mut self, app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
+    fn form_open(
+        &mut self,
+        app: &BirApp,
+        arguments: &Map<String, Value>,
+        today: NaiveDate,
+    ) -> Result<Value, String> {
         reject_unknown(arguments, &["code", "tin", "year", "period"])?;
         if self.form.as_ref().is_some_and(|form| form.dirty) {
             return Err(format!(
                 "form already open with unsaved edits: save it ({FORM_SAVE}) or dismiss it ({FORM_DISMISS}) first"
             ));
         }
-        let code = text_arg(arguments, "code")?.ok_or("`code` is required: a BIR form code such as 2551Q")?;
+        let code = text_arg(arguments, "code")?
+            .ok_or("`code` is required: a BIR form code such as 2551Q")?;
         let named = taxform::parse(&code, today);
         let form = named
             .form
             .or_else(|| taxform::form_code_of(&code))
             .ok_or_else(|| format!("`{code}` names no BIR form eBIRForms can open"))?;
         let tin = match text_arg(arguments, "tin")? {
-            Some(tin) => taxform::tin_digits(&tin).ok_or_else(|| format!("`tin` must be a ticket from {PROFILES_LIST}"))?,
-            None => named.tin.clone().ok_or_else(|| format!("`tin` is required: the taxpayer's ticket from {PROFILES_LIST}"))?,
+            Some(tin) => taxform::tin_digits(&tin)
+                .ok_or_else(|| format!("`tin` must be a ticket from {PROFILES_LIST}"))?,
+            None => named.tin.clone().ok_or_else(|| {
+                format!("`tin` is required: the taxpayer's ticket from {PROFILES_LIST}")
+            })?,
         };
-        let tin = if tin.len() == 9 { format!("{tin}00000") } else { tin };
+        let tin = if tin.len() == 9 {
+            format!("{tin}00000")
+        } else {
+            tin
+        };
         let year = match arguments.get("year") {
             None | Some(Value::Null) => None,
-            Some(value) => Some(value.as_u64().and_then(|y| u16::try_from(y).ok()).ok_or("`year` must be a year like 2026")?),
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .and_then(|y| u16::try_from(y).ok())
+                    .ok_or("`year` must be a year like 2026")?,
+            ),
         };
         let (year, period) = match arguments.get("period") {
             Some(Value::Number(number)) => {
                 let period = number.as_i64().ok_or("`period` must be a whole number")?;
                 let year = match year {
                     Some(year) => year,
-                    None => taxform::period_to_file(form, today).map(TaxPeriod::year).ok_or("`year` is required")?,
+                    None => taxform::period_to_file(form, today)
+                        .map(TaxPeriod::year)
+                        .ok_or("`year` is required")?,
                 };
                 (i64::from(year), period)
             }
             Some(Value::String(text)) => {
-                let period = taxform::parse(text, today)
-                    .period
-                    .ok_or_else(|| format!("`period` `{text}` names no period (try 2026-Q3, 2026-01 or 2025)"))?;
+                let period = taxform::parse(text, today).period.ok_or_else(|| {
+                    format!("`period` `{text}` names no period (try 2026-Q3, 2026-01 or 2025)")
+                })?;
                 open_args(period.for_form(form, today)?)
             }
             None | Some(Value::Null) => {
                 let period = match (named.period, year) {
                     (Some(period), _) => period,
                     (None, Some(year)) => TaxPeriod::Year(year),
-                    (None, None) => taxform::period_to_file(form, today).ok_or_else(|| format!("{form} has no period to file now"))?,
+                    (None, None) => taxform::period_to_file(form, today)
+                        .ok_or_else(|| format!("{form} has no period to file now"))?,
                 };
                 open_args(period.for_form(form, today)?)
             }
             Some(other) => return Err(format!("`period` must be a number or text (got {other})")),
         };
         let opened = app
-            .open_return(&OpenReturn { tin: tin.clone(), form_code: form.to_string(), year, period, key: None })
+            .open_return(&OpenReturn {
+                tin: tin.clone(),
+                form_code: form.to_string(),
+                year,
+                period,
+                key: None,
+            })
             .map_err(|error| error.to_string())?;
         let summary = json!({
             "tin": tin,
@@ -405,7 +510,12 @@ impl Server {
             "boxes": opened.values.len(),
             "errors": opened.errors.len(),
         });
-        self.form = Some(OpenForm { tin, form: form.to_string(), opened, dirty: false });
+        self.form = Some(OpenForm {
+            tin,
+            form: form.to_string(),
+            opened,
+            dirty: false,
+        });
         Ok(summary)
     }
 
@@ -414,7 +524,12 @@ impl Server {
         let form = self.open_form()?;
         let keys: Option<Vec<String>> = match arguments.get("keys") {
             None | Some(Value::Null) => None,
-            Some(Value::Array(keys)) => Some(keys.iter().filter_map(Value::as_str).map(str::to_string).collect()),
+            Some(Value::Array(keys)) => Some(
+                keys.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+            ),
             Some(_) => return Err("`keys` must be a list of box keys".into()),
         };
         let pick = |map: &BTreeMap<String, String>| -> BTreeMap<String, String> {
@@ -457,28 +572,52 @@ impl Server {
                 Value::Number(number) => FieldValue::Text(number.to_string()),
                 Value::Bool(tick) => FieldValue::Tick(*tick),
                 Value::Null => FieldValue::Clear,
-                _ => return Err(format!("`{key}`: a value is text, a number, true/false or null")),
+                _ => {
+                    return Err(format!(
+                        "`{key}`: a value is text, a number, true/false or null"
+                    ));
+                }
             };
             edits.insert(key.clone(), edit);
         }
-        let form = self.form.as_mut().ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))?;
+        let form = self
+            .form
+            .as_mut()
+            .ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))?;
         if !form.opened.editable {
-            return Err(format!("this return is {}: it can no longer be edited", form.opened.status));
+            return Err(format!(
+                "this return is {}: it can no longer be edited",
+                form.opened.status
+            ));
         }
-        let filled = app.fill(&form.form, &form.opened.draft, &edits, &[]).map_err(|error| error.to_string())?;
+        let filled = app
+            .fill(&form.form, &form.opened.draft, &edits, &[])
+            .map_err(|error| error.to_string())?;
         form.opened.draft = filled.draft;
         form.opened.values.extend(filled.values);
         form.dirty = true;
-        let filled_keys: Vec<&String> = edits.keys().filter(|key| !filled.rejected.contains_key(*key)).collect();
+        let filled_keys: Vec<&String> = edits
+            .keys()
+            .filter(|key| !filled.rejected.contains_key(*key))
+            .collect();
         Ok(json!({ "filled": filled_keys, "rejected": filled.rejected, "source": source }))
     }
 
     fn form_validate(&mut self, app: &BirApp) -> Result<Value, String> {
-        let form = self.form.as_mut().ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))?;
-        let checked = app.validate(&form.form, &form.opened.draft).map_err(|error| error.to_string())?;
+        let form = self
+            .form
+            .as_mut()
+            .ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))?;
+        let checked = app
+            .validate(&form.form, &form.opened.draft)
+            .map_err(|error| error.to_string())?;
         form.opened.draft = checked.draft;
         form.opened.values.extend(checked.values);
-        let errors: Vec<Value> = checked.errors.iter().map(|error| json!({ "field": error.field, "message": error.message })).collect();
+        let errors: Vec<Value> = checked
+            .errors
+            .iter()
+            .map(|error| json!({ "field": error.field, "message": error.message }))
+            .collect();
         form.opened.errors = checked.errors;
         Ok(json!({ "ok": errors.is_empty(), "error_count": errors.len(), "field_errors": errors }))
     }
@@ -491,8 +630,13 @@ impl Server {
 
     /// Save the open return (the owner lock held by the caller).
     fn save_open(&mut self, app: &BirApp) -> Result<Value, String> {
-        let form = self.form.as_mut().ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))?;
-        let saved = app.save(&form.form, &form.opened.draft).map_err(|error| error.to_string())?;
+        let form = self
+            .form
+            .as_mut()
+            .ok_or_else(|| format!("no return is open: open one with {FORM_OPEN}"))?;
+        let saved = app
+            .save(&form.form, &form.opened.draft)
+            .map_err(|error| error.to_string())?;
         if saved.saved == Some(false) {
             return Err("a return of this period is already saved; open it with bir_form_open instead of this sample".into());
         }
@@ -508,7 +652,10 @@ impl Server {
 
     fn form_dismiss(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
         reject_unknown(arguments, &["discard"])?;
-        let discard = arguments.get("discard").and_then(Value::as_bool).unwrap_or(false);
+        let discard = arguments
+            .get("discard")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         match &self.form {
             None => Ok(json!({ "dismissed": false, "message": "no return was open" })),
             Some(form) if form.dirty && !discard => Err(format!(
@@ -534,7 +681,10 @@ pub(crate) fn app_tool_name(function: &str) -> String {
 
 fn is_app_only(name: &str) -> bool {
     [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, PAYMENTS_LIST].contains(&name)
-        || name.strip_prefix(APP_PREFIX).and_then(scope::find).is_some()
+        || name
+            .strip_prefix(APP_PREFIX)
+            .and_then(scope::find)
+            .is_some()
 }
 
 fn read_only(name: &str) -> bool {
@@ -552,9 +702,17 @@ fn open_args(period: TaxPeriod) -> (i64, i64) {
 }
 
 fn reject_unknown(arguments: &Map<String, Value>, allowed: &[&str]) -> Result<(), String> {
-    match arguments.keys().find(|key| !allowed.contains(&key.as_str())) {
-        Some(key) if allowed.is_empty() => Err(format!("this tool takes no arguments (got `{key}`)")),
-        Some(key) => Err(format!("unknown argument `{key}` (allowed: {})", allowed.join(", "))),
+    match arguments
+        .keys()
+        .find(|key| !allowed.contains(&key.as_str()))
+    {
+        Some(key) if allowed.is_empty() => {
+            Err(format!("this tool takes no arguments (got `{key}`)"))
+        }
+        Some(key) => Err(format!(
+            "unknown argument `{key}` (allowed: {})",
+            allowed.join(", ")
+        )),
         None => Ok(()),
     }
 }
@@ -575,11 +733,18 @@ fn text_arg(arguments: &Map<String, Value>, key: &str) -> Result<Option<String>,
 /// A `bir_app_*` call's `{args | args_json, ticket?}`. A signed call carries
 /// whole numbers only: a draft's amounts come as `args_json`, text.
 fn host_arguments(arguments: &Map<String, Value>) -> Result<(Vec<Value>, Option<String>), String> {
-    if let Some(key) = arguments.keys().find(|key| !["args", "args_json", "ticket"].contains(&key.as_str())) {
-        return Err(format!("unknown argument `{key}` (allowed: args, args_json, ticket)"));
+    if let Some(key) = arguments
+        .keys()
+        .find(|key| !["args", "args_json", "ticket"].contains(&key.as_str()))
+    {
+        return Err(format!(
+            "unknown argument `{key}` (allowed: args, args_json, ticket)"
+        ));
     }
     let args = match (arguments.get("args"), arguments.get("args_json")) {
-        (Some(args), Some(_)) if !args.is_null() => return Err("send `args` or `args_json`, not both".into()),
+        (Some(args), Some(_)) if !args.is_null() => {
+            return Err("send `args` or `args_json`, not both".into());
+        }
         (_, Some(Value::String(text))) => match serde_json::from_str(text) {
             Ok(Value::Array(args)) => args,
             _ => return Err("`args_json` must be a JSON array of the function's arguments".into()),
@@ -604,7 +769,12 @@ fn with_tickets(app: &BirApp, rows: Value) -> Result<Value, String> {
     };
     let subjects: Vec<Option<Subject>> = rows
         .iter()
-        .map(|row| row.get("tin_root").or_else(|| row.get("tin")).and_then(Value::as_str).and_then(Subject::of_tin))
+        .map(|row| {
+            row.get("tin_root")
+                .or_else(|| row.get("tin"))
+                .and_then(Value::as_str)
+                .and_then(Subject::of_tin)
+        })
         .collect();
     let issued = tickets::issue_all(app, &subjects)?;
     for (row, ticket) in rows.iter_mut().zip(issued) {
@@ -616,13 +786,22 @@ fn with_tickets(app: &BirApp, rows: Value) -> Result<Value, String> {
 }
 
 fn ticket_arg(arguments: &Map<String, Value>) -> Result<&str, String> {
-    arguments.get("ticket").and_then(Value::as_str).ok_or_else(|| "`ticket` is required".to_string())
+    arguments
+        .get("ticket")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "`ticket` is required".to_string())
 }
 
 /// `bir_ticket_subject {ticket}`: what the ticket stands for, for the app.
-fn ticket_subject(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
+fn ticket_subject(
+    app: &BirApp,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+) -> Result<Value, String> {
     let subject = tickets::subject_of(app, ticket_arg(arguments)?)?;
-    let title = subject.title(app, today).ok_or("the taxpayer of this ticket is no longer saved in eBIRForms")?;
+    let title = subject
+        .title(app, today)
+        .ok_or("the taxpayer of this ticket is no longer saved in eBIRForms")?;
     let mut out = subject.describe(today);
     out["title"] = Value::String(title);
     Ok(out)
@@ -630,20 +809,32 @@ fn ticket_subject(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate
 
 /// `bir_ticket_issue {ticket, tin}`: a ticket for another branch of the
 /// same taxpayer.
-fn ticket_issue(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
+fn ticket_issue(
+    app: &BirApp,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+) -> Result<Value, String> {
     let root = tickets::subject_of(app, ticket_arg(arguments)?)?.root();
-    let tin = arguments.get("tin").and_then(Value::as_str).ok_or("`tin` is required")?;
+    let tin = arguments
+        .get("tin")
+        .and_then(Value::as_str)
+        .ok_or("`tin` is required")?;
     let subject = Subject::of_tin(tin).ok_or_else(|| format!("`{tin}` is not a TIN"))?;
     if subject.root() != root {
         return Err("`tin` is another taxpayer's: a ticket reaches its own taxpayer only".into());
     }
-    let title = subject.title(app, today).ok_or("no such branch is saved in eBIRForms")?;
+    let title = subject
+        .title(app, today)
+        .ok_or("no such branch is saved in eBIRForms")?;
     Ok(json!({ "ticket": tickets::issue(app, &subject)?, "title": title }))
 }
 
 /// `bir_payments_list {tin, form?, period?}`: eBIRForms keeps no payments yet.
 fn payments_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
-    let tin = arguments.get("tin").and_then(Value::as_str).ok_or("`tin` is required: the app's ticket")?;
+    let tin = arguments
+        .get("tin")
+        .and_then(Value::as_str)
+        .ok_or("`tin` is required: the app's ticket")?;
     tickets::subject_of(app, tin)?;
     Ok(json!({ "payments": [] }))
 }
@@ -655,7 +846,11 @@ fn payments_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, 
 /// holds it; `period` the stored return of that period. Held to the
 /// ticket's taxpayer.
 fn print_preview(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Value {
-    let form = arguments.get("form").and_then(Value::as_str).unwrap_or_default().to_string();
+    let form = arguments
+        .get("form")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     match preview_page(app, arguments, today) {
         Ok((html, title)) => {
             let slug: String = form.chars().filter(char::is_ascii_alphanumeric).collect();
@@ -672,21 +867,50 @@ fn print_preview(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate)
     }
 }
 
-fn preview_page(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<(String, String), String> {
-    const KEYS: [&str; 9] = ["ticket", "form", "draft_id", "year", "quarter", "draft_json", "edits", "unlocked", "period"];
+fn preview_page(
+    app: &BirApp,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+) -> Result<(String, String), String> {
+    const KEYS: [&str; 9] = [
+        "ticket",
+        "form",
+        "draft_id",
+        "year",
+        "quarter",
+        "draft_json",
+        "edits",
+        "unlocked",
+        "period",
+    ];
     if let Some(key) = arguments.keys().find(|key| !KEYS.contains(&key.as_str())) {
-        return Err(format!("unknown argument `{key}` (allowed: {})", KEYS.join(", ")));
+        return Err(format!(
+            "unknown argument `{key}` (allowed: {})",
+            KEYS.join(", ")
+        ));
     }
     let subject = tickets::subject_of(app, ticket_arg(arguments)?)?;
     let root = subject.root();
-    let form = arguments.get("form").and_then(Value::as_str).ok_or("`form` is required: a BIR form code")?;
-    let form = taxform::form_code_of(form).ok_or_else(|| format!("`{form}` is not a BIR form eBIRForms prints"))?;
-    let given = ["draft_id", "year", "draft_json", "period"].iter().filter(|key| arguments.contains_key(**key)).count();
+    let form = arguments
+        .get("form")
+        .and_then(Value::as_str)
+        .ok_or("`form` is required: a BIR form code")?;
+    let form = taxform::form_code_of(form)
+        .ok_or_else(|| format!("`{form}` is not a BIR form eBIRForms prints"))?;
+    let given = ["draft_id", "year", "draft_json", "period"]
+        .iter()
+        .filter(|key| arguments.contains_key(**key))
+        .count();
     if given != 1 {
         return Err("pass one of `draft_id`, `year` and `quarter` (a saved return), `draft_json` (a sample) or `period`".into());
     }
     let held = |draft: &Value| -> Result<(), String> {
-        scope::check_args("screen_form_print", Rule::Draft { code: 0, draft: 1 }, &[json!(form), draft.clone()], &root)
+        scope::check_args(
+            "screen_form_print",
+            Rule::Draft { code: 0, draft: 1 },
+            &[json!(form), draft.clone()],
+            &root,
+        )
     };
     let printed = if let Some(year) = arguments.get("year") {
         let year = year.as_u64().ok_or("`year` must be a year like 2026")?;
@@ -695,9 +919,19 @@ fn preview_page(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) 
             .and_then(Value::as_u64)
             .ok_or("`quarter` (the quarter, or the month for 1601C) must be a number")?;
         if !["2551Q", "1601C"].contains(&form) {
-            return Err(format!("`year` and `quarter` name a 2551Q or 1601C; {form} prints by `draft_id`"));
+            return Err(format!(
+                "`year` and `quarter` name a 2551Q or 1601C; {form} prints by `draft_id`"
+            ));
         }
-        app.call("form_print_html", vec![json!(subject.full_tin()), json!(form), json!(year), json!(quarter)])
+        app.call(
+            "form_print_html",
+            vec![
+                json!(subject.full_tin()),
+                json!(form),
+                json!(year),
+                json!(quarter),
+            ],
+        )
     } else if let Some(id) = arguments.get("draft_id") {
         let id = id.as_i64().ok_or("`draft_id` must be an integer")?;
         // BirApp on eBIRForms main has no draft-by-id read yet: a second
@@ -720,26 +954,57 @@ fn preview_page(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) 
         if !edits.is_object() {
             return Err("`edits` must be an object of box keys to values".into());
         }
-        let unlocked = arguments.get("unlocked").cloned().unwrap_or_else(|| json!([]));
-        if !unlocked.as_array().is_some_and(|keys| keys.iter().all(Value::is_string)) {
+        let unlocked = arguments
+            .get("unlocked")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        if !unlocked
+            .as_array()
+            .is_some_and(|keys| keys.iter().all(Value::is_string))
+        {
             return Err("`unlocked` must be a list of box keys".into());
         }
-        app.call("screen_form_print_sample", vec![json!(form), draft, edits, unlocked])
+        app.call(
+            "screen_form_print_sample",
+            vec![json!(form), draft, edits, unlocked],
+        )
     } else {
-        let text = arguments.get("period").and_then(Value::as_str).ok_or("`period` must be text like 2026-Q3")?;
-        let period = taxform::parse(text, today).period.ok_or_else(|| format!("`period` `{text}` names no period"))?;
+        let text = arguments
+            .get("period")
+            .and_then(Value::as_str)
+            .ok_or("`period` must be text like 2026-Q3")?;
+        let period = taxform::parse(text, today)
+            .period
+            .ok_or_else(|| format!("`period` `{text}` names no period"))?;
         let (year, slot) = open_args(period.for_form(form, today)?);
         if ["2551Q", "1601C"].contains(&form) {
-            app.call("form_print_html", vec![json!(subject.full_tin()), json!(form), json!(year), json!(slot)])
+            app.call(
+                "form_print_html",
+                vec![
+                    json!(subject.full_tin()),
+                    json!(form),
+                    json!(year),
+                    json!(slot),
+                ],
+            )
         } else {
             let opened = app
-                .open_return(&OpenReturn { tin: subject.full_tin(), form_code: form.into(), year, period: slot, key: None })
+                .open_return(&OpenReturn {
+                    tin: subject.full_tin(),
+                    form_code: form.into(),
+                    year,
+                    period: slot,
+                    key: None,
+                })
                 .map_err(|error| error.to_string())?;
             app.call("screen_form_print", vec![json!(form), opened.draft.0])
         }
     }
     .map_err(|error| error.to_string())?;
-    let html = printed["html"].as_str().ok_or("the print sheet came back empty")?.to_string();
+    let html = printed["html"]
+        .as_str()
+        .ok_or("the print sheet came back empty")?
+        .to_string();
     let title = printed["title"].as_str().unwrap_or(form).to_string();
     Ok((html, title))
 }
@@ -772,7 +1037,10 @@ fn profiles_list(app: &BirApp) -> Result<Value, String> {
 /// The 14 or 9 digits a `tin` argument holds, for matching rows.
 fn tin_filter(arguments: &Map<String, Value>) -> Result<Option<String>, String> {
     text_arg(arguments, "tin")?
-        .map(|tin| taxform::tin_digits(&tin).ok_or_else(|| format!("`tin` must be a ticket from {PROFILES_LIST}")))
+        .map(|tin| {
+            taxform::tin_digits(&tin)
+                .ok_or_else(|| format!("`tin` must be a ticket from {PROFILES_LIST}"))
+        })
         .transpose()
 }
 
@@ -786,19 +1054,33 @@ fn tin_matches(filter: &Option<String>, tin: &str) -> bool {
 }
 
 /// `bir_dues_list {tin?, filter?}`: returns due by eBIRForms's filing calendar.
-fn dues_list(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
+fn dues_list(
+    app: &BirApp,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+) -> Result<Value, String> {
     reject_unknown(arguments, &["tin", "filter"])?;
     let tin = tin_filter(arguments)?;
     let filter = text_arg(arguments, "filter")?.unwrap_or_else(|| "upcoming".into());
-    let day = |days: i64| (today + chrono::Duration::days(days)).format("%Y-%m-%d").to_string();
+    let day = |days: i64| {
+        (today + chrono::Duration::days(days))
+            .format("%Y-%m-%d")
+            .to_string()
+    };
     let (from, to) = match filter.as_str() {
         "upcoming" => (day(0), day(45)),
         "overdue" => (day(-365), day(-1)),
         "all" => (day(-365), day(45)),
-        other => return Err(format!("`filter` must be upcoming, overdue or all (got `{other}`)")),
+        other => {
+            return Err(format!(
+                "`filter` must be upcoming, overdue or all (got `{other}`)"
+            ));
+        }
     };
     let open = |status: &str| matches!(status, "Not started" | "Draft");
-    let rows = app.deadlines_between(&from, &to).map_err(|error| error.to_string())?;
+    let rows = app
+        .deadlines_between(&from, &to)
+        .map_err(|error| error.to_string())?;
     Ok(Value::Array(
         rows.into_iter()
             .filter(|row| tin_matches(&tin, &row.tin))
@@ -823,11 +1105,15 @@ fn dues_list(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> 
 /// `bir_drafts_list {tin, form?, status?}`: a taxpayer's saved returns.
 fn drafts_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
     reject_unknown(arguments, &["tin", "form", "status"])?;
-    let tin = tin_filter(arguments)?.ok_or_else(|| format!("`tin` is required: the taxpayer's ticket from {PROFILES_LIST}"))?;
+    let tin = tin_filter(arguments)?
+        .ok_or_else(|| format!("`tin` is required: the taxpayer's ticket from {PROFILES_LIST}"))?;
     let form = text_arg(arguments, "form")?
         .map(|form| {
             let named = taxform::parse(&form, taxform::today());
-            named.form.or_else(|| taxform::form_code_of(&form)).ok_or_else(|| format!("`{form}` is not a BIR form"))
+            named
+                .form
+                .or_else(|| taxform::form_code_of(&form))
+                .ok_or_else(|| format!("`{form}` is not a BIR form"))
         })
         .transpose()?;
     let filter = match text_arg(arguments, "status")?.as_deref() {
@@ -835,7 +1121,9 @@ fn drafts_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
         Some("all") => ReturnFilter::All,
         Some(other) => return Err(format!("`status` must be draft or all (got `{other}`)")),
     };
-    let rows = app.list_returns(filter).map_err(|error| error.to_string())?;
+    let rows = app
+        .list_returns(filter)
+        .map_err(|error| error.to_string())?;
     let tin = Some(tin);
     Ok(Value::Array(
         rows.into_iter()
@@ -859,20 +1147,32 @@ fn drafts_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
 /// `bir_app_open {app: "forms", tin?, form?, period?, action?, draft_id?}`:
 /// asks the Bot to open the Forms app, on one taxpayer (a ticket) and
 /// optionally one return.
-fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> Result<Value, String> {
-    reject_unknown(arguments, &["app", "tin", "form", "period", "action", "draft_id"])?;
+fn app_open(
+    app: &BirApp,
+    arguments: &Map<String, Value>,
+    today: NaiveDate,
+) -> Result<Value, String> {
+    reject_unknown(
+        arguments,
+        &["app", "tin", "form", "period", "action", "draft_id"],
+    )?;
     match text_arg(arguments, "app")?.as_deref() {
         Some(manifest::FORMS_ID) => {}
         _ => return Err("`app` must be forms (the one app eBIRForms ships)".into()),
     }
     let action = text_arg(arguments, "action")?
         .map(|action| {
-            taxform::TaxformAction::parse(&action).ok_or_else(|| format!("`action` must be view, file or submit (got `{action}`)"))
+            taxform::TaxformAction::parse(&action)
+                .ok_or_else(|| format!("`action` must be view, file or submit (got `{action}`)"))
         })
         .transpose()?;
     let draft_id = match arguments.get("draft_id") {
         None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_i64().ok_or_else(|| format!("`draft_id` must be a draft id from {DRAFTS_LIST}"))?),
+        Some(value) => Some(
+            value
+                .as_i64()
+                .ok_or_else(|| format!("`draft_id` must be a draft id from {DRAFTS_LIST}"))?,
+        ),
     };
     let form = text_arg(arguments, "form")?;
     let period = text_arg(arguments, "period")?;
@@ -882,11 +1182,17 @@ fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> R
     let mut props = Map::new();
     let tin = tin_filter(arguments)?;
     let (subject, title) = match (tin, form) {
-        (None, Some(_)) => return Err(format!("`form` needs `tin`: the taxpayer's ticket from {PROFILES_LIST}")),
+        (None, Some(_)) => {
+            return Err(format!(
+                "`form` needs `tin`: the taxpayer's ticket from {PROFILES_LIST}"
+            ));
+        }
         (None, None) => (None, manifest::FORMS_TITLE.to_string()),
         (Some(tin), None) => {
             let subject = Subject::of_tin(&tin).ok_or("`tin` is not a taxpayer")?;
-            let name = subject.title(app, today).ok_or_else(|| format!("that taxpayer is not saved in eBIRForms; list them with {PROFILES_LIST}"))?;
+            let name = subject.title(app, today).ok_or_else(|| {
+                format!("that taxpayer is not saved in eBIRForms; list them with {PROFILES_LIST}")
+            })?;
             (Some(subject), format!("{} · {name}", manifest::FORMS_TITLE))
         }
         (Some(tin), Some(form_text)) => {
@@ -896,15 +1202,20 @@ fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> R
                 .or_else(|| taxform::form_code_of(&form_text))
                 .ok_or_else(|| format!("`{form_text}` is not a BIR form"))?;
             let period = match period.as_deref() {
-                Some(text) => taxform::parse(text, today).period.ok_or_else(|| format!("`period` `{text}` names no period"))?,
+                Some(text) => taxform::parse(text, today)
+                    .period
+                    .ok_or_else(|| format!("`period` `{text}` names no period"))?,
                 None => match named.period {
                     Some(period) => period,
-                    None => taxform::period_to_file(form, today).ok_or_else(|| format!("{form} has no period to file now"))?,
+                    None => taxform::period_to_file(form, today)
+                        .ok_or_else(|| format!("{form} has no period to file now"))?,
                 },
             }
             .for_form(form, today)?;
             let subject = Subject::Return(taxform::canonical_value(&tin, form, period));
-            let title = subject.title(app, today).ok_or_else(|| format!("that taxpayer is not saved in eBIRForms; list them with {PROFILES_LIST}"))?;
+            let title = subject.title(app, today).ok_or_else(|| {
+                format!("that taxpayer is not saved in eBIRForms; list them with {PROFILES_LIST}")
+            })?;
             props.insert("form".into(), json!(form));
             props.insert("period".into(), json!(period.canonical()));
             if let Some(action) = action {
@@ -916,7 +1227,9 @@ fn app_open(app: &BirApp, arguments: &Map<String, Value>, today: NaiveDate) -> R
             (Some(subject), format!("BIR Form {title}"))
         }
     };
-    let ticket = subject.map(|subject| tickets::issue(app, &subject)).transpose()?;
+    let ticket = subject
+        .map(|subject| tickets::issue(app, &subject))
+        .transpose()?;
     if let Some(ticket) = &ticket {
         props.insert("ticket".into(), json!(ticket));
     }
@@ -944,17 +1257,36 @@ fn resolve(app: &BirApp, arguments: &Map<String, Value>) -> Value {
 
 fn try_resolve(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
     reject_unknown(arguments, &["kind", "name", "value", "complete", "context"])?;
-    let kind = arguments.get("kind").and_then(Value::as_str).unwrap_or("scope");
-    let name = arguments.get("name").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase();
+    let kind = arguments
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("scope");
+    let name = arguments
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if kind != "scope" || name != "taxprofile" {
         return Err("eBIRForms resolves the taxprofile scope only".into());
     }
-    let value = arguments.get("value").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    let complete = arguments.get("complete").and_then(Value::as_bool).unwrap_or(false);
+    let value = arguments
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let complete = arguments
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let today = taxform::today();
     if tickets::is_ticket(&value) {
-        let subject = tickets::subject_of(app, &value).map_err(|_| "That taxpayer is no longer available".to_string())?;
-        let title = subject.title(app, today).ok_or("That taxpayer is no longer saved in eBIRForms")?;
+        let subject = tickets::subject_of(app, &value)
+            .map_err(|_| "That taxpayer is no longer available".to_string())?;
+        let title = subject
+            .title(app, today)
+            .ok_or("That taxpayer is no longer saved in eBIRForms")?;
         return Ok(json!({ "result": "token", "ticket": value, "title": title }));
     }
     let wanted_digits = tickets::digits(&value);
@@ -966,13 +1298,23 @@ fn try_resolve(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
         }
         let by_name = wanted_text.is_empty() || taxpayer.name.to_lowercase().contains(&wanted_text);
         for branch in &taxpayer.branches {
-            let by_tin = !wanted_digits.is_empty() && tickets::digits(&branch.tin).starts_with(&wanted_digits);
-            let by_branch = !wanted_text.is_empty() && branch.name.to_lowercase().contains(&wanted_text);
+            let by_tin = !wanted_digits.is_empty()
+                && tickets::digits(&branch.tin).starts_with(&wanted_digits);
+            let by_branch =
+                !wanted_text.is_empty() && branch.name.to_lowercase().contains(&wanted_text);
             if !(by_name || by_tin || by_branch) {
                 continue;
             }
-            let Some(subject) = Subject::of_tin(&branch.tin) else { continue };
-            let detail = if branch.is_head_office { "Head office".to_string() } else { format!("Branch {} {}", branch.code, branch.name).trim().to_string() };
+            let Some(subject) = Subject::of_tin(&branch.tin) else {
+                continue;
+            };
+            let detail = if branch.is_head_office {
+                "Head office".to_string()
+            } else {
+                format!("Branch {} {}", branch.code, branch.name)
+                    .trim()
+                    .to_string()
+            };
             found.push((subject, taxpayer.name.clone(), detail));
         }
     }
@@ -983,10 +1325,16 @@ fn try_resolve(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
         return Ok(json!({ "result": "token", "ticket": ticket, "title": title }));
     }
     if found.is_empty() && !complete {
-        return Err(format!("No taxpayer in eBIRForms matches “{}”", value.chars().take(60).collect::<String>()));
+        return Err(format!(
+            "No taxpayer in eBIRForms matches “{}”",
+            value.chars().take(60).collect::<String>()
+        ));
     }
     found.truncate(20);
-    let subjects: Vec<Option<Subject>> = found.iter().map(|(subject, ..)| Some(subject.clone())).collect();
+    let subjects: Vec<Option<Subject>> = found
+        .iter()
+        .map(|(subject, ..)| Some(subject.clone()))
+        .collect();
     let issued = tickets::issue_all(app, &subjects)?;
     let choices: Vec<Value> = found
         .iter()
@@ -1062,7 +1410,12 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 }
 
 fn app_only(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
-    let mut tool = tool(name, &format!("Mini apps only (refused for the assistant): {description}"), schema, read_only);
+    let mut tool = tool(
+        name,
+        &format!("Mini apps only (refused for the assistant): {description}"),
+        schema,
+        read_only,
+    );
     tool["_meta"] = json!({ "rox/audience": ["app"] });
     tool
 }
@@ -1074,95 +1427,175 @@ fn empty_schema() -> Value {
 fn tool_list() -> Value {
     let ticket = json!({ "type": "string", "description": "The taxpayer's ticket (tkt_...) from bir_profiles_list or an @bir:taxprofile token." });
     let mut tools = vec![
-        tool(STATUS, "Report the eBIRForms mini app: its version, that it keeps its own data, whether saving works right now, that sending is off, and how many taxpayers are saved. Use it for \"is eBIRForms working?\".", empty_schema(), true),
-        tool(PROFILES_LIST, "List the taxpayers saved in eBIRForms with their branches; each comes back as a ticket. Pass a ticket as `tin` to the other tools.", empty_schema(), true),
-        tool(DUES_LIST, "List returns due by eBIRForms's filing calendar, with their status. `filter`: upcoming (default, the next 45 days), overdue (past due and not filed) or all. `tin` limits it to one taxpayer.", json!({
-            "type": "object",
-            "properties": { "tin": ticket, "filter": { "type": "string", "enum": ["upcoming", "overdue", "all"] } },
-            "additionalProperties": false
-        }), true),
-        tool(DRAFTS_LIST, "List a taxpayer's saved returns: drafts by default, or every saved and filed return with `status: all`. `form` limits it to one form.", json!({
-            "type": "object",
-            "properties": { "tin": ticket, "form": { "type": "string" }, "status": { "type": "string", "enum": ["draft", "all"] } },
-            "required": ["tin"],
-            "additionalProperties": false
-        }), true),
-        tool(APP_OPEN, "Ask the Bot to open the Forms app for the user (it shows an Open button): `app: \"forms\"`, the taxpayer's ticket as `tin`, and `form` (+ `period`, `action` view|file|submit, `draft_id`) to open one return.", json!({
-            "type": "object",
-            "properties": {
-                "app": { "type": "string", "enum": ["forms"] },
-                "tin": ticket,
-                "form": { "type": "string", "description": "A BIR form code such as 2551Q, or a return's ticket." },
-                "period": { "type": "string", "description": "2026-Q3, 2026-01, 2025 or 2026-10-26; omitted: the period to file now." },
-                "action": { "type": "string", "enum": ["view", "file", "submit"] },
-                "draft_id": { "type": "integer" }
-            },
-            "required": ["app"],
-            "additionalProperties": false
-        }), false),
-        tool(FORM_OPEN, "Open a return for one taxpayer and period, as eBIRForms's form page opens it (prefilled from the taxpayer profile; the saved return if there is one). `code`: a form code (1601C, 2551Q, 1701Q, ...) or a return's ticket. `period`: month 1-12, quarter 1-4, 0 for annual, or text (2026-Q3, 2026-01, 2025); omitted, the return to file now. One return is open at a time.", json!({
-            "type": "object",
-            "properties": {
-                "code": { "type": "string" },
-                "tin": ticket,
-                "year": { "type": "integer", "minimum": 2000, "maximum": 2100 },
-                "period": { "type": ["integer", "string"] }
-            },
-            "required": ["code"],
-            "additionalProperties": false
-        }), false),
-        tool(FORM_FIELDS, "Read the open return's boxes: values by official key, the locked boxes (with why), boxes switched off by another answer, and each drop-down's options. `keys` limits it to some boxes.", json!({
-            "type": "object",
-            "properties": { "keys": { "type": "array", "items": { "type": "string" } } },
-            "additionalProperties": false
-        }), true),
-        tool(FORM_FILL, "Fill boxes of the open return: `fields` maps official box keys (from bir_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.", json!({
-            "type": "object",
-            "properties": {
-                "fields": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] }, "minProperties": 1 },
-                "source": { "type": "string", "enum": ["profile", "past_return", "document", "ai", "user"] },
-                "from_card": { "type": "boolean" }
-            },
-            "required": ["fields"],
-            "additionalProperties": false
-        }), false),
-        tool(FORM_VALIDATE, "Validate the open return with the form's official rules, as the page's Validate does: `ok`, `error_count` and `field_errors` ({field, message}). Explain each error in plain words.", empty_schema(), true),
-        tool(FORM_SAVE, "Save the open return as a draft in the eBIRForms mini app. It never queues or files anything.", empty_schema(), false),
-        tool(FORM_DISMISS, "Close the open return without saving. Refused when it has unsaved edits unless `discard` is true, which you set only after the user said to drop them.", json!({
-            "type": "object",
-            "properties": { "discard": { "type": "boolean" } },
-            "additionalProperties": false
-        }), false),
-        tool(RESOLVE, "The Bot's resolver for the manifest's taxprofile scope (a taxpayer by name or TIN, as a ticket). Do not call it yourself.", json!({
-            "type": "object",
-            "properties": {
-                "kind": { "type": "string" }, "name": { "type": "string" }, "value": { "type": "string" },
-                "complete": { "type": "boolean" }, "context": { "type": "object" }
-            },
-            "additionalProperties": false
-        }), true),
-        app_only(TICKET_SUBJECT, "the taxpayer, branch or return a ticket the app holds stands for, so the app can show it.", json!({
-            "type": "object", "properties": { "ticket": { "type": "string" } }, "required": ["ticket"], "additionalProperties": false
-        }), true),
-        app_only(TICKET_ISSUE, "a ticket for another branch of the taxpayer the app's ticket names.", json!({
-            "type": "object", "properties": { "ticket": { "type": "string" }, "tin": { "type": "string" } }, "required": ["ticket", "tin"], "additionalProperties": false
-        }), false),
-        app_only(PRINT_PREVIEW, "a return's print sheet for the Bot's document view, as a static HTML document: `draft_id` (a saved return as stored), `year` and `quarter` (a 2551Q or 1601C as stored), `draft_json` with `edits` and `unlocked` (a Form library sample as the page holds it) or `period` (the stored return of that period).", json!({
-            "type": "object",
-            "properties": {
-                "ticket": { "type": "string" }, "form": { "type": "string" }, "draft_id": { "type": "integer" },
-                "year": { "type": "integer" }, "quarter": { "type": "integer" }, "draft_json": { "type": "string" },
-                "edits": { "type": "object" }, "unlocked": { "type": "array", "items": { "type": "string" } }, "period": { "type": "string" }
-            },
-            "required": ["ticket", "form"],
-            "additionalProperties": false
-        }), true),
-        app_only(PAYMENTS_LIST, "a return's recorded payments (eBIRForms keeps none yet: always empty).", json!({
-            "type": "object",
-            "properties": { "tin": { "type": "string" }, "form": { "type": "string" }, "period": { "type": "string" } },
-            "required": ["tin"],
-            "additionalProperties": false
-        }), true),
+        tool(
+            STATUS,
+            "Report the eBIRForms mini app: its version, that it keeps its own data, whether saving works right now, that sending is off, and how many taxpayers are saved. Use it for \"is eBIRForms working?\".",
+            empty_schema(),
+            true,
+        ),
+        tool(
+            PROFILES_LIST,
+            "List the taxpayers saved in eBIRForms with their branches; each comes back as a ticket. Pass a ticket as `tin` to the other tools.",
+            empty_schema(),
+            true,
+        ),
+        tool(
+            DUES_LIST,
+            "List returns due by eBIRForms's filing calendar, with their status. `filter`: upcoming (default, the next 45 days), overdue (past due and not filed) or all. `tin` limits it to one taxpayer.",
+            json!({
+                "type": "object",
+                "properties": { "tin": ticket, "filter": { "type": "string", "enum": ["upcoming", "overdue", "all"] } },
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        tool(
+            DRAFTS_LIST,
+            "List a taxpayer's saved returns: drafts by default, or every saved and filed return with `status: all`. `form` limits it to one form.",
+            json!({
+                "type": "object",
+                "properties": { "tin": ticket, "form": { "type": "string" }, "status": { "type": "string", "enum": ["draft", "all"] } },
+                "required": ["tin"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        tool(
+            APP_OPEN,
+            "Ask the Bot to open the Forms app for the user (it shows an Open button): `app: \"forms\"`, the taxpayer's ticket as `tin`, and `form` (+ `period`, `action` view|file|submit, `draft_id`) to open one return.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "app": { "type": "string", "enum": ["forms"] },
+                    "tin": ticket,
+                    "form": { "type": "string", "description": "A BIR form code such as 2551Q, or a return's ticket." },
+                    "period": { "type": "string", "description": "2026-Q3, 2026-01, 2025 or 2026-10-26; omitted: the period to file now." },
+                    "action": { "type": "string", "enum": ["view", "file", "submit"] },
+                    "draft_id": { "type": "integer" }
+                },
+                "required": ["app"],
+                "additionalProperties": false
+            }),
+            false,
+        ),
+        tool(
+            FORM_OPEN,
+            "Open a return for one taxpayer and period, as eBIRForms's form page opens it (prefilled from the taxpayer profile; the saved return if there is one). `code`: a form code (1601C, 2551Q, 1701Q, ...) or a return's ticket. `period`: month 1-12, quarter 1-4, 0 for annual, or text (2026-Q3, 2026-01, 2025); omitted, the return to file now. One return is open at a time.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string" },
+                    "tin": ticket,
+                    "year": { "type": "integer", "minimum": 2000, "maximum": 2100 },
+                    "period": { "type": ["integer", "string"] }
+                },
+                "required": ["code"],
+                "additionalProperties": false
+            }),
+            false,
+        ),
+        tool(
+            FORM_FIELDS,
+            "Read the open return's boxes: values by official key, the locked boxes (with why), boxes switched off by another answer, and each drop-down's options. `keys` limits it to some boxes.",
+            json!({
+                "type": "object",
+                "properties": { "keys": { "type": "array", "items": { "type": "string" } } },
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        tool(
+            FORM_FILL,
+            "Fill boxes of the open return: `fields` maps official box keys (from bir_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fields": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] }, "minProperties": 1 },
+                    "source": { "type": "string", "enum": ["profile", "past_return", "document", "ai", "user"] },
+                    "from_card": { "type": "boolean" }
+                },
+                "required": ["fields"],
+                "additionalProperties": false
+            }),
+            false,
+        ),
+        tool(
+            FORM_VALIDATE,
+            "Validate the open return with the form's official rules, as the page's Validate does: `ok`, `error_count` and `field_errors` ({field, message}). Explain each error in plain words.",
+            empty_schema(),
+            true,
+        ),
+        tool(
+            FORM_SAVE,
+            "Save the open return as a draft in the eBIRForms mini app. It never queues or files anything.",
+            empty_schema(),
+            false,
+        ),
+        tool(
+            FORM_DISMISS,
+            "Close the open return without saving. Refused when it has unsaved edits unless `discard` is true, which you set only after the user said to drop them.",
+            json!({
+                "type": "object",
+                "properties": { "discard": { "type": "boolean" } },
+                "additionalProperties": false
+            }),
+            false,
+        ),
+        tool(
+            RESOLVE,
+            "The Bot's resolver for the manifest's taxprofile scope (a taxpayer by name or TIN, as a ticket). Do not call it yourself.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string" }, "name": { "type": "string" }, "value": { "type": "string" },
+                    "complete": { "type": "boolean" }, "context": { "type": "object" }
+                },
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        app_only(
+            TICKET_SUBJECT,
+            "the taxpayer, branch or return a ticket the app holds stands for, so the app can show it.",
+            json!({
+                "type": "object", "properties": { "ticket": { "type": "string" } }, "required": ["ticket"], "additionalProperties": false
+            }),
+            true,
+        ),
+        app_only(
+            TICKET_ISSUE,
+            "a ticket for another branch of the taxpayer the app's ticket names.",
+            json!({
+                "type": "object", "properties": { "ticket": { "type": "string" }, "tin": { "type": "string" } }, "required": ["ticket", "tin"], "additionalProperties": false
+            }),
+            false,
+        ),
+        app_only(
+            PRINT_PREVIEW,
+            "a return's print sheet for the Bot's document view, as a static HTML document: `draft_id` (a saved return as stored), `year` and `quarter` (a 2551Q or 1601C as stored), `draft_json` with `edits` and `unlocked` (a Form library sample as the page holds it) or `period` (the stored return of that period).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "ticket": { "type": "string" }, "form": { "type": "string" }, "draft_id": { "type": "integer" },
+                    "year": { "type": "integer" }, "quarter": { "type": "integer" }, "draft_json": { "type": "string" },
+                    "edits": { "type": "object" }, "unlocked": { "type": "array", "items": { "type": "string" } }, "period": { "type": "string" }
+                },
+                "required": ["ticket", "form"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        app_only(
+            PAYMENTS_LIST,
+            "a return's recorded payments (eBIRForms keeps none yet: always empty).",
+            json!({
+                "type": "object",
+                "properties": { "tin": { "type": "string" }, "form": { "type": "string" }, "period": { "type": "string" } },
+                "required": ["tin"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
     ];
     for (function, _, access) in scope::FORMS {
         tools.push(app_only(

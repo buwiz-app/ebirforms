@@ -26,13 +26,32 @@ fn a_first_run_makes_its_own_folder_key_and_database() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&data).unwrap().permissions().mode() & 0o777, 0o700);
-        assert_eq!(std::fs::metadata(data.join(KEY_FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(data.join(KEY_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
     assert_eq!(std::env::var("BUWIZ_NO_KEYCHAIN").as_deref(), Ok("1"));
-    assert_eq!(std::env::var_os("BUWIZ_DB_KEY_FILE"), Some(data.join(KEY_FILE).into_os_string()));
-    assert_eq!(std::env::var_os("BUWIZ_DATABASE_PATH"), Some(database.clone().into_os_string()));
-    assert_eq!(std::env::var_os("BIR_LOG_DIR"), Some(data.join("logs").into_os_string()));
+    assert_eq!(
+        std::env::var_os("BUWIZ_DB_KEY_FILE"),
+        Some(data.join(KEY_FILE).into_os_string())
+    );
+    assert_eq!(
+        std::env::var_os("BUWIZ_DATABASE_PATH"),
+        Some(database.clone().into_os_string())
+    );
+    assert_eq!(
+        std::env::var_os("BIR_LOG_DIR"),
+        Some(data.join("logs").into_os_string())
+    );
 
     // a second run keeps the key it made
     unsafe { owner::prepare(&data) }.unwrap();

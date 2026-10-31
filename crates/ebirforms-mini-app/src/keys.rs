@@ -188,7 +188,12 @@ pub(crate) mod tests {
         let seed = b64url(&[7; 32]);
         let mut args = provision_args([7; 32]);
         args["key"]["alg"] = json!("rsa");
-        assert!(!PluginKey::from_provision(&args).err().unwrap().contains(&seed));
+        assert!(
+            !PluginKey::from_provision(&args)
+                .err()
+                .unwrap()
+                .contains(&seed)
+        );
     }
 
     #[test]
