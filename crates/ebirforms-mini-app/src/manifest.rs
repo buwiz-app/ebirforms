@@ -115,7 +115,7 @@ pub fn unsigned() -> Value {
         "version": VERSION,
         "title": "eBIRForms",
         "description": "Philippine BIR returns for the taxpayers kept in the eBIRForms mini app on this computer.",
-        "publisher": { "id": "app.buwiz", "key_id": "gc-2026-01", "name": "eBIRForms" },
+        "publisher": { "id": "app.buwiz", "key_id": "gc-2026-01", "name": "Buwiz" },
         "commands": [],
         "scopes": [
             { "name": "taxprofile", "description": "Taxpayer by TIN or name", "resolve": RESOLVE, "attach": true, "hint": TAXPROFILE_HINT },
