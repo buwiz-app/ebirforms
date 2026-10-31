@@ -29,7 +29,9 @@ use super::{answers, calendar, lookup, return_view, taxpayer};
 /// their own apps rather than leaving a tall frame half empty. From there
 /// the card kit reports its content height (`rox.fit`) and Rox sizes the
 /// card to it within `min_height`..`max_height`: a status line or button
-/// that appears grows the card, and only a list past 640 scrolls.
+/// that appears grows the card, and only a list past 640 scrolls. Rox
+/// holds the card's placeholder until the kit's `rox.ready()` says its
+/// data is in (`wait_ready`; a Rox without it ignores the key).
 pub(crate) fn inline(app: &str) -> Value {
     let height = match app {
         "card-quick" => 230,
@@ -38,7 +40,7 @@ pub(crate) fn inline(app: &str) -> Value {
         "card-money" | "card-people" | "card-forms" => 320,
         _ => 360,
     };
-    json!({ "width": 560, "height": height, "min_width": 320, "min_height": 120, "max_height": 640, "resizable": true })
+    json!({ "width": 560, "height": height, "min_width": 320, "min_height": 120, "max_height": 640, "resizable": true, "wait_ready": true })
 }
 
 /// Card kinds: id, app, small.

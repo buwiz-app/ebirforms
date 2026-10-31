@@ -67,6 +67,11 @@ const busy = signal(false);
 const failure = signal("");
 const note = signal("");
 
+/** Tells Rox the card's data is in (`rox.ready`): the manifest's
+ *  `inline.wait_ready` holds the card's placeholder until then. A Rox
+ *  without it has no `rox.ready`. */
+const ready = () => (rox as any).ready?.();
+
 async function refresh() {
   if (!P.tool || busy()) return;
   busy.set(true);
@@ -77,9 +82,11 @@ async function refresh() {
     failure.set(errText(e));
   } finally {
     busy.set(false);
+    ready();
   }
 }
 if (!P.snapshot && P.tool) refresh();
+else ready();
 
 /** Run a button's call; its error shows on the card. */
 async function act(run: () => Promise<unknown>, done?: string) {

@@ -27,7 +27,7 @@ use super::jcs;
 pub(crate) const PROTOCOL: &str = "1.0.0";
 pub(crate) const PLUGIN_ID: &str = "dev.goldcoders.bir";
 pub(crate) const SHORT: &str = "bir";
-pub(crate) const VERSION: &str = "2.6.3";
+pub(crate) const VERSION: &str = "2.6.4";
 pub(crate) const MANIFEST_URI: &str = "rox://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -185,7 +185,8 @@ fn specs() -> Vec<AppSpec> {
         AppSpec {
             id: "deadlines",
             placement: &["inline", "full"],
-            inline: Some(json!({ "width": 480, "height": 320, "min_width": 320, "resizable": true })),
+            // held until its calendar is read (`rox.ready()`)
+            inline: Some(json!({ "width": 480, "height": 320, "min_width": 320, "resizable": true, "wait_ready": true })),
             props: json!({ "type": "object", "properties": { "ticket": ticket_schema() } }),
             permissions: json!({
                 "tools": ["bir_calendar_get"],
