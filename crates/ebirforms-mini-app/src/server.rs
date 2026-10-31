@@ -3,12 +3,12 @@
 //! Every tool runs in this process over [`BirApp`], eBIRForms' typed door
 //! into forms, on the mini app's own database:
 //!
-//! - the Forms app's calls: `bir_app_<function>` (one per function its
+//! - the Forms app's calls: `ebirforms_app_<function>` (one per function its
 //!   source calls, held to its ticket by [`crate::scope`]), the ticket
 //!   helpers, the print preview and the payments list;
 //! - the assistant's tools: status, taxpayers, dues, drafts, opening the
 //!   Forms app, and one open return to read, fill, validate or save;
-//! - `bir_resolve` for the manifest's `taxprofile` scope;
+//! - `ebirforms_resolve` for the manifest's `taxprofile` scope;
 //! - the reserved `rox.*` tools ([`crate::protocol`]).
 //!
 //! Buwiz Bot speaks the Mini App Protocol v1: `rox.provision` first, then
@@ -43,27 +43,27 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
 // The assistant's tools.
-pub(crate) const STATUS: &str = "bir_status";
-pub(crate) const APP_OPEN: &str = "bir_app_open";
-pub(crate) const RESOLVE: &str = "bir_resolve";
-pub(crate) const PROFILES_LIST: &str = "bir_profiles_list";
-pub(crate) const DUES_LIST: &str = "bir_dues_list";
-pub(crate) const DRAFTS_LIST: &str = "bir_drafts_list";
-pub(crate) const FORM_OPEN: &str = "bir_form_open";
-pub(crate) const FORM_FIELDS: &str = "bir_form_fields";
-pub(crate) const FORM_FILL: &str = "bir_form_fill";
-pub(crate) const FORM_VALIDATE: &str = "bir_form_validate";
-pub(crate) const FORM_SAVE: &str = "bir_form_save_draft";
-pub(crate) const FORM_DISMISS: &str = "bir_form_dismiss";
+pub(crate) const STATUS: &str = "ebirforms_status";
+pub(crate) const APP_OPEN: &str = "ebirforms_app_open";
+pub(crate) const RESOLVE: &str = "ebirforms_resolve";
+pub(crate) const PROFILES_LIST: &str = "ebirforms_profiles_list";
+pub(crate) const DUES_LIST: &str = "ebirforms_dues_list";
+pub(crate) const DRAFTS_LIST: &str = "ebirforms_drafts_list";
+pub(crate) const FORM_OPEN: &str = "ebirforms_form_open";
+pub(crate) const FORM_FIELDS: &str = "ebirforms_form_fields";
+pub(crate) const FORM_FILL: &str = "ebirforms_form_fill";
+pub(crate) const FORM_VALIDATE: &str = "ebirforms_form_validate";
+pub(crate) const FORM_SAVE: &str = "ebirforms_form_save_draft";
+pub(crate) const FORM_DISMISS: &str = "ebirforms_form_dismiss";
 
 // The Forms app's own tools (refused for the assistant).
-pub(crate) const APP_PREFIX: &str = "bir_app_";
-pub(crate) const TICKET_SUBJECT: &str = "bir_ticket_subject";
-pub(crate) const TICKET_ISSUE: &str = "bir_ticket_issue";
-pub(crate) const PRINT_PREVIEW: &str = "bir_app_print_preview";
+pub(crate) const APP_PREFIX: &str = "ebirforms_app_";
+pub(crate) const TICKET_SUBJECT: &str = "ebirforms_ticket_subject";
+pub(crate) const TICKET_ISSUE: &str = "ebirforms_ticket_issue";
+pub(crate) const PRINT_PREVIEW: &str = "ebirforms_app_print_preview";
 /// eBIRForms keeps no payments yet: the list is empty, so the Forms app's
 /// payment section shows nothing paid.
-pub(crate) const PAYMENTS_LIST: &str = "bir_payments_list";
+pub(crate) const PAYMENTS_LIST: &str = "ebirforms_payments_list";
 
 /// The assistant's tools that change nothing (`readOnlyHint`, P8): the ones
 /// a routine or resolve call may run.
@@ -80,13 +80,13 @@ const READ_ONLY: [&str; 7] = [
 const INSTRUCTIONS: &str = "eBIRForms (Philippine BIR tax returns) running headless on this computer \
 over the taxpayer database eBIRForms keeps. Taxpayers, branches and returns reach you as tickets \
 (tkt_...), never as TINs: pass a ticket wherever a tool takes `tin`; a return's ticket also goes \
-in bir_form_open's `code` and bir_app_open's `form`. Never ask the user for a TIN and never write \
-one out; use the taxpayer's name. bir_profiles_list lists the taxpayers, bir_dues_list the returns \
-due, bir_drafts_list a taxpayer's saved returns. To let the user work visually, call bir_app_open \
+in ebirforms_form_open's `code` and ebirforms_app_open's `form`. Never ask the user for a TIN and never write \
+one out; use the taxpayer's name. ebirforms_profiles_list lists the taxpayers, ebirforms_dues_list the returns \
+due, ebirforms_drafts_list a taxpayer's saved returns. To let the user work visually, call ebirforms_app_open \
 with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` to open one \
-return). You can draft a return yourself: bir_form_open, bir_form_fields, bir_form_fill (with its \
-`source`), bir_form_validate, bir_form_save_draft, bir_form_dismiss; one return is open at a time. \
-Filing is not available here yet: a return can be saved, but nothing is queued or sent. Tools whose description starts with \"Mini apps only\" and bir_resolve belong \
+return). You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
+`source`), ebirforms_form_validate, ebirforms_form_save_draft, ebirforms_form_dismiss; one return is open at a time. \
+Filing is not available here yet: a return can be saved, but nothing is queued or sent. Tools whose description starts with \"Mini apps only\" and ebirforms_resolve belong \
 to the Forms app and to the Bot: do not call them.";
 
 /// The return the assistant has open.
@@ -317,7 +317,7 @@ impl Server {
         call_result(answer.map_err(|message| format!("{name}: {message}")))
     }
 
-    /// One `bir_app_<function>` call: arguments read, the ticket turned into
+    /// One `ebirforms_app_<function>` call: arguments read, the ticket turned into
     /// the scope, the owner lock taken for a write, the answer held to the
     /// scope and a list's rows given their tickets.
     fn host_call(
@@ -638,7 +638,7 @@ impl Server {
             .save(&form.form, &form.opened.draft)
             .map_err(|error| error.to_string())?;
         if saved.saved == Some(false) {
-            return Err("a return of this period is already saved; open it with bir_form_open instead of this sample".into());
+            return Err("a return of this period is already saved; open it with ebirforms_form_open instead of this sample".into());
         }
         if let Some(draft) = saved.draft.clone() {
             form.opened.draft = draft;
@@ -730,7 +730,7 @@ fn text_arg(arguments: &Map<String, Value>, key: &str) -> Result<Option<String>,
     }
 }
 
-/// A `bir_app_*` call's `{args | args_json, ticket?}`. A signed call carries
+/// A `ebirforms_app_*` call's `{args | args_json, ticket?}`. A signed call carries
 /// whole numbers only: a draft's amounts come as `args_json`, text.
 fn host_arguments(arguments: &Map<String, Value>) -> Result<(Vec<Value>, Option<String>), String> {
     if let Some(key) = arguments
@@ -792,7 +792,7 @@ fn ticket_arg(arguments: &Map<String, Value>) -> Result<&str, String> {
         .ok_or_else(|| "`ticket` is required".to_string())
 }
 
-/// `bir_ticket_subject {ticket}`: what the ticket stands for, for the app.
+/// `ebirforms_ticket_subject {ticket}`: what the ticket stands for, for the app.
 fn ticket_subject(
     app: &BirApp,
     arguments: &Map<String, Value>,
@@ -807,7 +807,7 @@ fn ticket_subject(
     Ok(out)
 }
 
-/// `bir_ticket_issue {ticket, tin}`: a ticket for another branch of the
+/// `ebirforms_ticket_issue {ticket, tin}`: a ticket for another branch of the
 /// same taxpayer.
 fn ticket_issue(
     app: &BirApp,
@@ -829,7 +829,7 @@ fn ticket_issue(
     Ok(json!({ "ticket": tickets::issue(app, &subject)?, "title": title }))
 }
 
-/// `bir_payments_list {tin, form?, period?}`: eBIRForms keeps no payments yet.
+/// `ebirforms_payments_list {tin, form?, period?}`: eBIRForms keeps no payments yet.
 fn payments_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
     let tin = arguments
         .get("tin")
@@ -839,7 +839,7 @@ fn payments_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, 
     Ok(json!({ "payments": [] }))
 }
 
-/// `bir_app_print_preview`: the return's print sheet as the HTML document
+/// `ebirforms_app_print_preview`: the return's print sheet as the HTML document
 /// the Bot previews, made in memory. `draft_id` prints a saved return as
 /// stored; `year` and `quarter` a 2551Q or 1601C as stored for its period;
 /// `draft_json` (+ `edits`, `unlocked`) a Form library sample as the page
@@ -1009,7 +1009,7 @@ fn preview_page(
     Ok((html, title))
 }
 
-/// `bir_profiles_list`: every taxpayer and its branches.
+/// `ebirforms_profiles_list`: every taxpayer and its branches.
 fn profiles_list(app: &BirApp) -> Result<Value, String> {
     let taxpayers = app.list_taxpayers().map_err(|error| error.to_string())?;
     Ok(Value::Array(
@@ -1053,7 +1053,7 @@ fn tin_matches(filter: &Option<String>, tin: &str) -> bool {
     }
 }
 
-/// `bir_dues_list {tin?, filter?}`: returns due by eBIRForms's filing calendar.
+/// `ebirforms_dues_list {tin?, filter?}`: returns due by eBIRForms's filing calendar.
 fn dues_list(
     app: &BirApp,
     arguments: &Map<String, Value>,
@@ -1102,7 +1102,7 @@ fn dues_list(
     ))
 }
 
-/// `bir_drafts_list {tin, form?, status?}`: a taxpayer's saved returns.
+/// `ebirforms_drafts_list {tin, form?, status?}`: a taxpayer's saved returns.
 fn drafts_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
     reject_unknown(arguments, &["tin", "form", "status"])?;
     let tin = tin_filter(arguments)?
@@ -1144,7 +1144,7 @@ fn drafts_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, St
     ))
 }
 
-/// `bir_app_open {app: "forms", tin?, form?, period?, action?, draft_id?}`:
+/// `ebirforms_app_open {app: "forms", tin?, form?, period?, action?, draft_id?}`:
 /// asks the Bot to open the Forms app, on one taxpayer (a ticket) and
 /// optionally one return.
 fn app_open(
@@ -1249,7 +1249,7 @@ fn app_open(
     }))
 }
 
-/// `bir_resolve` (spec 9.2) for the `taxprofile` scope: a taxpayer or
+/// `ebirforms_resolve` (spec 9.2) for the `taxprofile` scope: a taxpayer or
 /// branch by name or TIN, as a ticket.
 fn resolve(app: &BirApp, arguments: &Map<String, Value>) -> Value {
     try_resolve(app, arguments).unwrap_or_else(|message| json!({ "result": "error", "message": message.chars().take(200).collect::<String>() }))
@@ -1425,7 +1425,7 @@ fn empty_schema() -> Value {
 }
 
 fn tool_list() -> Value {
-    let ticket = json!({ "type": "string", "description": "The taxpayer's ticket (tkt_...) from bir_profiles_list or an @bir:taxprofile token." });
+    let ticket = json!({ "type": "string", "description": "The taxpayer's ticket (tkt_...) from ebirforms_profiles_list or an @bir:taxprofile token." });
     let mut tools = vec![
         tool(
             STATUS,
@@ -1506,7 +1506,7 @@ fn tool_list() -> Value {
         ),
         tool(
             FORM_FILL,
-            "Fill boxes of the open return: `fields` maps official box keys (from bir_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.",
+            "Fill boxes of the open return: `fields` maps official box keys (from ebirforms_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.",
             json!({
                 "type": "object",
                 "properties": {

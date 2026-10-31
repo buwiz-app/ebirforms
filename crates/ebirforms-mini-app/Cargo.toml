@@ -10,6 +10,17 @@ publish.workspace = true
 name = "ebirforms-mini-app"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
+[[test]]
+name = "mcp_contract"
+path = "../../tests/mcp_contract.rs"
+
+[[test]]
+name = "own_data"
+path = "../../tests/own_data.rs"
+
 [dependencies]
 bir-app-core.workspace = true
 serde_json.workspace = true

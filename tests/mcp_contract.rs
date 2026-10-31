@@ -3,6 +3,8 @@
 //! shapes it gets back. One test: the database handle and the key are
 //! process-wide.
 
+#![allow(unsafe_code)] // the test sets the process env, as main does
+
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -107,7 +109,7 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(init["result"]["serverInfo"]["name"], "ebirforms-mini-app");
     assert!(init["result"]["capabilities"]["resources"].is_object());
     assert_eq!(
-        bot.send("tools/call", json!({ "name": "bir_status" }))["error"]["code"],
+        bot.send("tools/call", json!({ "name": "ebirforms_status" }))["error"]["code"],
         -32600
     );
     assert_eq!(
@@ -160,23 +162,25 @@ fn the_bot_contract_over_a_scratch_database() {
             .unwrap_or_else(|| panic!("no {name}"))
     };
     assert!(
-        tools.iter().all(|tool| tool["name"] != "bir_form_send"),
+        tools
+            .iter()
+            .all(|tool| tool["name"] != "ebirforms_form_send"),
         "no sending from the mini app"
     );
     for name in [
-        "bir_status",
-        "bir_profiles_list",
-        "bir_form_open",
-        "bir_app_open",
-        "bir_resolve",
+        "ebirforms_status",
+        "ebirforms_profiles_list",
+        "ebirforms_form_open",
+        "ebirforms_app_open",
+        "ebirforms_resolve",
     ] {
         assert!(tool(name)["_meta"].is_null(), "{name} is the assistant's");
     }
     for name in [
-        "bir_app_screen_form_open",
-        "bir_app_screen_form_save",
-        "bir_ticket_subject",
-        "bir_app_print_preview",
+        "ebirforms_app_screen_form_open",
+        "ebirforms_app_screen_form_save",
+        "ebirforms_ticket_subject",
+        "ebirforms_app_print_preview",
     ] {
         assert_eq!(
             tool(name)["_meta"]["rox/audience"],
@@ -185,11 +189,11 @@ fn the_bot_contract_over_a_scratch_database() {
         );
     }
     assert_eq!(
-        tool("bir_app_screen_form_validate")["annotations"]["readOnlyHint"],
+        tool("ebirforms_app_screen_form_validate")["annotations"]["readOnlyHint"],
         true
     );
     assert_eq!(
-        tool("bir_app_screen_form_save")["annotations"]["readOnlyHint"],
+        tool("ebirforms_app_screen_form_save")["annotations"]["readOnlyHint"],
         false
     );
     let resources = bot.send("resources/list", json!({}))["result"]["resources"].clone();
@@ -213,7 +217,7 @@ fn the_bot_contract_over_a_scratch_database() {
         bot.send("resources/read", json!({ "uri": "rox-app://forms" }))["result"]["contents"][0]
             .clone();
     assert_eq!(forms["mimeType"], "text/x-nsh-tsx");
-    assert!(forms["text"].as_str().unwrap().contains("bir_app_"));
+    assert!(forms["text"].as_str().unwrap().contains("ebirforms_app_"));
     assert!(
         bot.send("resources/read", json!({ "uri": "file:///etc/passwd" }))["error"].is_object()
     );
@@ -226,7 +230,7 @@ fn the_bot_contract_over_a_scratch_database() {
         if let Some(function) = tool
             .as_str()
             .unwrap()
-            .strip_prefix("bir_app_")
+            .strip_prefix("ebirforms_app_")
             .filter(|f| *f != "print_preview")
         {
             assert!(
@@ -237,11 +241,11 @@ fn the_bot_contract_over_a_scratch_database() {
     }
 
     // the assistant: taxpayers as tickets, never TINs
-    let status = bot.agent("bir_status", json!({}));
+    let status = bot.agent("ebirforms_status", json!({}));
     let status = result_of(&status).clone();
     assert_eq!(status["taxpayers"], 2, "{status}");
     assert_eq!(status["writable"], true, "the app is not running");
-    let listed = bot.agent("bir_profiles_list", json!({}));
+    let listed = bot.agent("ebirforms_profiles_list", json!({}));
     let text = listed["content"][0]["text"].as_str().unwrap();
     assert!(
         !text.contains(ROOT) && !text.contains(OTHER),
@@ -267,7 +271,7 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     let resolved = bot.call_as(
         json!({ "origin": "resolve" }),
-        "bir_resolve",
+        "ebirforms_resolve",
         json!({ "kind": "scope", "name": "taxprofile", "value": "juana" }),
     );
     assert_eq!(
@@ -276,7 +280,7 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     let choices = bot.call_as(
         json!({ "origin": "resolve" }),
-        "bir_resolve",
+        "ebirforms_resolve",
         json!({ "kind": "scope", "name": "taxprofile", "value": "", "complete": true }),
     );
     assert_eq!(
@@ -290,14 +294,14 @@ fn the_bot_contract_over_a_scratch_database() {
     // a resolve call never writes
     let refused = bot.call_as(
         json!({ "origin": "resolve" }),
-        "bir_form_save_draft",
+        "ebirforms_form_save_draft",
         json!({}),
     );
     assert_eq!(refused["structuredContent"]["code"], "permission_denied");
 
     // the assistant cannot call the app's tools
     let refused = bot.agent(
-        "bir_app_list_tax_years",
+        "ebirforms_app_list_tax_years",
         json!({ "args": [tin], "ticket": ticket }),
     );
     assert_eq!(
@@ -305,8 +309,8 @@ fn the_bot_contract_over_a_scratch_database() {
         "{refused}"
     );
 
-    // bir_app_open hands the Bot the Forms app on a return's ticket
-    let opened = bot.agent("bir_app_open", json!({ "app": "forms", "tin": ticket, "form": "2551Q", "period": "2026-Q3", "action": "file" }));
+    // ebirforms_app_open hands the Bot the Forms app on a return's ticket
+    let opened = bot.agent("ebirforms_app_open", json!({ "app": "forms", "tin": ticket, "form": "2551Q", "period": "2026-Q3", "action": "file" }));
     let open = &opened["_meta"]["rox/open"];
     assert_eq!(open["app"], "forms", "{opened}");
     assert_eq!(open["placement"], "full");
@@ -343,15 +347,18 @@ fn the_bot_contract_over_a_scratch_database() {
     let forms_app = json!({ "origin": "app", "app": "forms", "open_id": open_id });
     let stranger = json!({ "origin": "app", "app": "forms", "open_id": b64(&[9u8; 16]) });
     assert_eq!(
-        bot.call_as(stranger, "bir_ticket_subject", json!({ "ticket": ticket }))["structuredContent"]
-            ["code"],
+        bot.call_as(
+            stranger,
+            "ebirforms_ticket_subject",
+            json!({ "ticket": ticket })
+        )["structuredContent"]["code"],
         "permission_denied"
     );
 
     // the app learns its ticket's subject, and is held to it
     let subject = bot.call_as(
         forms_app.clone(),
-        "bir_ticket_subject",
+        "ebirforms_ticket_subject",
         json!({ "ticket": return_ticket }),
     );
     let subject = result_of(&subject).clone();
@@ -360,13 +367,13 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(subject["form"], "2551Q");
     let years = bot.call_as(
         forms_app.clone(),
-        "bir_app_list_tax_years",
+        "ebirforms_app_list_tax_years",
         json!({ "args": [tin], "ticket": ticket }),
     );
     assert_eq!(years["isError"], false, "{years}");
     let other = bot.call_as(
         forms_app.clone(),
-        "bir_app_list_tax_years",
+        "ebirforms_app_list_tax_years",
         json!({ "args": [other_tin], "ticket": ticket }),
     );
     assert!(
@@ -375,13 +382,13 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     let no_ticket = bot.call_as(
         forms_app.clone(),
-        "bir_app_list_tax_years",
+        "ebirforms_app_list_tax_years",
         json!({ "args": [tin] }),
     );
     assert!(error_text(&no_ticket).contains("ticket"));
     let rows = bot.call_as(
         forms_app.clone(),
-        "bir_app_list_taxpayers",
+        "ebirforms_app_list_taxpayers",
         json!({ "ticket": ticket }),
     );
     let rows = result_of(&rows).as_array().unwrap().clone();
@@ -389,13 +396,13 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(rows[0]["ticket"], ticket);
     let payments = bot.call_as(
         forms_app.clone(),
-        "bir_payments_list",
+        "ebirforms_payments_list",
         json!({ "tin": ticket, "form": "2551Q", "period": "2026-Q3" }),
     );
     assert_eq!(result_of(&payments), &json!({ "payments": [] }));
     let opened = bot.call_as(
         forms_app.clone(),
-        "bir_app_screen_form_open",
+        "ebirforms_app_screen_form_open",
         json!({ "args_json": json!([tin, "2551Q", 2026, 3, null]).to_string(), "ticket": ticket }),
     );
     let draft = result_of(&opened)["draft"].clone();
@@ -403,7 +410,7 @@ fn the_bot_contract_over_a_scratch_database() {
 
     // the assistant drafts a return
     let form = bot.agent(
-        "bir_form_open",
+        "ebirforms_form_open",
         json!({ "code": "2551Q", "tin": ticket, "period": "2026-Q3" }),
     );
     let summary = result_of(&form).clone();
@@ -414,30 +421,32 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert_eq!(summary["year"], 2026);
     assert_eq!(summary["period"], 3);
-    let fields = bot.agent("bir_form_fields", json!({}));
+    let fields = bot.agent("ebirforms_form_fields", json!({}));
     assert!(
         result_of(&fields)["values"]
             .as_object()
             .is_some_and(|values| !values.is_empty()),
         "{fields}"
     );
-    let checked = bot.agent("bir_form_validate", json!({}));
+    let checked = bot.agent("ebirforms_form_validate", json!({}));
     assert!(result_of(&checked)["field_errors"].is_array(), "{checked}");
-    assert!(error_text(&bot.agent("bir_form_fill", json!({ "fields": {} }))).contains("fields"));
+    assert!(
+        error_text(&bot.agent("ebirforms_form_fill", json!({ "fields": {} }))).contains("fields")
+    );
     let filled = bot.agent(
-        "bir_form_fill",
+        "ebirforms_form_fill",
         json!({ "fields": { "no-such-box": "1.00" }, "source": "document" }),
     );
     assert_eq!(filled["isError"], false, "{filled}");
     // unsaved edits keep it open
-    assert!(error_text(&bot.agent("bir_form_dismiss", json!({}))).contains("unsaved"));
+    assert!(error_text(&bot.agent("ebirforms_form_dismiss", json!({}))).contains("unsaved"));
 
     // another process of this mini app saving: refused for that moment
     let held = bir_app_core::bir_core::db::try_acquire_live_owner_lock(&path).unwrap();
-    let status = bot.agent("bir_status", json!({}));
+    let status = bot.agent("ebirforms_status", json!({}));
     assert_eq!(result_of(&status)["writable"], false);
     assert_eq!(result_of(&status)["sending"], false);
-    let refused = bot.agent("bir_form_save_draft", json!({}));
+    let refused = bot.agent("ebirforms_form_save_draft", json!({}));
     assert!(
         error_text(&refused).contains("Another eBIRForms mini app process"),
         "{refused}"
@@ -445,11 +454,14 @@ fn the_bot_contract_over_a_scratch_database() {
     drop(held);
 
     // let go: saving goes through
-    let saved = bot.agent("bir_form_save_draft", json!({}));
+    let saved = bot.agent("ebirforms_form_save_draft", json!({}));
     let saved = result_of(&saved).clone();
     assert_eq!(saved["saved"], true, "{saved}");
     let draft_id = saved["id"].as_i64().expect("a saved id");
-    let drafts = bot.agent("bir_drafts_list", json!({ "tin": ticket, "status": "all" }));
+    let drafts = bot.agent(
+        "ebirforms_drafts_list",
+        json!({ "tin": ticket, "status": "all" }),
+    );
     let drafts = result_of(&drafts).as_array().unwrap().clone();
     assert!(
         drafts
@@ -462,7 +474,7 @@ fn the_bot_contract_over_a_scratch_database() {
     // nothing is queued or sent from the mini app
     let queued = bot.call_as(
         forms_app.clone(),
-        "bir_app_queue_form_draft",
+        "ebirforms_app_queue_form_draft",
         json!({ "args": [tin, "2551Q", 2026, 1], "ticket": ticket }),
     );
     assert!(
@@ -471,7 +483,7 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     let gone = bot.call_as(
         forms_app.clone(),
-        "bir_app_grant_send",
+        "ebirforms_app_grant_send",
         json!({ "args": [tin, "2551Q"], "ticket": ticket }),
     );
     assert_eq!(gone["isError"], true, "{gone}");
@@ -479,7 +491,7 @@ fn the_bot_contract_over_a_scratch_database() {
     // the print preview of the saved return, for the Bot's document view
     let preview = bot.call_as(
         forms_app.clone(),
-        "bir_app_print_preview",
+        "ebirforms_app_print_preview",
         json!({ "ticket": ticket, "form": "2551Q", "draft_id": draft_id }),
     );
     assert_eq!(preview["isError"], false, "{preview}");
@@ -493,7 +505,7 @@ fn the_bot_contract_over_a_scratch_database() {
 
     // dismissed after saving; rox.uninstall forgets every ticket
     assert_eq!(
-        result_of(&bot.agent("bir_form_dismiss", json!({})))["dismissed"],
+        result_of(&bot.agent("ebirforms_form_dismiss", json!({})))["dismissed"],
         true
     );
     assert_eq!(

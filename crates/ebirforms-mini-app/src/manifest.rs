@@ -4,7 +4,7 @@
 //! [`unsigned`] builds it from this build's code and the app source it
 //! serves: the fingerprint is the SHA-256 of the exact bytes
 //! `resources/read` answers, so manifest and app cannot drift.
-//! `ebirforms-mini-app print-manifest` prints it for signing with the publisher key
+//! `ebirforms-mini-app manifest` prints it for signing with the publisher key
 //! (outside this repo). The signed file is what this process serves, byte
 //! for byte, read on every request: `EBIRFORMS_MANIFEST`, else
 //! `app.buwiz.ebirforms.manifest.json` next to the executable. Without one
@@ -42,15 +42,15 @@ pub const MANIFEST_FILE: &str = "app.buwiz.ebirforms.manifest.json";
 pub(crate) const FORMS_ID: &str = "forms";
 pub(crate) const FORMS_TITLE: &str = "BIR Forms";
 pub(crate) const FORMS_DESCRIPTION: &str = "Prepare, check and queue a taxpayer's BIR returns: pick a form and period, fill it, validate it with the official rules, save the draft, and queue it for filing.";
-pub(crate) const FORMS_SOURCE: &str = include_str!("../mini-apps/forms.tsx");
+pub(crate) const FORMS_SOURCE: &str = include_str!("../../../apps/ebirforms/forms.tsx");
 pub(crate) const APP_URI_PREFIX: &str = "rox-app://";
 pub(crate) const APP_MIME: &str = "text/x-nsh-tsx";
 
 /// What the agent is told when a taxpayer token is in a message or attached.
 const TAXPROFILE_HINT: &str = "An `@bir:taxprofile:<ticket>` token names one taxpayer; the \
 ticket stands for its TIN, which you never see. Attached to this chat, eBIRForms tools default to \
-that taxpayer: pass the ticket as `tin` to bir_drafts_list, bir_dues_list, bir_form_open and \
-bir_app_open (forms), unless the user names another taxpayer. bir_profiles_list lists the \
+that taxpayer: pass the ticket as `tin` to ebirforms_drafts_list, ebirforms_dues_list, ebirforms_form_open and \
+ebirforms_app_open (forms), unless the user names another taxpayer. ebirforms_profiles_list lists the \
 taxpayers (as tickets).";
 
 /// `sha256:<hex>` of an app source as served.
@@ -59,7 +59,7 @@ pub(crate) fn fingerprint(source: &str) -> String {
 }
 
 /// The tools the Forms app calls: the ticket helpers, the print preview,
-/// the (empty) payments list and one `bir_app_<function>` per function.
+/// the (empty) payments list and one `ebirforms_app_<function>` per function.
 pub(crate) fn forms_tools() -> Vec<String> {
     let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, PAYMENTS_LIST]
         .iter()
@@ -106,8 +106,22 @@ pub(crate) fn forms_entry() -> Value {
     })
 }
 
-/// The manifest without its signature.
+/// The publisher key the release manifest names.
+pub const RELEASE_KEY_ID: &str = "gc-2026-01";
+
+/// The manifest without its signature, under the release key.
 pub fn unsigned() -> Value {
+    unsigned_for(RELEASE_KEY_ID)
+}
+
+/// The source of the app `id`, exactly as `resources/read` serves it.
+pub fn app_source(id: &str) -> Option<&'static str> {
+    (id == FORMS_ID).then_some(FORMS_SOURCE)
+}
+
+/// The manifest without its signature, naming publisher key `key_id` (a
+/// test key for conformance; the release key otherwise).
+pub fn unsigned_for(key_id: &str) -> Value {
     json!({
         "protocol": PROTOCOL,
         "id": PLUGIN_ID,
@@ -115,7 +129,7 @@ pub fn unsigned() -> Value {
         "version": VERSION,
         "title": "eBIRForms",
         "description": "Philippine BIR returns for the taxpayers kept in the eBIRForms mini app on this computer.",
-        "publisher": { "id": "app.buwiz", "key_id": "gc-2026-01", "name": "Buwiz" },
+        "publisher": { "id": "app.buwiz", "key_id": key_id, "name": "Buwiz" },
         "commands": [],
         "scopes": [
             { "name": "taxprofile", "description": "Taxpayer by TIN or name", "resolve": RESOLVE, "attach": true, "hint": TAXPROFILE_HINT },
@@ -198,7 +212,7 @@ impl ManifestSource {
             map.remove("signature");
         }
         (jcs::canonical(&body).ok() != jcs::canonical(&unsigned()).ok()).then(|| {
-            "the signed manifest is not this build's (its app or tools changed): print it with `ebirforms-mini-app print-manifest` and sign it again".to_string()
+            "the signed manifest is not this build's (its app or tools changed): print it with `ebirforms-mini-app manifest` and sign it again".to_string()
         })
     }
 }
@@ -232,7 +246,7 @@ mod tests {
         assert!(
             tools
                 .iter()
-                .all(|tool| tool.as_str().is_some_and(|t| t.starts_with("bir_")))
+                .all(|tool| tool.as_str().is_some_and(|t| t.starts_with("ebirforms_")))
         );
         // integers only, so it can be signed, and under 256 KiB
         assert!(jcs::canonical(&m).unwrap().len() < 256 * 1024);

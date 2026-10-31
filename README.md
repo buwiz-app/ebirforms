@@ -5,9 +5,14 @@ An MCP server on stdio that the Bot spawns.
 
 ## Layout
 
+The same layout as every mini app in the `buwiz-app` org (Books is the reference):
+
 | Path | What |
 |---|---|
-| `crates/ebirforms-mini-app/` | The mini app: MCP server, manifest and signing, tickets, TIN scrubbing, the Forms app (`mini-apps/forms.tsx`). It began as `buwiz-mcp` (eBIRForms `feat/mcp-mode` @ `f0d5afa`) and keeps that history. |
+| `crates/ebirforms-mini-app/` | The mini app: MCP server, manifest and signing, tickets, TIN scrubbing. It began as `buwiz-mcp` (eBIRForms `feat/mcp-mode` @ `f0d5afa`) and keeps that history. |
+| `apps/ebirforms/` | The app screens (`forms.tsx`). |
+| `tests/` | Integration tests (the Bot contract, own data). |
+| `tools/` | `check-all.sh` (every gate), `rox/conformance.sh`, `release/prepare.sh`. |
 | `legacy/` | The first mini app, from `hexuria/buwiz-forms` branch `rox-mini-app-round2` @ `834e7203`, with its history. It is the reference for porting the remaining 12 apps and cards; it does not build here and is deleted once ported. |
 
 It builds on eBIRForms' domain crates (`bir-app-core`, pinned by commit in the root `Cargo.toml`). Only the
@@ -29,7 +34,8 @@ queued or sent (sending would need the desktop's keychain entries).
 
 ```
 cargo build --release
-target/release/ebirforms-mini-app print-manifest   # the unsigned manifest, for signing
+target/release/ebirforms-mini-app manifest         # the unsigned manifest, for signing
+tools/check-all.sh                                 # every gate
 target/release/ebirforms-mini-app mcp              # what the Bot runs
 ```
 

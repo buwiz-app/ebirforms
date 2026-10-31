@@ -7,7 +7,10 @@ use ebirforms_mini_app::owner;
 const USAGE: &str = "ebirforms-mini-app: the eBIRForms mini app (app.buwiz.ebirforms), the MCP server the Buwiz Bot spawns.
 
 Usage: ebirforms-mini-app mcp              speak MCP (JSON-RPC 2.0, one message per line) on stdin/stdout
-       ebirforms-mini-app print-manifest   print this build's unsigned manifest, for signing
+       ebirforms-mini-app manifest [--key-id <id>]
+                                           print this build's unsigned manifest, for signing
+                                           (key id gc-2026-01 unless a test key is named)
+       ebirforms-mini-app app-source <id>  print an app's source exactly as it is served
        ebirforms-mini-app --version
        ebirforms-mini-app --help
 
@@ -30,14 +33,18 @@ fn main() -> ExitCode {
         .as_slice()
     {
         ["mcp"] => run(),
-        ["print-manifest"] => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&ebirforms_mini_app::manifest::unsigned())
-                    .expect("json value")
-            );
-            ExitCode::SUCCESS
-        }
+        ["manifest"] => print_manifest(ebirforms_mini_app::manifest::RELEASE_KEY_ID),
+        ["manifest", "--key-id", key_id] => print_manifest(key_id),
+        ["app-source", id] => match ebirforms_mini_app::manifest::app_source(id) {
+            Some(source) => {
+                print!("{source}");
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("no app `{id}`");
+                ExitCode::from(2)
+            }
+        },
         ["--version" | "-V"] => {
             println!("ebirforms-mini-app {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -57,6 +64,16 @@ fn main() -> ExitCode {
     }
 }
 
+fn print_manifest(key_id: &str) -> ExitCode {
+    let manifest = ebirforms_mini_app::manifest::unsigned_for(key_id);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&manifest).expect("json value")
+    );
+    ExitCode::SUCCESS
+}
+
+#[allow(unsafe_code)]
 fn run() -> ExitCode {
     // SAFETY: first thing in the process, before any other thread starts.
     let database = unsafe { owner::prepare(&owner::data_dir()) };

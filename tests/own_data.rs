@@ -1,6 +1,8 @@
 //! The mini app keeps its own data: its own folder, its own key file, no
 //! keychain, and a database it makes itself.
 
+#![allow(unsafe_code)] // the test sets the process env, as main does
+
 use std::sync::Arc;
 
 use bir_app_core::BirApp;

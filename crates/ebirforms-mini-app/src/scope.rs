@@ -1,4 +1,4 @@
-//! The Forms app's host calls (`bir_app_<function>`): which `BirApp`
+//! The Forms app's host calls (`ebirforms_app_<function>`): which `BirApp`
 //! functions it may call, and how each is held to the ticket it was opened
 //! with (one taxpayer's 9-digit TIN root).
 //!
@@ -42,7 +42,7 @@ pub(crate) enum Access {
     Queue,
 }
 
-/// The functions the Forms app calls (read off `mini-apps/forms.tsx`), with
+/// The functions the Forms app calls (read off `apps/ebirforms/forms.tsx`), with
 /// their rule and access.
 pub(crate) static FORMS: &[(&str, Rule, Access)] = &[
     ("screen_form_schema", Rule::Free, Access::Read),

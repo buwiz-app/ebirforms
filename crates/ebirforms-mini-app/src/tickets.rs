@@ -6,7 +6,7 @@
 //! the mini app's own (encrypted) settings, so it survives restarts and never
 //! leaves this process: the Bot learns a title only (`rox.ticket.resolve`),
 //! and an app learns the TIN of a ticket only by asking with that ticket
-//! (`bir_ticket_subject`). One subject has one ticket.
+//! (`ebirforms_ticket_subject`). One subject has one ticket.
 //!
 //! Subjects are a taxpayer (its 9-digit root), one branch (14 digits) or
 //! one return (`<tin>/<FORM>-<period>`). Every subject's scope is its TIN
@@ -133,7 +133,7 @@ impl Subject {
     }
 
     /// Kind and fields, for the app that holds the ticket
-    /// (`bir_ticket_subject`). Apps show the TIN to the user; the model
+    /// (`ebirforms_ticket_subject`). Apps show the TIN to the user; the model
     /// never sees this.
     pub(crate) fn describe(&self, today: NaiveDate) -> Value {
         let mut out = Map::new();

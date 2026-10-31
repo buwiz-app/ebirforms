@@ -2,9 +2,9 @@
 // the ways into it (main.js / home.js / taxpayer.js / library.js), as one
 // Native Shell module. Opened full screen by Rox for ONE taxpayer branch:
 // `rox.props.ticket`, a ticket BIR issued for the branch or one of its
-// returns. The app asks BIR what the ticket stands for (`bir_ticket_subject`)
+// returns. The app asks BIR what the ticket stands for (`ebirforms_ticket_subject`)
 // and every host call goes through Rox's bridge to BIR's named tool for that
-// function (`bir_app_<fn>`), held to the ticket. Rox's `/taxform` opens it on
+// function (`ebirforms_app_<fn>`), held to the ticket. Rox's `/taxform` opens it on
 // one return (`{ticket, form, period, action, draft_id?}`): `view`
 // read-only, `file` to fill, `submit` to validate and confirm with the
 // user's own Submit. The schema-driven renderer covers all 43 forms the way
@@ -22,7 +22,7 @@ const typed = (e: { value: string } | string): string => (typeof e === "string" 
 // =====================================================================
 // HOST CALLS: every call to the BIR daemon (and Rox) lives in this section.
 // Names, argument order and result shapes follow the DECLARATIONS in
-// crates/bir-shell/src/{bir_module,screen_form_module,tax_profile_module,
+// crates/bir-shell/src/{ebirforms_module,screen_form_module,tax_profile_module,
 // dashboard_module}.rs.
 // =====================================================================
 
@@ -39,16 +39,16 @@ type RoxProps = {
 const roxProps = (): RoxProps => (rox.props || {}) as RoxProps;
 const digits = (v: unknown) => String(v ?? "").replace(/\D/g, "");
 
-/** What BIR says the props' ticket stands for (`bir_ticket_subject`). */
+/** What BIR says the props' ticket stands for (`ebirforms_ticket_subject`). */
 type Subject = { kind: "taxpayer" | "branch" | "return"; tin: string; form?: string; period?: string; title: string };
 const subject = signal<Subject | null>(null);
 /** The branch's own ticket: what every call is held to and what tools take as `tin`. */
 let BRANCH = "";
 
-/** One BIR host function through its named tool (`bir_app_<fn>`), held to the branch's ticket. */
+/** One BIR host function through its named tool (`ebirforms_app_<fn>`), held to the branch's ticket. */
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
   // a signed call carries whole numbers only: the arguments (a draft's amounts) go as JSON text
-  const r: any = await rox.call(`bir_app_${fn}`, BRANCH ? { args_json: JSON.stringify(args), ticket: BRANCH } : { args_json: JSON.stringify(args) });
+  const r: any = await rox.call(`ebirforms_app_${fn}`, BRANCH ? { args_json: JSON.stringify(args), ticket: BRANCH } : { args_json: JSON.stringify(args) });
   return r?.result as T;
 }
 
@@ -75,7 +75,7 @@ const RECEIPTS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
 const CHUNK = 180 * 1024;
 
 /**
- * Rox's file picker: the receipt the user chose, sent to BIR in chunks (`bir_app_upload`).
+ * Rox's file picker: the receipt the user chose, sent to BIR in chunks (`ebirforms_app_upload`).
  * `null` when cancelled. The app never sees a path.
  */
 async function pickReceipt(): Promise<{ upload: string; name: string } | null> {
@@ -86,7 +86,7 @@ async function pickReceipt(): Promise<{ upload: string; name: string } | null> {
   let upload = "";
   let at = 0;
   do {
-    const r: any = await rox.call("bir_app_upload", { ...(upload ? { upload } : {}), data: base64(bytes.subarray(at, at + CHUNK)) });
+    const r: any = await rox.call("ebirforms_app_upload", { ...(upload ? { upload } : {}), data: base64(bytes.subarray(at, at + CHUNK)) });
     upload = String(r?.result?.upload || "");
     at += CHUNK;
   } while (at < bytes.length);
@@ -128,15 +128,15 @@ const H = {
   queuePeriod: (tin: string, code: string, year: number, quarter: number | null) => bir<number>("queue_form_draft", tin, code, year, quarter),
   cancelQueued: (tin: string, code: string, year: number, quarter: number | null) => bir<null>("cancel_queued", tin, code, year, quarter),
   // payments and the printable filing record (the server's own tools)
-  payments: (form: string, period: string) => tool<{ payments: Payment[] }>("bir_payments_list", { tin: BRANCH, form, period }),
+  payments: (form: string, period: string) => tool<{ payments: Payment[] }>("ebirforms_payments_list", { tin: BRANCH, form, period }),
   recordPayment: (form: string, period: string, d: { paid_at: string; amount: string; channel: string; reference: string }) =>
-    tool<{ payment: Payment }>("bir_record_payment", {
+    tool<{ payment: Payment }>("ebirforms_record_payment", {
       tin: BRANCH, form, period, channel: d.channel, amount: d.amount, paid_at: d.paid_at,
       ...(d.reference.trim() ? { reference: d.reference.trim() } : {}),
     }),
-  removePayment: (form: string, period: string, id: string) => tool<{ removed: boolean }>("bir_card_remove_payment", { tin: BRANCH, form, period, id }),
+  removePayment: (form: string, period: string, id: string) => tool<{ removed: boolean }>("ebirforms_card_remove_payment", { tin: BRANCH, form, period, id }),
   markPaid: (form: string, period: string, proof?: { upload: string; name: string }) =>
-    tool<{ payment: Payment }>("bir_mark_paid", proof ? { tin: BRANCH, form, period, proof_upload: proof.upload, proof_name: proof.name } : { tin: BRANCH, form, period }),
+    tool<{ payment: Payment }>("ebirforms_mark_paid", proof ? { tin: BRANCH, form, period, proof_upload: proof.upload, proof_name: proof.name } : { tin: BRANCH, form, period }),
 };
 
 // =====================================================================
@@ -158,7 +158,7 @@ type DateSpec = { single?: Field; month?: Field; day?: Field | null; year?: Fiel
 type Pen = { keys: string[]; edited: boolean; kept?: boolean; applies: boolean };
 type Err = { field: string; message: string; keys?: string[]; dismiss?: string; dismiss_label?: string };
 type PeriodPart = { key: string; part: string; quarter: number | null };
-/** A recorded payment (bir_payments_list). `channel` "manual" is "marked paid" with no details. */
+/** A recorded payment (ebirforms_payments_list). `channel` "manual" is "marked paid" with no details. */
 type Payment = {
   id: string; channel: string; reference: string; amount: number | null; fee: number | null; total: number | null;
   paid_at: string | null; recorded_at: string; source: "email" | "receipt" | "manual"; proof: { kind: string; name?: string | null };
@@ -1580,7 +1580,7 @@ async function cancelQueue(s: FS) {
   }
 }
 
-/** Print preview: BIR fills the return's print sheet (`bir_app_print_preview`) and Rox shows it over this app
+/** Print preview: BIR fills the return's print sheet (`ebirforms_app_print_preview`) and Rox shows it over this app
  *  with Print (the macOS print panel, which also saves a PDF) and Close; the page never comes through here. A
  *  sample previews as the page holds it (staged edits, held boxes blank); a return is saved first and prints as
  *  stored; a sent or queued return shows its filing record. A Rox without `rox.preview` gets today's note. */
@@ -1590,7 +1590,7 @@ async function print(s: FS) {
     s.printResult = { sample: !!s.sample, error: "Print preview is not available in Rox yet. Print this return from BIR on the desktop, or ask the assistant for its filing record." };
     return bump();
   }
-  const preview = (args: Record<string, unknown>) => rox.preview({ tool: "bir_app_print_preview", args: { ticket: BRANCH, form: s.code, ...args } });
+  const preview = (args: Record<string, unknown>) => rox.preview({ tool: "ebirforms_app_print_preview", args: { ticket: BRANCH, form: s.code, ...args } });
   try {
     if (s.sample) {
       const pending = s.pending;
@@ -1645,9 +1645,9 @@ async function removePayment(s: FS, id: string) {
 }
 
 /** The return's receipt (every payment and its proof: the receipt file or the payment email) in Rox's document
- *  view, made by BIR (`bir_payment_receipt`). */
+ *  view, made by BIR (`ebirforms_payment_receipt`). */
 function viewReceipt(s: FS) {
-  rox.preview({ tool: "bir_payment_receipt", args: { tin: BRANCH, form: s.code, period: tokenPeriod(s) } }).catch((e) => toast(errText(e), "danger"));
+  rox.preview({ tool: "ebirforms_payment_receipt", args: { tin: BRANCH, form: s.code, period: tokenPeriod(s) } }).catch((e) => toast(errText(e), "danger"));
 }
 
 /** The payment email in Gmail, for a payment recorded from one ("" otherwise). */
@@ -1667,7 +1667,7 @@ function paymentLine(p: Payment): string {
 }
 
 /** "Mark as paid": the payment's details when the user gives them (date, amount, channel such as MyEG,
- *  reference: `bir_record_payment`), else on the user's word alone (`bir_mark_paid`). A receipt can be
+ *  reference: `ebirforms_record_payment`), else on the user's word alone (`ebirforms_mark_paid`). A receipt can be
  *  attached later. */
 async function markPaid(s: FS) {
   const d = s.payForm;
@@ -3578,10 +3578,10 @@ const opening = signal("");
 /** What the props' ticket stands for, from BIR; a return's ticket also gets its branch's own ticket. */
 async function openTicket(ticket: string) {
   try {
-    const r: any = await rox.call("bir_ticket_subject", { ticket });
+    const r: any = await rox.call("ebirforms_ticket_subject", { ticket });
     const s = r?.result as Subject;
     if (s.kind === "return") {
-      const issued: any = await rox.call("bir_ticket_issue", { ticket, tin: s.tin });
+      const issued: any = await rox.call("ebirforms_ticket_issue", { ticket, tin: s.tin });
       BRANCH = String(issued?.result?.ticket || "");
     } else BRANCH = ticket;
     subject.set(s);

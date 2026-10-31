@@ -8,6 +8,15 @@ edition = "2024"
 license = "MIT"
 publish = false
 
+[workspace.lints.rust]
+# Only owner::prepare may be unsafe (it sets the process env before any
+# thread starts); everything else stays safe.
+unsafe_code = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
 [workspace.dependencies]
 # eBIRForms' domain crates, pinned by commit (no tags or semver yet). Only
 # bir-app-core's BirApp facade is a supported surface; bir-core is reached

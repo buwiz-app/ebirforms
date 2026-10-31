@@ -83,6 +83,7 @@ fn home() -> PathBuf {
 ///
 /// Sets process environment variables, so call it before any other thread
 /// starts (first thing in `main`, or in a test before the server opens).
+#[allow(unsafe_code)]
 pub unsafe fn prepare(dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|error| {
         format!(
@@ -145,7 +146,7 @@ pub(crate) fn acquire(path: &Path) -> Result<OwnerLock, String> {
     }
 }
 
-/// Whether a write would get the lock now (for `bir_status`); the lock is
+/// Whether a write would get the lock now (for `ebirforms_status`); the lock is
 /// let go again at once.
 pub(crate) fn writable(path: &Path) -> bool {
     try_acquire_live_owner_lock(path).is_ok()
