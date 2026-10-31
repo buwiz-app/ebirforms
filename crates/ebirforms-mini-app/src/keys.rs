@@ -1,8 +1,8 @@
-//! The plugin key the Bot provisions (Mini App Protocol v1, spec 4.3) and
+//! The plugin key the Bot provisions (Mini App Protocol 2.0, spec 4.3) and
 //! the session certificates it signs (4.4).
 //!
 //! The Bot generates one ed25519 key per install and sends its seed as the
-//! first request of every spawn (`rox.provision`). The seed lives in this
+//! first request of every spawn (`buwiz.provision`). The seed lives in this
 //! struct and nowhere else: it is never written, logged, echoed or put in an
 //! error message (P4), and `Debug` is not derived so a stray `{:?}` cannot
 //! print it. The key signs certificates only; bridge calls are signed by the
@@ -36,7 +36,7 @@ pub(crate) struct PluginKey {
 }
 
 impl PluginKey {
-    /// `rox.provision`'s `key` and `pub`: the seed must be 32 bytes and
+    /// `buwiz.provision`'s `key` and `pub`: the seed must be 32 bytes and
     /// `pub` its public key. The error never quotes either.
     pub(crate) fn from_provision(arguments: &Map<String, Value>) -> Result<Self, String> {
         let key = arguments
@@ -78,7 +78,7 @@ impl PluginKey {
     }
 }
 
-/// `rox.session.open`'s request, checked: the certificate fields.
+/// `buwiz.session.open`'s request, checked: the certificate fields.
 pub(crate) struct OpenRequest {
     pub app: String,
     pub open_id: String,
@@ -125,7 +125,7 @@ impl OpenRequest {
     pub(crate) fn certificate(&self, plugin: &str) -> Value {
         json!({
             "v": 1,
-            "typ": "rox-session",
+            "typ": "buwiz-session",
             "plugin": plugin,
             "app": self.app,
             "open_id": self.open_id,
@@ -145,7 +145,7 @@ pub(crate) mod tests {
     pub(crate) fn provision_args(seed: [u8; 32]) -> Map<String, Value> {
         let public = b64url(SigningKey::from_bytes(&seed).verifying_key().as_bytes());
         json!({
-            "protocol": "1.0.0",
+            "protocol": "2.0.0",
             "plugin": crate::manifest::PLUGIN_ID,
             "key": {"alg": "ed25519", "seed": b64url(&seed)},
             "pub": public,
@@ -170,7 +170,7 @@ pub(crate) mod tests {
     #[test]
     fn a_provisioned_key_signs_what_its_public_key_verifies() {
         let key = PluginKey::from_provision(&provision_args([7; 32])).unwrap();
-        let cert = json!({"v": 1, "typ": "rox-session", "not_after": 5});
+        let cert = json!({"v": 1, "typ": "buwiz-session", "not_after": 5});
         let signature = key.sign(&cert).unwrap();
         assert!(verify(&key.public(), &cert, &signature));
         assert!(!verify(&key.public(), &json!({"v": 2}), &signature));

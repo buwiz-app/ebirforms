@@ -120,7 +120,7 @@ impl<'a> Scrubber<'a> {
         if let Some(structured) = result.get_mut("structuredContent") {
             self.value(structured);
         }
-        if let Some(props) = result.pointer_mut("/_meta/rox~1open/props") {
+        if let Some(props) = result.pointer_mut("/_meta/buwiz~1open/props") {
             self.value(props);
         }
         if let Some(contents) = result.get_mut("content").and_then(Value::as_array_mut) {

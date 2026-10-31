@@ -1,10 +1,10 @@
 // BIR Forms mini app: the bir-shell form page (app/shell/form_page.js) and
 // the ways into it (main.js / home.js / taxpayer.js / library.js), as one
-// Native Shell module. Opened full screen by Rox for ONE taxpayer branch:
-// `rox.props.ticket`, a ticket BIR issued for the branch or one of its
+// Native Shell module. Opened full screen by the Bot for ONE taxpayer branch:
+// `buwiz.props.ticket`, a ticket BIR issued for the branch or one of its
 // returns. The app asks BIR what the ticket stands for (`ebirforms_ticket_subject`)
-// and every host call goes through Rox's bridge to BIR's named tool for that
-// function (`ebirforms_app_<fn>`), held to the ticket. Rox's `/taxform` opens it on
+// and every host call goes through the Bot's bridge to BIR's named tool for that
+// function (`ebirforms_app_<fn>`), held to the ticket. The Bot's `/taxform` opens it on
 // one return (`{ticket, form, period, action, draft_id?}`): `view`
 // read-only, `file` to fill, `submit` to validate and confirm with the
 // user's own Submit. The schema-driven renderer covers all 43 forms the way
@@ -13,30 +13,30 @@
 
 import { signal, computed, untracked, Text, View, Scroll, Input } from "nsh";
 import type { YNode } from "nsh";
-import { rox } from "rox";
+import { buwiz } from "buwiz";
 
 /** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
  *  became objects (#558), the text itself before. */
 const typed = (e: { value: string } | string): string => (typeof e === "string" ? e : e.value);
 
 // =====================================================================
-// HOST CALLS: every call to the BIR daemon (and Rox) lives in this section.
+// HOST CALLS: every call to the BIR daemon (and the Bot) lives in this section.
 // Names, argument order and result shapes follow the DECLARATIONS in
 // crates/bir-shell/src/{ebirforms_module,screen_form_module,tax_profile_module,
 // dashboard_module}.rs.
 // =====================================================================
 
 /**
- * Set by Rox before the module runs (`rox.props`). `ticket` names the branch or one of its returns;
+ * Set by the Bot before the module runs (`buwiz.props`). `ticket` names the branch or one of its returns;
  * `form` + `period` (`2026-Q3`, `2026-01`, `2025`, `2026-10-26`) + `action` (+ `draft_id`) open one return
- * (Rox's `/taxform`); `form_code`/`year`/`period`/`key` deep-link to a return too.
+ * (the Bot's `/taxform`); `form_code`/`year`/`period`/`key` deep-link to a return too.
  */
-type RoxProps = {
+type FormsProps = {
   ticket?: string;
   form?: string; action?: "view" | "file" | "submit"; draft_id?: number | string | null;
   form_code?: string; year?: number | string; period?: number | string; key?: number | string | null;
 };
-const roxProps = (): RoxProps => (rox.props || {}) as RoxProps;
+const formsProps = (): FormsProps => (buwiz.props || {}) as FormsProps;
 const digits = (v: unknown) => String(v ?? "").replace(/\D/g, "");
 
 /** What BIR says the props' ticket stands for (`ebirforms_ticket_subject`). */
@@ -48,13 +48,13 @@ let BRANCH = "";
 /** One BIR host function through its named tool (`ebirforms_app_<fn>`), held to the branch's ticket. */
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
   // a signed call carries whole numbers only: the arguments (a draft's amounts) go as JSON text
-  const r: any = await rox.call(`ebirforms_app_${fn}`, BRANCH ? { args_json: JSON.stringify(args), ticket: BRANCH } : { args_json: JSON.stringify(args) });
+  const r: any = await buwiz.call(`ebirforms_app_${fn}`, BRANCH ? { args_json: JSON.stringify(args), ticket: BRANCH } : { args_json: JSON.stringify(args) });
   return r?.result as T;
 }
 
 /** One of the BIR server's own tools: the payments. `tin` there is the branch's ticket. */
 async function tool<T = any>(name: string, args: Record<string, unknown>): Promise<T> {
-  const r: any = await rox.call(name, args);
+  const r: any = await buwiz.call(name, args);
   return r?.result as T;
 }
 
@@ -75,26 +75,26 @@ const RECEIPTS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
 const CHUNK = 180 * 1024;
 
 /**
- * Rox's file picker: the receipt the user chose, sent to BIR in chunks (`ebirforms_app_upload`).
+ * The Bot's file picker: the receipt the user chose, sent to BIR in chunks (`ebirforms_app_upload`).
  * `null` when cancelled. The app never sees a path.
  */
 async function pickReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await rox.pickFile({ extensions: RECEIPTS, multiple: false });
+  const files = await buwiz.pickFile({ extensions: RECEIPTS, multiple: false });
   const file = files[0];
   if (!file) return null;
   const bytes = await file.read();
   let upload = "";
   let at = 0;
   do {
-    const r: any = await rox.call("ebirforms_app_upload", { ...(upload ? { upload } : {}), data: base64(bytes.subarray(at, at + CHUNK)) });
+    const r: any = await buwiz.call("ebirforms_app_upload", { ...(upload ? { upload } : {}), data: base64(bytes.subarray(at, at + CHUNK)) });
     upload = String(r?.result?.upload || "");
     at += CHUNK;
   } while (at < bytes.length);
   return { upload, name: file.name };
 }
 
-/** Attaches a return to the chat Rox opened this app from (the assistant reads it there). */
-const attachReturn = (s: FS) => rox.attach("taxform", `${BRANCH}/${s.code}-${tokenPeriod(s)}`);
+/** Attaches a return to the chat the Bot opened this app from (the assistant reads it there). */
+const attachReturn = (s: FS) => buwiz.attach("taxform", `${BRANCH}/${s.code}-${tokenPeriod(s)}`);
 
 type Edits = Record<string, string>;
 const H = {
@@ -168,9 +168,9 @@ type Payment = {
 interface Opts {
   tin: string; code: string; year: number; period: number;
   returnKey?: number | null; sample?: boolean; amend?: boolean; filedOriginalId?: number; back?: Opts;
-  /** Rox's `view`: every box read-only. */
+  /** The Bot's `view`: every box read-only. */
   viewOnly?: boolean;
-  /** Rox's `submit`: validate on open, then ask before the user's own Submit. */
+  /** The Bot's `submit`: validate on open, then ask before the user's own Submit. */
   submitAsk?: boolean;
 }
 
@@ -539,7 +539,7 @@ const TIN = () => digits(subject()?.tin);
 const ROOT = () => TIN().slice(0, 9);
 
 function openTaxProfile() {
-  rox.open({ app: "tax-profile", ticket: BRANCH, props: { ticket: BRANCH } }).catch((e) => toast(errText(e), "danger"));
+  buwiz.open({ app: "tax-profile", ticket: BRANCH, props: { ticket: BRANCH } }).catch((e) => toast(errText(e), "danger"));
 }
 
 // =====================================================================
@@ -1545,7 +1545,7 @@ function tokenPeriod(s: FS): string {
   return String(s.year);
 }
 
-/** "Ask the assistant": this return attached to the chat (Rox asks the user first). */
+/** "Ask the assistant": this return attached to the chat (the Bot asks the user first). */
 function askAssistant(s: FS) {
   attachReturn(s)
     .then(() => toast("Attached to the chat: ask the assistant about this return there.", "success"))
@@ -1580,17 +1580,17 @@ async function cancelQueue(s: FS) {
   }
 }
 
-/** Print preview: BIR fills the return's print sheet (`ebirforms_app_print_preview`) and Rox shows it over this app
+/** Print preview: BIR fills the return's print sheet (`ebirforms_app_print_preview`) and the Bot shows it over this app
  *  with Print (the macOS print panel, which also saves a PDF) and Close; the page never comes through here. A
  *  sample previews as the page holds it (staged edits, held boxes blank); a return is saved first and prints as
- *  stored; a sent or queued return shows its filing record. A Rox without `rox.preview` gets today's note. */
+ *  stored; a sent or queued return shows its filing record. A Bot without `buwiz.preview` gets today's note. */
 async function print(s: FS) {
   s.printResult = null;
-  if (!rox.preview) {
-    s.printResult = { sample: !!s.sample, error: "Print preview is not available in Rox yet. Print this return from BIR on the desktop, or ask the assistant for its filing record." };
+  if (!buwiz.preview) {
+    s.printResult = { sample: !!s.sample, error: "Print preview is not available in the Buwiz Bot yet. Print this return from BIR on the desktop, or ask the assistant for its filing record." };
     return bump();
   }
-  const preview = (args: Record<string, unknown>) => rox.preview({ tool: "ebirforms_app_print_preview", args: { ticket: BRANCH, form: s.code, ...args } });
+  const preview = (args: Record<string, unknown>) => buwiz.preview({ tool: "ebirforms_app_print_preview", args: { ticket: BRANCH, form: s.code, ...args } });
   try {
     if (s.sample) {
       const pending = s.pending;
@@ -1644,10 +1644,10 @@ async function removePayment(s: FS, id: string) {
   await readPayments(s, T);
 }
 
-/** The return's receipt (every payment and its proof: the receipt file or the payment email) in Rox's document
+/** The return's receipt (every payment and its proof: the receipt file or the payment email) in the Bot's document
  *  view, made by BIR (`ebirforms_payment_receipt`). */
 function viewReceipt(s: FS) {
-  rox.preview({ tool: "ebirforms_payment_receipt", args: { tin: BRANCH, form: s.code, period: tokenPeriod(s) } }).catch((e) => toast(errText(e), "danger"));
+  buwiz.preview({ tool: "ebirforms_payment_receipt", args: { tin: BRANCH, form: s.code, period: tokenPeriod(s) } }).catch((e) => toast(errText(e), "danger"));
 }
 
 /** The payment email in Gmail, for a payment recorded from one ("" otherwise). */
@@ -1696,7 +1696,7 @@ function isoToday() {
 }
 
 /**
- * "Attach receipt": Rox's file picker, and bir keeps a copy of the image or PDF as this return's proof of payment.
+ * "Attach receipt": the Bot's file picker, and bir keeps a copy of the image or PDF as this return's proof of payment.
  * When the picker fails, the return is attached to the chat: the user drops the receipt there and the assistant records it.
  */
 async function attachReceipt(s: FS) {
@@ -2633,7 +2633,7 @@ function FormPage(p: { s: FS }) {
   const s = p.s;
   const ready = () => (rev(), Boolean(s.schema) && !s.loading && !s.error);
   const f = () => (rev(), s.schema);
-  const wide = () => rox.viewport().width >= 980;
+  const wide = () => buwiz.viewport().width >= 980;
   const errorsIn = (pi: number) => Object.keys(s.messages).filter((id) => id.startsWith(`${pi}:`)).length;
   const needing = () => (rev(), (s.schema?.parts || []).map((_p, i) => i).filter((i) => errorsIn(i) > 0));
   const openOne = () => (rev(), s.openParts.size === 1 ? [...s.openParts][0] : -1);
@@ -2832,7 +2832,7 @@ function FormPage(p: { s: FS }) {
   );
 }
 
-/** Rox's `submit`: the return's Validate result and, when it passes, the user's own Submit. */
+/** The Bot's `submit`: the return's Validate result and, when it passes, the user's own Submit. */
 function SubmitConfirm(p: { s: FS }) {
   const s = p.s;
   const close = () => {
@@ -2909,11 +2909,11 @@ function PaymentPanel(p: { s: FS }) {
           <If when={!paid() && !form()}>
             <Btn label="Mark as paid" onPress={() => { s.payForm = { paid_at: isoToday(), amount: "", channel: "", reference: "" }; bump(); }} disabled={(rev(), s.paying)} />
           </If>
-          <If when={paid() && Boolean(rox.preview)}>
+          <If when={paid() && Boolean(buwiz.preview)}>
             <Btn label="View receipt" variant="ghost" onPress={() => viewReceipt(s)} />
           </If>
           <If when={(rev(), Boolean(gmailOf(s)))}>
-            <Btn label="Open in Gmail" variant="ghost" onPress={() => rox.open({ url: gmailOf(s) }).catch((e) => toast(errText(e), "danger"))} />
+            <Btn label="Open in Gmail" variant="ghost" onPress={() => buwiz.open({ url: gmailOf(s) }).catch((e) => toast(errText(e), "danger"))} />
           </If>
           <Btn label={(rev(), hasReceipt() ? "Replace receipt" : "Attach receipt")} variant="ghost" onPress={() => attachReceipt(s)} disabled={(rev(), s.paying)} />
         </View>
@@ -3521,8 +3521,8 @@ function readTokenPeriod(text: string): { year: number; period: number; day: boo
   return { year, period: 0, day: false };
 }
 
-/** Rox's `/taxform` props: `form` + `period` + `action` (+ `draft_id`) open that return. */
-async function followReturn(p: RoxProps) {
+/** The Bot's `/taxform` props: `form` + `period` + `action` (+ `draft_id`) open that return. */
+async function followReturn(p: FormsProps) {
   const code = normCode(p.form);
   const action = p.action || "file";
   const flags = { viewOnly: action === "view", submitAsk: action === "submit" };
@@ -3550,7 +3550,7 @@ async function followReturn(p: RoxProps) {
 
 /** Deep link: `form_code` + `year` + `period` (+ `key`) open that return; `form_code` alone opens the picker on it. */
 function followDeepLink() {
-  const p = { ...roxProps() };
+  const p = { ...formsProps() };
   // A return's ticket names its form and period.
   const subj = subject();
   if (!p.form && !p.form_code && subj?.kind === "return" && subj.form) {
@@ -3571,17 +3571,17 @@ function followDeepLink() {
   if (year != null && period != null) openForm({ tin: TIN(), code, year, period, ...(key != null ? { returnKey: key } : {}) });
 }
 
-// Rox's nsh ignores contentContainerClass: each Scroll's padding lives on a View inside it.
+// The Bot's nsh ignores contentContainerClass: each Scroll's padding lives on a View inside it.
 /** Why the ticket did not open, if it did not. */
 const opening = signal("");
 
 /** What the props' ticket stands for, from BIR; a return's ticket also gets its branch's own ticket. */
 async function openTicket(ticket: string) {
   try {
-    const r: any = await rox.call("ebirforms_ticket_subject", { ticket });
+    const r: any = await buwiz.call("ebirforms_ticket_subject", { ticket });
     const s = r?.result as Subject;
     if (s.kind === "return") {
-      const issued: any = await rox.call("ebirforms_ticket_issue", { ticket, tin: s.tin });
+      const issued: any = await buwiz.call("ebirforms_ticket_issue", { ticket, tin: s.tin });
       BRANCH = String(issued?.result?.ticket || "");
     } else BRANCH = ticket;
     subject.set(s);
@@ -3592,7 +3592,7 @@ async function openTicket(ticket: string) {
 }
 
 export default function R() {
-  const ticket = String(roxProps().ticket || "");
+  const ticket = String(formsProps().ticket || "");
   if (ticket) openTicket(ticket);
   return (
     <View style={{ flex: 1 }} class={C.pane}>

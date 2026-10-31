@@ -1,4 +1,4 @@
-//! The v1 manifest (spec 5): identity, the `taxprofile` scope and the one
+//! The 2.0 manifest (spec 5): identity, the `taxprofile` scope and the one
 //! app this plugin ships, Forms, with what it may reach.
 //!
 //! [`unsigned`] builds it from this build's code and the app source it
@@ -25,12 +25,12 @@ use crate::server::{
     PAYMENTS_LIST, PRINT_PREVIEW, RESOLVE, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
-pub(crate) const PROTOCOL: &str = "1.0.0";
+pub(crate) const PROTOCOL: &str = "2.0.0";
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
 /// The first version under the plugin id `app.buwiz.ebirforms`.
-pub(crate) const VERSION: &str = "0.1.0";
-pub(crate) const MANIFEST_URI: &str = "rox://manifest";
+pub(crate) const VERSION: &str = "0.2.0";
+pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
 pub const MANIFEST_ENV: &str = "EBIRFORMS_MANIFEST";
@@ -38,12 +38,12 @@ pub const MANIFEST_ENV: &str = "EBIRFORMS_MANIFEST";
 /// [`MANIFEST_ENV`] is not set.
 pub const MANIFEST_FILE: &str = "app.buwiz.ebirforms.manifest.json";
 
-/// The Forms app: `rox-app://forms`, the TSX module the Bot renders.
+/// The Forms app: `buwiz-app://forms`, the TSX module the Bot renders.
 pub(crate) const FORMS_ID: &str = "forms";
 pub(crate) const FORMS_TITLE: &str = "BIR Forms";
 pub(crate) const FORMS_DESCRIPTION: &str = "Prepare, check and queue a taxpayer's BIR returns: pick a form and period, fill it, validate it with the official rules, save the draft, and queue it for filing.";
 pub(crate) const FORMS_SOURCE: &str = include_str!("../../../apps/ebirforms/forms.tsx");
-pub(crate) const APP_URI_PREFIX: &str = "rox-app://";
+pub(crate) const APP_URI_PREFIX: &str = "buwiz-app://";
 pub(crate) const APP_MIME: &str = "text/x-nsh-tsx";
 
 /// What the agent is told when a taxpayer token is in a message or attached.
@@ -235,7 +235,7 @@ mod tests {
         let apps = m["apps"].as_array().unwrap();
         assert_eq!(apps.len(), 1);
         let forms = &apps[0];
-        assert_eq!(forms["entry"], "rox-app://forms");
+        assert_eq!(forms["entry"], "buwiz-app://forms");
         assert_eq!(forms["fingerprint"], fingerprint(FORMS_SOURCE));
         let tools = forms["permissions"]["tools"].as_array().unwrap();
         assert!(
