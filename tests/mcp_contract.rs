@@ -211,6 +211,8 @@ fn the_bot_contract_over_a_scratch_database() {
             "buwiz-app://calendar",
             "buwiz-app://deadlines",
             "buwiz-app://register",
+            "buwiz-app://card-dates",
+            "buwiz-app://card-calc",
             "buwiz://manifest"
         ]
     );
@@ -390,6 +392,76 @@ fn the_bot_contract_over_a_scratch_database() {
         sign_in["_meta"]["buwiz/open"]["app"], "register",
         "{sign_in}"
     );
+    // the assistant's calendar read carries a card-dates card; late returns
+    // and a week pick their own card
+    let due = bot.agent("ebirforms_calendar_get", json!({ "tin": ticket }));
+    let card = &due["_meta"]["buwiz/open"];
+    assert_eq!(card["app"], "card-dates", "{due}");
+    assert_eq!(card["placement"], "inline");
+    assert_eq!(card["props"]["card"], "dues");
+    assert_eq!(card["props"]["tool"], "ebirforms_calendar_get");
+    assert_eq!(card["ticket"], ticket);
+    assert!(!card.to_string().contains(ROOT), "a TIN in a card: {card}");
+    let late = bot.agent(
+        "ebirforms_calendar_get",
+        json!({ "tin": ticket, "filter": "overdue" }),
+    );
+    assert_eq!(
+        late["_meta"]["buwiz/open"]["props"]["card"], "overdue",
+        "{late}"
+    );
+    assert!(
+        result_of(&late)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["overdue"] == true)
+    );
+    let week = bot.agent(
+        "ebirforms_calendar_get",
+        json!({ "from": "2026-11-02", "to": "2026-11-08" }),
+    );
+    assert_eq!(week["_meta"]["buwiz/open"]["props"]["card"], "week");
+    // an RDO by number: 043 (both synthetic taxpayers) and the two offices
+    // BIR split it into, by name; 43A alone is just that office
+    let rdo = bot.agent("ebirforms_rdo_lookup", json!({ "query": "43" }));
+    let found = result_of(&rdo).clone();
+    let codes: Vec<&str> = found["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["043", "43A", "43B"], "{rdo}");
+    assert_eq!(found["matches"][0]["taxpayers"], 2);
+    assert_eq!(
+        found["matches"][0]["split_into"],
+        json!(["43A East Pasig", "43B West Pasig"])
+    );
+    assert_eq!(found["matches"][1]["office"], "East Pasig");
+    assert_eq!(found["matches"][2]["office"], "West Pasig");
+    let east = bot.agent("ebirforms_rdo_lookup", json!({ "query": "43a" }));
+    assert_eq!(
+        result_of(&east)["matches"].as_array().unwrap().len(),
+        1,
+        "{east}"
+    );
+    let by_name = bot.agent("ebirforms_rdo_lookup", json!({ "query": "makati" }));
+    assert_eq!(
+        result_of(&by_name)["matches"].as_array().unwrap().len(),
+        4,
+        "{by_name}"
+    );
+    let card = &rdo["_meta"]["buwiz/open"];
+    assert_eq!(
+        (card["app"].as_str(), card["size"].as_str()),
+        (Some("card-calc"), Some("small"))
+    );
+    assert!(
+        error_text(&bot.agent("ebirforms_rdo_lookup", json!({ "query": "nowhere at all" })))
+            .contains("no RDO")
+    );
+
     // what it lists: returns as tickets, never TINs
     let calendar = bot.agent(
         "ebirforms_calendar_get",

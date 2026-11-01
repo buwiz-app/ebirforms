@@ -6,6 +6,7 @@
 //! stderr and to the mini app's own `logs/` folder.
 
 pub mod account;
+mod cards;
 mod jcs;
 mod keys;
 pub mod manifest;
