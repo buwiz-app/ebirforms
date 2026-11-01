@@ -127,7 +127,7 @@ fn the_bot_contract_over_a_scratch_database() {
     let seed = [7u8; 32];
     let signing = SigningKey::from_bytes(&seed);
     let public = b64(signing.verifying_key().as_bytes());
-    let provision = json!({ "protocol": "2.0.0", "plugin": "app.buwiz.ebirforms", "key": { "alg": "ed25519", "seed": b64(&seed) }, "pub": public });
+    let provision = json!({ "protocol": "1.0.0", "plugin": "app.buwiz.ebirforms", "key": { "alg": "ed25519", "seed": b64(&seed) }, "pub": public });
     let mut wrong = provision.clone();
     wrong["plugin"] = json!("app.buwiz.books");
     assert_eq!(
@@ -762,6 +762,31 @@ fn the_bot_contract_over_a_scratch_database() {
         (Some("card-dates"), Some("penalty"))
     );
     assert!(card.get("ticket").is_none());
+
+    // the account tools are -32601 (protocol 1.0, 10.1): eBIRForms declares
+    // no accounts, a pushed token is never echoed, and a push is never taken
+    // for an uninstall (the ticket still resolves)
+    for name in ["buwiz.account.set", "buwiz.account.clear"] {
+        let push =
+            json!({ "account": "google", "label": "default", "access_token": "synthetic-token" });
+        let reply = bot.send(
+            "tools/call",
+            json!({ "name": name, "arguments": push, "_meta": { "buwiz/caller": {} } }),
+        );
+        assert_eq!(reply["error"]["code"], -32601, "{name}: {reply}");
+        assert!(
+            !reply.to_string().contains("synthetic-token"),
+            "{name}: {reply}"
+        );
+    }
+    assert_eq!(
+        bot.call_as(
+            json!({}),
+            "buwiz.ticket.resolve",
+            json!({ "ticket": ticket })
+        )["structuredContent"]["valid"],
+        true
+    );
 
     // dismissed after saving; buwiz.uninstall forgets every ticket
     assert_eq!(

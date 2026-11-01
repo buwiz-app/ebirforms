@@ -4,7 +4,7 @@ Guidance for coding agents in this repo.
 
 ## What this repo is
 
-The eBIRForms mini app for the Buwiz Bot: plugin id `app.buwiz.ebirforms`, publisher `app.buwiz`, key `gc-2026-01`, protocol 2.0.
+The eBIRForms mini app for the Buwiz Bot: plugin id `app.buwiz.ebirforms`, publisher `app.buwiz`, key `gc-2026-01`, protocol 1.0 (`buwiz-sdk` `docs/protocol-1.0.md`; 2.0 and 2.1 were its pre-release numbering, which a 1.0 Bot refuses).
 A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app` org (Books is the reference):
 
 | Path | What |
@@ -12,7 +12,7 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 | `crates/ebirforms-mini-app/` | the binary: MCP server, manifest, signing, tickets, TIN scrubbing |
 | `apps/ebirforms/` | the app screens, TSX until each is ported to a native nsh Rust screen crate in this repo (option C: compiled into the Bot, pinned by rev); a TSX screen is deleted once its native port passes the same tests |
 | `tests/` | integration tests, wired in the crate's `Cargo.toml` with `[[test]] path = "../../tests/…"` |
-| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `release/prepare.sh` |
+| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `bot/host-test.sh`, `release/publish.sh` (a protocol 1.0 package release) |
 | `legacy/` | the first mini app from `hexuria/buwiz-forms`, kept only as the porting reference; it does not build |
 
 ## Invariants
@@ -29,13 +29,13 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    facade is a supported surface; `bir-core` internals change without notice.
 5. **TINs never leave as TINs.** Taxpayers reach the assistant and the apps as tickets (`tkt_…`). Never put a TIN, a
    ticket value or a key in a log, a title, a doc or a fixture.
-6. **One protocol version.** No compatibility shims for older protocol versions or names.
+6. **One protocol version: 1.0.** No compatibility shims for older protocol versions or names.
 
 ## Gates
 
 `tools/check-all.sh` must pass before every commit: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test`, and `tools/bot/conformance.sh`. Conformance signs with a throwaway test key (`ebirforms-test-01`,
-never `gc-2026-01`) and runs the Bot's `buwiz-plugin-test`. It needs a Buwiz Bot checkout at protocol 2.0
+never `gc-2026-01`) and runs the Bot's `buwiz-plugin-test`. It needs a Buwiz Bot checkout at protocol 1.0
 (`BUWIZ_BOT_DIR`) with its `server/node_modules`. Never switch branches in the Bot checkout itself.
 
 ## Do not

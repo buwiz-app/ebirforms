@@ -375,7 +375,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 [[package]]
 name = "buwiz-plugin"
 version = "0.1.0"
-source = "git+https://github.com/buwiz-app/buwiz-sdk?rev=2120c725112e2072b22f6630079fc938b6c9b1e9#2120c725112e2072b22f6630079fc938b6c9b1e9"
+source = "git+https://github.com/buwiz-app/buwiz-sdk?rev=fff55d395d1c5c524833ec1073c43d34ac542070#fff55d395d1c5c524833ec1073c43d34ac542070"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",

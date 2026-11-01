@@ -11,11 +11,16 @@ Usage: ebirforms-mini-app mcp              speak MCP (JSON-RPC 2.0, one message 
                                            print this build's unsigned manifest, for signing
                                            (key id gc-2026-01 unless a test key is named)
        ebirforms-mini-app app-source <id>  print an app's source exactly as it is served
+       ebirforms-mini-app package <plugin.json> <out> <platform> [--published <plugin.json>]
+                                           fill a release's plugin.json (protocol 1.0 section 7)
+                                           from the signed manifest and the binary in <out>, for
+                                           `buwiz-broker sign-manifest --block buwiz`
+                                           (tools/release/publish.sh runs it)
        ebirforms-mini-app --version
        ebirforms-mini-app --help
 
 It keeps its own taxpayer database, shared with no desktop app, and never reads a
-keychain. Sending returns to BIR is not available yet.
+keychain. Sending returns to the BIR needs a Buwiz sign-in (the Sign-in app).
 
 Environment:
   EBIRFORMS_MANIFEST   the signed manifest to serve (default: app.buwiz.ebirforms.manifest.json
@@ -35,6 +40,10 @@ fn main() -> ExitCode {
         ["mcp"] => run(),
         ["manifest"] => print_manifest(ebirforms_mini_app::manifest::RELEASE_KEY_ID),
         ["manifest", "--key-id", key_id] => print_manifest(key_id),
+        ["package", template, out, platform] => package(template, out, platform, None),
+        ["package", template, out, platform, "--published", published] => {
+            package(template, out, platform, Some(published))
+        }
         ["app-source", id] => match ebirforms_mini_app::manifest::app_source(id) {
             Some(source) => {
                 print!("{source}");
@@ -60,6 +69,33 @@ fn main() -> ExitCode {
         [other, ..] => {
             eprintln!("unknown argument `{other}`\n\n{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// The release's plugin.json to sign: the binary is `ebirforms-mini-app`, so
+/// its asset is `ebirforms-mini-app-<platform>` and the signed manifest
+/// `app.buwiz.ebirforms.manifest.json`.
+fn package(template: &str, out: &str, platform: &str, published: Option<&str>) -> ExitCode {
+    use std::path::Path;
+    match buwiz_plugin::package::run(
+        Path::new(template),
+        Path::new(out),
+        ebirforms_mini_app::manifest::PLUGIN_ID,
+        "ebirforms-mini-app",
+        platform,
+        published.map(Path::new),
+    ) {
+        Ok(()) => {
+            eprintln!(
+                "ebirforms-mini-app: wrote {out}/{}",
+                buwiz_plugin::package::UNSIGNED
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("ebirforms-mini-app: package: {error}");
+            ExitCode::FAILURE
         }
     }
 }

@@ -1,6 +1,6 @@
 # eBIRForms mini app
 
-The eBIRForms mini app for the Buwiz Bot: plugin id `app.buwiz.ebirforms`, publisher `app.buwiz` (key `gc-2026-01`), protocol 2.0.
+The eBIRForms mini app for the Buwiz Bot: plugin id `app.buwiz.ebirforms`, publisher `app.buwiz` (key `gc-2026-01`), protocol 1.0 (`buwiz-sdk` `docs/protocol-1.0.md`; 2.0 and 2.1 were its pre-release numbering, which a 1.0 Bot refuses).
 An MCP server on stdio that the Bot spawns.
 
 ## Layout
@@ -12,7 +12,7 @@ The same layout as every mini app in the `buwiz-app` org (Books is the reference
 | `crates/ebirforms-mini-app/` | The mini app: MCP server, manifest and signing, tickets, TIN scrubbing. It began as `buwiz-mcp` (eBIRForms `feat/mcp-mode` @ `f0d5afa`) and keeps that history. |
 | `apps/ebirforms/` | The app screens: `forms`, `tax-profile`, `calendar`, `deadlines` (an inline card) and `register` (Buwiz Sign-in). |
 | `tests/` | Integration tests (the Bot contract, own data). |
-| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `bot/host-test.sh`, `release/prepare.sh`. |
+| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `bot/host-test.sh`, `release/publish.sh` (a protocol 1.0 package release: binary, signed manifest and signed `plugin.json` from `package/plugin.json`). |
 | `legacy/` | The first mini app, from `hexuria/buwiz-forms` branch `rox-mini-app-round2` @ `834e7203`, with its history. It is the reference for porting the remaining 12 apps and cards; it does not build here and is deleted once ported. |
 
 It builds on eBIRForms' domain crates (`bir-app-core`, pinned by commit in the root `Cargo.toml`). Only the
