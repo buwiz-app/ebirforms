@@ -421,8 +421,8 @@ fn the_bot_contract_over_a_scratch_database() {
         json!({ "from": "2026-11-02", "to": "2026-11-08" }),
     );
     assert_eq!(week["_meta"]["buwiz/open"]["props"]["card"], "week");
-    // an RDO by number: 043 (both synthetic taxpayers) and the two offices
-    // BIR split it into, by name; 43A alone is just that office
+    // an RDO by number: 043 Pasig City (both synthetic taxpayers) and the
+    // two offices BIR split it into; 43A alone is just that office
     let rdo = bot.agent("ebirforms_rdo_lookup", json!({ "query": "43" }));
     let found = result_of(&rdo).clone();
     let codes: Vec<&str> = found["matches"]
@@ -433,10 +433,9 @@ fn the_bot_contract_over_a_scratch_database() {
         .collect();
     assert_eq!(codes, ["043", "43A", "43B"], "{rdo}");
     assert_eq!(found["matches"][0]["taxpayers"], 2);
-    assert_eq!(
-        found["matches"][0]["split_into"],
-        json!(["43A East Pasig", "43B West Pasig"])
-    );
+    assert_eq!(found["matches"][0]["office"], "Pasig City");
+    // a named office lists no split
+    assert!(found["matches"][0].get("split_into").is_none(), "{rdo}");
     assert_eq!(found["matches"][1]["office"], "East Pasig");
     assert_eq!(found["matches"][2]["office"], "West Pasig");
     let east = bot.agent("ebirforms_rdo_lookup", json!({ "query": "43a" }));
@@ -445,11 +444,18 @@ fn the_bot_contract_over_a_scratch_database() {
         1,
         "{east}"
     );
+    // four Makati offices and the large-taxpayer one (122)
     let by_name = bot.agent("ebirforms_rdo_lookup", json!({ "query": "makati" }));
     assert_eq!(
         result_of(&by_name)["matches"].as_array().unwrap().len(),
-        4,
+        5,
         "{by_name}"
+    );
+    let lt = bot.agent("ebirforms_rdo_lookup", json!({ "query": "116" }));
+    assert_eq!(
+        result_of(&lt)["matches"][0]["office"],
+        "Regular LT Audit Division I",
+        "{lt}"
     );
     let card = &rdo["_meta"]["buwiz/open"];
     assert_eq!(

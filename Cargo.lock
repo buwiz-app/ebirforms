@@ -224,7 +224,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "bir-app-core"
 version = "0.1.0"
-source = "git+https://github.com/eBIRForms/eBIRForms?rev=2a223f36e430e64d0ca88032dbc503def787a04e#2a223f36e430e64d0ca88032dbc503def787a04e"
+source = "git+https://github.com/eBIRForms/eBIRForms?rev=c632975f533bb3228f43927c3dd18bb7e70f004a#c632975f533bb3228f43927c3dd18bb7e70f004a"
 dependencies = [
  "bir-core",
  "bir-print",
@@ -242,7 +242,7 @@ dependencies = [
 [[package]]
 name = "bir-core"
 version = "0.1.0"
-source = "git+https://github.com/eBIRForms/eBIRForms?rev=2a223f36e430e64d0ca88032dbc503def787a04e#2a223f36e430e64d0ca88032dbc503def787a04e"
+source = "git+https://github.com/eBIRForms/eBIRForms?rev=c632975f533bb3228f43927c3dd18bb7e70f004a#c632975f533bb3228f43927c3dd18bb7e70f004a"
 dependencies = [
  "anyhow",
  "bir-rules",
@@ -272,7 +272,7 @@ dependencies = [
 [[package]]
 name = "bir-print"
 version = "0.1.0"
-source = "git+https://github.com/eBIRForms/eBIRForms?rev=2a223f36e430e64d0ca88032dbc503def787a04e#2a223f36e430e64d0ca88032dbc503def787a04e"
+source = "git+https://github.com/eBIRForms/eBIRForms?rev=c632975f533bb3228f43927c3dd18bb7e70f004a#c632975f533bb3228f43927c3dd18bb7e70f004a"
 dependencies = [
  "bir-core",
  "flate2",
@@ -289,7 +289,7 @@ dependencies = [
 [[package]]
 name = "bir-rules"
 version = "0.1.0"
-source = "git+https://github.com/eBIRForms/eBIRForms?rev=2a223f36e430e64d0ca88032dbc503def787a04e#2a223f36e430e64d0ca88032dbc503def787a04e"
+source = "git+https://github.com/eBIRForms/eBIRForms?rev=c632975f533bb3228f43927c3dd18bb7e70f004a#c632975f533bb3228f43927c3dd18bb7e70f004a"
 dependencies = [
  "num-bigint",
  "serde",
@@ -300,7 +300,7 @@ dependencies = [
 [[package]]
 name = "bir-submit"
 version = "0.1.0"
-source = "git+https://github.com/eBIRForms/eBIRForms?rev=2a223f36e430e64d0ca88032dbc503def787a04e#2a223f36e430e64d0ca88032dbc503def787a04e"
+source = "git+https://github.com/eBIRForms/eBIRForms?rev=c632975f533bb3228f43927c3dd18bb7e70f004a#c632975f533bb3228f43927c3dd18bb7e70f004a"
 dependencies = [
  "base64 0.22.1",
  "bir-core",
@@ -2568,7 +2568,7 @@ checksum = "ab732d48ebf2a1449e94d071b26544f99845834c75c3c210e927ace097b49aa4"
 [[package]]
 name = "sqlcipher-tomcrypt"
 version = "0.1.0"
-source = "git+https://github.com/eBIRForms/eBIRForms?rev=2a223f36e430e64d0ca88032dbc503def787a04e#2a223f36e430e64d0ca88032dbc503def787a04e"
+source = "git+https://github.com/eBIRForms/eBIRForms?rev=c632975f533bb3228f43927c3dd18bb7e70f004a#c632975f533bb3228f43927c3dd18bb7e70f004a"
 dependencies = [
  "cc",
  "sqlcipher-src",
