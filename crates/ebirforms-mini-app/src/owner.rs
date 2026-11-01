@@ -116,14 +116,14 @@ pub unsafe fn prepare(dir: &Path) -> Result<PathBuf, String> {
 }
 
 #[cfg(unix)]
-fn restrict(path: &Path, mode: u32) -> Result<(), String> {
+pub(crate) fn restrict(path: &Path, mode: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .map_err(|error| format!("{} could not be made private: {error}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn restrict(_path: &Path, _mode: u32) -> Result<(), String> {
+pub(crate) fn restrict(_path: &Path, _mode: u32) -> Result<(), String> {
     Ok(())
 }
 

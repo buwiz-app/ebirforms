@@ -5,6 +5,7 @@
 //! eBIRForms' [`bir_app_core::BirApp`]. stdout carries MCP; log lines go to
 //! stderr and to the mini app's own `logs/` folder.
 
+pub mod account;
 mod jcs;
 mod keys;
 pub mod manifest;

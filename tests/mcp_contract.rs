@@ -203,7 +203,17 @@ fn the_bot_contract_over_a_scratch_database() {
         .iter()
         .map(|r| r["uri"].as_str().unwrap())
         .collect();
-    assert_eq!(uris, ["buwiz-app://forms", "buwiz://manifest"]);
+    assert_eq!(
+        uris,
+        [
+            "buwiz-app://forms",
+            "buwiz-app://tax-profile",
+            "buwiz-app://calendar",
+            "buwiz-app://deadlines",
+            "buwiz-app://register",
+            "buwiz://manifest"
+        ]
+    );
     let manifest: Value =
         serde_json::from_str(
             bot.send("resources/read", json!({ "uri": "buwiz://manifest" }))["result"]["contents"]
@@ -221,11 +231,13 @@ fn the_bot_contract_over_a_scratch_database() {
     assert!(
         bot.send("resources/read", json!({ "uri": "file:///etc/passwd" }))["error"].is_object()
     );
-    // every function the Forms app may call exists in bir-app-core
+    // every function an app may call exists in bir-app-core
     let names = app.function_names();
-    for tool in manifest["apps"][0]["permissions"]["tools"]
+    for tool in manifest["apps"]
         .as_array()
         .unwrap()
+        .iter()
+        .flat_map(|entry| entry["permissions"]["tools"].as_array().unwrap())
     {
         if let Some(function) = tool
             .as_str()
@@ -295,6 +307,107 @@ fn the_bot_contract_over_a_scratch_database() {
         2,
         "{choices}"
     );
+    // /taxform 2551Q: Forms on that return, for the taxpayer attached to the chat
+    let attached = json!({ "attached": [{ "scope": "taxprofile", "token": format!("@ebirforms:taxprofile:{ticket}") }] });
+    let taxform = bot.call_as(
+        json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxform", "value": "2551Q 2026-Q3 file", "context": attached }),
+    );
+    let open = &taxform["structuredContent"];
+    assert_eq!(open["result"], "open", "{taxform}");
+    assert_eq!(open["app"], "forms");
+    assert_eq!(open["props"]["form"], "2551Q");
+    assert_eq!(open["props"]["period"], "2026-Q3");
+    assert_eq!(open["props"]["action"], "file");
+    assert_eq!(open["ticket"], open["props"]["ticket"]);
+    assert!(
+        !taxform.to_string().contains(ROOT),
+        "a TIN reached the Bot: {taxform}"
+    );
+    // with no taxpayer attached and two saved, the choice keeps the words typed
+    let pick = bot.call_as(
+        json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxform", "value": "2551Q" }),
+    );
+    let picks = pick["structuredContent"]["choices"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(picks.len(), 2, "{pick}");
+    let chosen = picks.iter().find(|c| c["label"] == "Juana Santos").unwrap();
+    assert_eq!(chosen["value"], format!("{ticket} 2551Q"));
+    let again = bot.call_as(
+        json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxform", "value": chosen["value"] }),
+    );
+    assert_eq!(
+        again["structuredContent"]["props"]["form"], "2551Q",
+        "{again}"
+    );
+    // /taxprofile juana: her Tax Profile
+    let profile = bot.call_as(
+        json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxprofile", "value": "juana" }),
+    );
+    assert_eq!(
+        profile["structuredContent"],
+        json!({ "result": "open", "app": "tax-profile", "ticket": ticket, "props": { "ticket": ticket }, "title": "BIR Tax Profile · Juana Santos", "placement": "full" })
+    );
+    // the Forms app's Ask the assistant: `<ticket>/<form>-<period>` as a taxform token
+    let token = bot.call_as(
+        json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "scope", "name": "taxform", "value": format!("{ticket}/2551Q-2026-Q3") }),
+    );
+    assert_eq!(token["structuredContent"]["result"], "token", "{token}");
+    assert_eq!(
+        token["structuredContent"]["title"],
+        "2551Q · Q3 2026 · Juana Santos"
+    );
+    let unknown = bot.call_as(
+        json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "nope", "value": "" }),
+    );
+    assert_eq!(unknown["structuredContent"]["result"], "error");
+
+    // the Deadlines card: inline in the chat, on one taxpayer
+    let card = bot.agent(
+        "ebirforms_app_open",
+        json!({ "app": "deadlines", "tin": ticket }),
+    );
+    let open = &card["_meta"]["buwiz/open"];
+    assert_eq!(open["app"], "deadlines", "{card}");
+    assert_eq!(open["placement"], "inline");
+    assert_eq!(open["props"], json!({ "ticket": ticket }));
+    // the Sign-in screen opens for the user; signing in is theirs
+    let sign_in = bot.agent("ebirforms_app_open", json!({ "app": "register" }));
+    assert_eq!(
+        sign_in["_meta"]["buwiz/open"]["app"], "register",
+        "{sign_in}"
+    );
+    // what it lists: returns as tickets, never TINs
+    let calendar = bot.agent(
+        "ebirforms_calendar_get",
+        json!({ "tin": ticket, "from": "2026-01-01", "to": "2026-12-31" }),
+    );
+    let events = result_of(&calendar)["events"].as_array().unwrap().clone();
+    assert!(
+        !calendar.to_string().contains(ROOT),
+        "a TIN reached the model"
+    );
+    for event in &events {
+        assert!(
+            event["key"].as_str().unwrap().starts_with("tkt_"),
+            "{event}"
+        );
+        assert_eq!(event["taxpayer"], "Juana Santos");
+    }
+
     // a resolve call never writes
     let refused = bot.call_as(
         json!({ "origin": "resolve" }),
@@ -312,6 +425,20 @@ fn the_bot_contract_over_a_scratch_database() {
         refused["structuredContent"]["code"], "permission_denied",
         "{refused}"
     );
+
+    // nor sign the owner in or out of Buwiz: that is the Sign-in app's
+    for name in [
+        "ebirforms_account_sign_in_start",
+        "ebirforms_account_sign_out",
+        "ebirforms_account_status",
+    ] {
+        let refused = bot.agent(name, json!({}));
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {refused}"
+        );
+    }
+    assert_eq!(status["signed_in"], false, "{status}");
 
     // ebirforms_app_open hands the Bot the Forms app on a return's ticket
     let opened = bot.agent("ebirforms_app_open", json!({ "app": "forms", "tin": ticket, "form": "2551Q", "period": "2026-Q3", "action": "file" }));
