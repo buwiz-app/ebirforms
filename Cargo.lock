@@ -373,6 +373,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "buwiz-plugin"
+version = "0.1.0"
+source = "git+https://github.com/buwiz-app/buwiz-sdk?rev=2120c725112e2072b22f6630079fc938b6c9b1e9#2120c725112e2072b22f6630079fc938b6c9b1e9"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -765,9 +776,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "ebirforms-mini-app"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "bir-app-core",
  "bir-submit",
+ "buwiz-plugin",
  "chrono",
  "ed25519-dalek",
  "getrandom 0.3.4",

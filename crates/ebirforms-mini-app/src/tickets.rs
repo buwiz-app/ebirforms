@@ -173,10 +173,7 @@ fn clip(text: &str) -> String {
 }
 
 /// Whether `text` has the ticket grammar `^tkt_[0-9A-HJKMNP-TV-Z]{26}$`.
-pub(crate) fn is_ticket(text: &str) -> bool {
-    text.strip_prefix("tkt_")
-        .is_some_and(|rest| rest.len() == 26 && rest.bytes().all(|byte| CROCKFORD.contains(&byte)))
-}
+pub(crate) use buwiz_plugin::is_ticket;
 
 /// A fresh ticket: 130 bits from the OS CSPRNG, 5 bits per character.
 fn new_ticket() -> Result<String, String> {

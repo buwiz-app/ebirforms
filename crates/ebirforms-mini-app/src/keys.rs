@@ -9,74 +9,16 @@
 //! Bot's session keys and checked by its broker before they reach this
 //! process.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{Map, Value, json};
 
-use crate::jcs;
-
 /// The longest session a certificate may cover: 8 hours (Q13).
-pub(crate) const CERT_MAX_MS: i64 = 8 * 3600 * 1000;
-
-/// base64url without padding.
-pub(crate) fn b64url(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Exactly `len` bytes of base64url without padding, else `None`.
-pub(crate) fn from_b64url(text: &str, len: usize) -> Option<Vec<u8>> {
-    let bytes = URL_SAFE_NO_PAD.decode(text).ok()?;
-    (bytes.len() == len && b64url(&bytes) == text).then_some(bytes)
-}
-
-/// The provisioned plugin key.
-pub(crate) struct PluginKey {
-    signing: SigningKey,
-}
-
-impl PluginKey {
-    /// `buwiz.provision`'s `key` and `pub`: the seed must be 32 bytes and
-    /// `pub` its public key. The error never quotes either.
-    pub(crate) fn from_provision(arguments: &Map<String, Value>) -> Result<Self, String> {
-        let key = arguments
-            .get("key")
-            .and_then(Value::as_object)
-            .ok_or("`key` must be {alg, seed}")?;
-        if key.get("alg").and_then(Value::as_str) != Some("ed25519") {
-            return Err("`key.alg` must be ed25519".into());
-        }
-        let seed = key
-            .get("seed")
-            .and_then(Value::as_str)
-            .and_then(|seed| from_b64url(seed, 32))
-            .ok_or("`key.seed` must be 32 bytes of base64url")?;
-        let seed: [u8; 32] = seed.try_into().map_err(|_| "`key.seed` must be 32 bytes")?;
-        let signing = SigningKey::from_bytes(&seed);
-        let public = b64url(signing.verifying_key().as_bytes());
-        if arguments.get("pub").and_then(Value::as_str) != Some(public.as_str()) {
-            return Err("the key and pub do not match".into());
-        }
-        Ok(Self { signing })
-    }
-
-    /// Whether `other` holds the same key (a repeated provision is fine).
-    pub(crate) fn same_as(&self, other: &PluginKey) -> bool {
-        self.signing.to_bytes() == other.signing.to_bytes()
-    }
-
-    /// base64url public key.
-    #[cfg(test)]
-    pub(crate) fn public(&self) -> String {
-        b64url(self.signing.verifying_key().as_bytes())
-    }
-
-    /// base64url signature over the JCS bytes of `value`.
-    pub(crate) fn sign(&self, value: &Value) -> Result<String, String> {
-        let bytes = jcs::canonical(value)?;
-        Ok(b64url(&self.signing.sign(bytes.as_bytes()).to_bytes()))
-    }
-}
+pub(crate) use buwiz_plugin::CERT_MAX_MS;
+/// base64url without padding, and the canonical-length decode check.
+pub(crate) use buwiz_plugin::b64::decode_exact as from_b64url;
+#[cfg(test)]
+pub(crate) use buwiz_plugin::b64::encode as b64url;
+/// The provisioned plugin key (`buwiz.provision`, spec 4.3).
+pub(crate) use buwiz_plugin::key::PluginKey;
 
 /// `buwiz.session.open`'s request, checked: the certificate fields.
 pub(crate) struct OpenRequest {
@@ -139,7 +81,8 @@ impl OpenRequest {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+    use crate::jcs;
+    use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
 
     /// A provision request for a fixed test seed (never a real key).
     pub(crate) fn provision_args(seed: [u8; 32]) -> Map<String, Value> {
@@ -174,6 +117,23 @@ pub(crate) mod tests {
         let signature = key.sign(&cert).unwrap();
         assert!(verify(&key.public(), &cert, &signature));
         assert!(!verify(&key.public(), &json!({"v": 2}), &signature));
+    }
+
+    #[test]
+    fn the_sdk_canonical_bytes_match_the_local_jcs_on_signed_values() {
+        for value in [
+            json!({
+                "v": 1, "typ": "buwiz-session", "plugin": "app.buwiz.ebirforms",
+                "app": "forms", "open_id": b64url(&[3; 16]), "ks_pub": b64url(&[4; 32]),
+                "perms_sha256": "0".repeat(64), "not_after": 9_999_999_999_999i64,
+            }),
+            json!({"z": -2, "nested": {"b": [true, null, "x\"\n\u{1}\u{e9}"], "a": {"u": 0}}}),
+        ] {
+            assert_eq!(
+                buwiz_plugin::jcs::canonical(&value).unwrap(),
+                jcs::canonical(&value).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -7,8 +7,6 @@
 
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
 use ebirforms_mini_app::{ManifestSource, Server};
 use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
@@ -51,7 +49,7 @@ impl Bot {
 }
 
 fn b64(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
+    buwiz_plugin::b64::encode(bytes)
 }
 
 fn result_of(answer: &Value) -> &Value {
@@ -536,11 +534,13 @@ fn the_bot_contract_over_a_scratch_database() {
     }));
     let cert = session["structuredContent"]["cert"].clone();
     assert_eq!(cert["plugin"], "app.buwiz.ebirforms", "{session}");
-    let signature: [u8; 64] = URL_SAFE_NO_PAD
-        .decode(session["structuredContent"]["cert_sig"].as_str().unwrap())
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let signature: [u8; 64] = buwiz_plugin::b64::decode_exact(
+        session["structuredContent"]["cert_sig"].as_str().unwrap(),
+        64,
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
     let verifying = VerifyingKey::from_bytes(&signing.verifying_key().to_bytes()).unwrap();
     assert!(
         verifying
