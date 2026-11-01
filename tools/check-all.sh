@@ -34,18 +34,21 @@ tests_total() {
 }
 no_detached_setters() {
   local status=0
-  grep -RnE '=\{[A-Za-z_$][[:alnum:]_$.]*\.set\}' apps/ || status=$?
+  grep -RnE '=[[:blank:]]*\{[[:blank:]]*[A-Za-z_$][[:alnum:]_$.]*\.set[[:blank:]]*\}' apps/ || status=$?
   case "$status" in
     1) echo "no detached setters: pass" ;;
     0) echo 'use onChange={(v) => x.set(v)}, not a detached setter' >&2; return 1 ;;
     *) return "$status" ;;
   esac
 }
+setters_total() {
+  node --test tests/detached-setters.mjs && no_detached_setters
+}
 
 gate "cargo fmt --check" fmt cargo fmt --check
 gate "cargo clippy -D warnings" clippy cargo clippy --all-targets -- -D warnings
 gate "cargo test" cargo-test tests_total
-gate "No detached setters" detached-setters no_detached_setters
+gate "No detached setters" detached-setters setters_total
 if [ "${SKIP_BOT:-0}" = "1" ]; then
   printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot conformance"
   printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot host test"
