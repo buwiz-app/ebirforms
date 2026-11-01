@@ -1,9 +1,11 @@
-//! The 2.0 manifest (spec 5): identity, the `taxprofile` scope and the one
-//! app this plugin ships, Forms, with what it may reach.
+//! The 2.0 manifest (spec 5): identity, the `/taxprofile` and `/taxform`
+//! commands, the `taxprofile`, `branchcode` and `taxform` scopes, and the
+//! apps this plugin ships (Forms, Tax Profile, Calendar and the Deadlines
+//! card), each with only the tools its source calls.
 //!
-//! [`unsigned`] builds it from this build's code and the app source it
-//! serves: the fingerprint is the SHA-256 of the exact bytes
-//! `resources/read` answers, so manifest and app cannot drift.
+//! [`unsigned`] builds it from this build's code and the app sources it
+//! serves: each fingerprint is the SHA-256 of the exact bytes
+//! `resources/read` answers, so manifest and apps cannot drift.
 //! `ebirforms-mini-app manifest` prints it for signing with the publisher key
 //! (outside this repo). The signed file is what this process serves, byte
 //! for byte, read on every request: `EBIRFORMS_MANIFEST`, else
@@ -22,6 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::jcs;
 use crate::scope;
 use crate::server::{
+    ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS, CALENDAR_GET,
     PAYMENTS_LIST, PRINT_PREVIEW, RESOLVE, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
@@ -41,21 +44,101 @@ pub const MANIFEST_FILE: &str = "app.buwiz.ebirforms.manifest.json";
 /// The Forms app: `buwiz-app://forms`, the TSX module the Bot renders.
 pub(crate) const FORMS_ID: &str = "forms";
 pub(crate) const FORMS_TITLE: &str = "BIR Forms";
-pub(crate) const FORMS_DESCRIPTION: &str = "Prepare, check and queue a taxpayer's BIR returns: pick a form and period, fill it, validate it with the official rules, save the draft, and queue it for filing.";
 pub(crate) const FORMS_SOURCE: &str = include_str!("../../../apps/ebirforms/forms.tsx");
+/// One taxpayer's registration, branches, tax years and forms.
+pub(crate) const TAX_PROFILE_ID: &str = "tax-profile";
+pub(crate) const TAX_PROFILE_SOURCE: &str = include_str!("../../../apps/ebirforms/tax-profile.tsx");
+/// Every return's due date and status, month by month.
+pub(crate) const CALENDAR_ID: &str = "calendar";
+pub(crate) const CALENDAR_SOURCE: &str = include_str!("../../../apps/ebirforms/calendar.tsx");
+/// Buwiz sign-in (account.buwiz.com's device flow).
+pub(crate) const REGISTER_ID: &str = "register";
+pub(crate) const REGISTER_SOURCE: &str = include_str!("../../../apps/ebirforms/register.tsx");
+/// The only page the Sign-in app opens.
+const ACCOUNT_SITE: &str = "https://account.buwiz.com";
+/// The next returns due, as a card in the chat.
+pub(crate) const DEADLINES_ID: &str = "deadlines";
+pub(crate) const DEADLINES_SOURCE: &str = include_str!("../../../apps/ebirforms/deadlines.tsx");
 pub(crate) const APP_URI_PREFIX: &str = "buwiz-app://";
 pub(crate) const APP_MIME: &str = "text/x-nsh-tsx";
 
+/// One app this plugin ships: what `resources/list` names and
+/// `resources/read` serves.
+pub(crate) struct App {
+    pub(crate) id: &'static str,
+    pub(crate) title: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) source: &'static str,
+}
+
+/// The apps, in manifest order.
+pub(crate) const APPS: [App; 5] = [
+    App {
+        id: FORMS_ID,
+        title: FORMS_TITLE,
+        description: "Prepare, check and queue a taxpayer's BIR returns: pick a form and period, fill it, validate it with the official rules, save the draft, and queue it for filing.",
+        source: FORMS_SOURCE,
+    },
+    App {
+        id: TAX_PROFILE_ID,
+        title: "BIR Tax Profile",
+        description: "View and edit a taxpayer's registration: name, TIN and branches, RDO and address, and the forms they file each year.",
+        source: TAX_PROFILE_SOURCE,
+    },
+    App {
+        id: CALENDAR_ID,
+        title: "BIR Calendar",
+        description: "See when each taxpayer's BIR returns are due and where each one stands, month by month, and move a deadline (or put it back) for every taxpayer.",
+        source: CALENDAR_SOURCE,
+    },
+    App {
+        id: DEADLINES_ID,
+        title: "BIR Deadlines",
+        description: "The next BIR returns due for one taxpayer (or all of them), as a small card in the chat, each with a button that opens it in BIR Forms.",
+        source: DEADLINES_SOURCE,
+    },
+    App {
+        id: REGISTER_ID,
+        title: "Buwiz Sign-in",
+        description: "Sign in to your Buwiz account on this computer, which eBIRForms will need to file returns. Preparing and saving returns works without it.",
+        source: REGISTER_SOURCE,
+    },
+];
+
 /// What the agent is told when a taxpayer token is in a message or attached.
-const TAXPROFILE_HINT: &str = "An `@bir:taxprofile:<ticket>` token names one taxpayer; the \
+const TAXPROFILE_HINT: &str = "An `@ebirforms:taxprofile:<ticket>` token names one taxpayer; the \
 ticket stands for its TIN, which you never see. Attached to this chat, eBIRForms tools default to \
-that taxpayer: pass the ticket as `tin` to ebirforms_drafts_list, ebirforms_dues_list, ebirforms_form_open and \
-ebirforms_app_open (forms), unless the user names another taxpayer. ebirforms_profiles_list lists the \
-taxpayers (as tickets).";
+that taxpayer: pass the ticket as `tin` to ebirforms_drafts_list, ebirforms_dues_list, \
+ebirforms_calendar_get, ebirforms_form_open and ebirforms_app_open (forms, tax-profile, calendar, \
+deadlines), unless the user names another taxpayer. ebirforms_profiles_list lists the taxpayers \
+(as tickets); ebirforms_app_open {\"app\": \"deadlines\", \"tin\": <ticket>} shows the next \
+returns due as a card.";
+
+/// The same, for one branch.
+const BRANCHCODE_HINT: &str = "An `@ebirforms:branchcode:<ticket>` token names one branch of a \
+taxpayer; the ticket stands for that branch's TIN. Attached to this chat, eBIRForms tools default \
+to that branch: pass the ticket as `tin` to ebirforms_drafts_list, ebirforms_form_open, \
+ebirforms_calendar_get and ebirforms_app_open, unless the user names another taxpayer.";
+
+/// What the agent is told when a message holds a return's token.
+const TAXFORM_HINT: &str = "An `@ebirforms:taxform:<ticket>` token names one return (taxpayer, \
+form and period); the ticket stands for it and is all you see. Call ebirforms_form_open with the \
+ticket as `code`, then ebirforms_form_fields. Walk the user through what the return still needs, \
+one item at a time, with the official rule for each (ebirforms_form_validate's messages). Save \
+with ebirforms_form_save_draft; nothing is queued or filed from a chat. ebirforms_app_open with \
+`form` set to the ticket shows the return.";
 
 /// `sha256:<hex>` of an app source as served.
 pub(crate) fn fingerprint(source: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())))
+}
+
+/// The `ebirforms_app_<function>` tool of each host function an app calls.
+fn host_tools(functions: &[&str]) -> Vec<String> {
+    functions
+        .iter()
+        .map(|function| app_tool_name(function))
+        .collect()
 }
 
 /// The tools the Forms app calls: the ticket helpers, the print preview,
@@ -65,45 +148,125 @@ pub(crate) fn forms_tools() -> Vec<String> {
         .iter()
         .map(|tool| tool.to_string())
         .collect();
-    tools.extend(
-        scope::FORMS
-            .iter()
-            .map(|(function, ..)| app_tool_name(function)),
-    );
+    tools.extend(host_tools(scope::FORMS));
     tools
 }
 
-/// The Forms app's manifest entry.
-pub(crate) fn forms_entry() -> Value {
-    json!({
-        "id": FORMS_ID,
-        "title": FORMS_TITLE,
-        "description": FORMS_DESCRIPTION,
-        "entry": format!("{APP_URI_PREFIX}{FORMS_ID}"),
+/// The Sign-in app's tools: never the assistant's.
+pub(crate) fn account_tools() -> Vec<String> {
+    [
+        ACCOUNT_STATUS,
+        ACCOUNT_SIGN_IN_START,
+        ACCOUNT_SIGN_IN_POLL,
+        ACCOUNT_SIGN_OUT,
+    ]
+    .iter()
+    .map(|tool| tool.to_string())
+    .collect()
+}
+
+fn ticket_schema() -> Value {
+    json!({ "type": "string", "maxLength": 30 })
+}
+
+/// Each app's props, placement, inline size and permissions.
+fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
+    let ticket_only = json!({ "type": "object", "properties": { "ticket": ticket_schema() } });
+    match id {
+        FORMS_ID => (
+            json!({
+                "type": "object",
+                "properties": {
+                    "ticket": ticket_schema(),
+                    "form": { "type": "string", "maxLength": 64 },
+                    "period": { "maxLength": 32 },
+                    "action": { "type": "string", "enum": ["view", "file", "submit"] },
+                    "draft_id": { "type": "integer" },
+                    "form_code": { "type": "string", "maxLength": 16 },
+                    "year": { "type": "integer", "minimum": 1900, "maximum": 2200 },
+                    "key": { "type": "integer" }
+                }
+            }),
+            json!(["full"]),
+            None,
+            json!({
+                "tools": forms_tools(),
+                // the Tax profile button
+                "open": { "apps": [TAX_PROFILE_ID] },
+                // Ask the assistant: the taxpayer, or this return
+                "attach": ["taxprofile", "taxform"],
+                // the print preview in the Bot's document view
+                "preview": {},
+            }),
+        ),
+        TAX_PROFILE_ID => {
+            let mut tools = vec![TICKET_SUBJECT.to_string(), TICKET_ISSUE.to_string()];
+            tools.extend(host_tools(scope::TAX_PROFILE));
+            (
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket": ticket_schema(),
+                        "year": { "type": "integer", "minimum": 1900, "maximum": 2200 }
+                    }
+                }),
+                json!(["full"]),
+                None,
+                json!({ "tools": tools, "open": { "apps": [FORMS_ID] }, "copy": true }),
+            )
+        }
+        CALENDAR_ID => {
+            let mut tools = vec![TICKET_SUBJECT.to_string()];
+            tools.extend(host_tools(scope::CALENDAR));
+            (
+                ticket_only,
+                json!(["full"]),
+                None,
+                json!({ "tools": tools, "open": { "apps": [FORMS_ID] } }),
+            )
+        }
+        REGISTER_ID => (
+            json!({ "type": "object", "properties": {} }),
+            json!(["full"]),
+            None,
+            json!({
+                "tools": account_tools(),
+                // Open account.buwiz.com/device, Copy code
+                "open": { "external": [ACCOUNT_SITE] },
+                "copy": true,
+            }),
+        ),
+        _ => (
+            ticket_only,
+            json!(["inline", "full"]),
+            // held until its calendar is read (`buwiz.ready()`)
+            Some(
+                json!({ "width": 480, "height": 320, "min_width": 320, "resizable": true, "wait_ready": true }),
+            ),
+            json!({ "tools": [CALENDAR_GET], "open": { "apps": [FORMS_ID, CALENDAR_ID] } }),
+        ),
+    }
+}
+
+/// One app's manifest entry.
+pub(crate) fn app_entry(app: &App) -> Value {
+    let (props, placement, inline, permissions) = app_spec(app.id);
+    let mut entry = json!({
+        "id": app.id,
+        "title": app.title,
+        "description": app.description,
+        "entry": format!("{APP_URI_PREFIX}{}", app.id),
         "mime": APP_MIME,
         "sdk": "1",
-        "fingerprint": fingerprint(FORMS_SOURCE),
-        "props": {
-            "type": "object",
-            "properties": {
-                "ticket": { "type": "string", "maxLength": 30 },
-                "form": { "type": "string", "maxLength": 64 },
-                "period": { "maxLength": 32 },
-                "action": { "type": "string", "enum": ["view", "file", "submit"] },
-                "draft_id": { "type": "integer" },
-                "form_code": { "type": "string", "maxLength": 16 },
-                "year": { "type": "integer", "minimum": 1900, "maximum": 2200 },
-                "key": { "type": "integer" }
-            }
-        },
-        "placement": ["full"],
-        "permissions": {
-            "tools": forms_tools(),
-            "attach": ["taxprofile"],
-            // the print preview in the Bot's document view
-            "preview": {},
-        },
-    })
+        "fingerprint": fingerprint(app.source),
+        "props": props,
+        "placement": placement,
+        "permissions": permissions,
+    });
+    if let Some(inline) = inline {
+        entry["inline"] = inline;
+    }
+    entry
 }
 
 /// The publisher key the release manifest names.
@@ -114,9 +277,14 @@ pub fn unsigned() -> Value {
     unsigned_for(RELEASE_KEY_ID)
 }
 
+/// The app `id`, if this plugin ships it.
+pub(crate) fn app(id: &str) -> Option<&'static App> {
+    APPS.iter().find(|app| app.id == id)
+}
+
 /// The source of the app `id`, exactly as `resources/read` serves it.
 pub fn app_source(id: &str) -> Option<&'static str> {
-    (id == FORMS_ID).then_some(FORMS_SOURCE)
+    app(id).map(|app| app.source)
 }
 
 /// The manifest without its signature, naming publisher key `key_id` (a
@@ -130,12 +298,17 @@ pub fn unsigned_for(key_id: &str) -> Value {
         "title": "eBIRForms",
         "description": "Philippine BIR returns for the taxpayers kept in the eBIRForms mini app on this computer.",
         "publisher": { "id": "app.buwiz", "key_id": key_id, "name": "Buwiz" },
-        "commands": [],
+        "commands": [
+            { "name": "taxprofile", "args": "[tin or name]", "description": "Open a taxpayer's tax profile", "resolve": RESOLVE },
+            { "name": "taxform", "args": "[form] [period] [view|file|submit]", "description": "Open a BIR return", "resolve": RESOLVE },
+        ],
         "scopes": [
             { "name": "taxprofile", "description": "Taxpayer by TIN or name", "resolve": RESOLVE, "attach": true, "hint": TAXPROFILE_HINT },
+            { "name": "branchcode", "description": "Branch of a taxpayer", "resolve": RESOLVE, "attach": true, "hint": BRANCHCODE_HINT },
+            { "name": "taxform", "description": "Return: form and period", "resolve": RESOLVE, "attach": true, "hint": TAXFORM_HINT },
         ],
         "routines": [],
-        "apps": [forms_entry()],
+        "apps": APPS.iter().map(app_entry).collect::<Vec<_>>(),
     })
 }
 
@@ -228,26 +401,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_manifest_keeps_the_plugin_id_and_names_only_forms() {
+    fn the_manifest_keeps_the_plugin_id_and_lists_every_app() {
         let m = unsigned();
         assert_eq!(m["id"], "app.buwiz.ebirforms");
         assert_eq!(m["protocol"], PROTOCOL);
         let apps = m["apps"].as_array().unwrap();
-        assert_eq!(apps.len(), 1);
-        let forms = &apps[0];
-        assert_eq!(forms["entry"], "buwiz-app://forms");
-        assert_eq!(forms["fingerprint"], fingerprint(FORMS_SOURCE));
-        let tools = forms["permissions"]["tools"].as_array().unwrap();
-        assert!(
-            !tools.is_empty() && tools.len() <= 64,
-            "{} tools",
-            tools.len()
+        let ids: Vec<&str> = apps.iter().map(|app| app["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            ["forms", "tax-profile", "calendar", "deadlines", "register"]
         );
-        assert!(
-            tools
-                .iter()
-                .all(|tool| tool.as_str().is_some_and(|t| t.starts_with("ebirforms_")))
+        for (entry, app) in apps.iter().zip(&APPS) {
+            assert_eq!(entry["entry"], format!("buwiz-app://{}", app.id));
+            assert_eq!(entry["fingerprint"], fingerprint(app.source));
+            let tools = entry["permissions"]["tools"].as_array().unwrap();
+            assert!(
+                !tools.is_empty() && tools.len() <= 64,
+                "{}: {} tools",
+                app.id,
+                tools.len()
+            );
+            for tool in tools {
+                let tool = tool.as_str().unwrap();
+                assert!(tool.starts_with("ebirforms_"), "{tool}");
+                // every tool an app may call is one its source names
+                let named = app.source.contains(&format!("\"{tool}\""))
+                    || tool
+                        .strip_prefix("ebirforms_account_")
+                        .is_some_and(|action| app.source.contains(&format!("\"{action}\"")))
+                    || tool
+                        .strip_prefix("ebirforms_app_")
+                        .is_some_and(|function| app.source.contains(&format!("\"{function}\"")));
+                assert!(named, "{} lists {tool} but never calls it", app.id);
+            }
+        }
+        let deadlines = &apps[3];
+        assert_eq!(deadlines["placement"], json!(["inline", "full"]));
+        assert_eq!(deadlines["inline"]["width"], 480);
+        assert_eq!(
+            deadlines["permissions"]["tools"],
+            json!(["ebirforms_calendar_get"])
         );
+        let commands: Vec<&str> = m["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| command["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(commands, ["taxprofile", "taxform"]);
+        let scopes: Vec<&str> = m["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|scope| scope["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(scopes, ["taxprofile", "branchcode", "taxform"]);
+        for scope in m["scopes"].as_array().unwrap() {
+            assert!(scope["hint"].as_str().unwrap().chars().count() <= 1500);
+        }
         // integers only, so it can be signed, and under 256 KiB
         assert!(jcs::canonical(&m).unwrap().len() < 256 * 1024);
         assert!(ManifestSource::Unsigned.staleness().is_none());
