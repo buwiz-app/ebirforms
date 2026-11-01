@@ -29,6 +29,7 @@ use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::account::Account;
+use crate::cards;
 use crate::manifest::{self, ManifestSource};
 use crate::owner;
 use crate::protocol::{self, Caller, Host, Origin};
@@ -53,6 +54,8 @@ pub(crate) const PROFILES_LIST: &str = "ebirforms_profiles_list";
 pub(crate) const DUES_LIST: &str = "ebirforms_dues_list";
 /// The filing calendar as the Deadlines card shows it.
 pub(crate) const CALENDAR_GET: &str = "ebirforms_calendar_get";
+/// A revenue district office by code or name, from eBIRForms' RDO table.
+pub(crate) const RDO_LOOKUP: &str = "ebirforms_rdo_lookup";
 pub(crate) const DRAFTS_LIST: &str = "ebirforms_drafts_list";
 pub(crate) const FORM_OPEN: &str = "ebirforms_form_open";
 pub(crate) const FORM_FIELDS: &str = "ebirforms_form_fields";
@@ -84,7 +87,8 @@ const ACCOUNT_TOOLS: [&str; 4] = [
 
 /// The assistant's tools that change nothing (`readOnlyHint`, P8): the ones
 /// a routine or resolve call may run.
-const READ_ONLY: [&str; 8] = [
+const READ_ONLY: [&str; 9] = [
+    RDO_LOOKUP,
     STATUS,
     RESOLVE,
     PROFILES_LIST,
@@ -99,8 +103,10 @@ const INSTRUCTIONS: &str = "eBIRForms (Philippine BIR tax returns) running headl
 over the taxpayer database eBIRForms keeps. Taxpayers, branches and returns reach you as tickets \
 (tkt_...), never as TINs: pass a ticket wherever a tool takes `tin`; a return's ticket also goes \
 in ebirforms_form_open's `code` and ebirforms_app_open's `form`. Never ask the user for a TIN and never write \
-one out; use the taxpayer's name. ebirforms_profiles_list lists the taxpayers, ebirforms_dues_list the returns \
-due, ebirforms_drafts_list a taxpayer's saved returns. To let the user work visually, call ebirforms_app_open \
+one out; use the taxpayer's name. ebirforms_profiles_list lists the taxpayers, ebirforms_drafts_list a \
+taxpayer's saved returns. To answer what is due or late, call ebirforms_calendar_get (`filter: overdue` \
+for late returns): the user sees its card, so answer in a sentence and don't repeat the list; \
+ebirforms_dues_list is the same calendar as plain rows, for your own checks. To let the user work visually, call ebirforms_app_open \
 with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` to open one \
 return), `app: \"tax-profile\"` for a taxpayer's registration, `app: \"calendar\"` for the \
 filing calendar, or `app: \"deadlines\"` for the next returns due as a card in the chat. You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
@@ -272,6 +278,8 @@ impl Server {
         if is_app_only(name) {
             return Ok(self.app_tool(&app, name, arguments));
         }
+        // as the caller sent them (tickets), for the card the answer carries
+        let sent = arguments.clone();
         let mut arguments = arguments.clone();
         let has_ticket = Value::Object(arguments.clone())
             .to_string()
@@ -286,6 +294,10 @@ impl Server {
         // What the model or an app reads names taxpayers by ticket.
         if name != RESOLVE {
             Scrubber::new(&app, today).result(&mut result);
+        }
+        // the assistant's answer carries its card; an app's own read does not
+        if matches!(caller.origin, Origin::Agent | Origin::Unknown) {
+            cards::decorate(name, &sent, &mut result);
         }
         Ok(result)
     }
@@ -416,6 +428,7 @@ impl Server {
             PROFILES_LIST => no_arguments(arguments).and_then(|()| profiles_list(app)),
             DUES_LIST => dues_list(app, arguments, today),
             CALENDAR_GET => calendar_get(app, arguments, today),
+            RDO_LOOKUP => rdo_lookup(app, arguments),
             DRAFTS_LIST => drafts_list(app, arguments),
             FORM_OPEN => self.form_open(app, arguments, today),
             FORM_FIELDS => self.form_fields(arguments),
@@ -1171,9 +1184,15 @@ fn calendar_get(
     arguments: &Map<String, Value>,
     today: NaiveDate,
 ) -> Result<Value, String> {
-    reject_unknown(arguments, &["tin", "from", "to"])?;
+    reject_unknown(arguments, &["tin", "from", "to", "filter"])?;
     let tin = tin_filter(arguments)?;
-    let from = date_arg(arguments, "from")?.unwrap_or(today - chrono::Duration::days(92));
+    let overdue_only = match text_arg(arguments, "filter")?.as_deref() {
+        None => false,
+        Some("overdue") => true,
+        Some(other) => return Err(format!("`filter` must be overdue (got `{other}`)")),
+    };
+    let back = if overdue_only { 365 } else { 92 };
+    let from = date_arg(arguments, "from")?.unwrap_or(today - chrono::Duration::days(back));
     let to = date_arg(arguments, "to")?.unwrap_or(today + chrono::Duration::days(183));
     if to < from {
         return Err("`to` is before `from`".into());
@@ -1228,11 +1247,98 @@ fn calendar_get(
                 "enabled": true,
             })
         })
+        .filter(|event| !overdue_only || event["overdue"] == true)
         .collect();
     Ok(json!({
         "from": from.format("%Y-%m-%d").to_string(),
         "to": to.format("%Y-%m-%d").to_string(),
         "events": events,
+    }))
+}
+
+/// `ebirforms_rdo_lookup {query}`: the revenue district offices whose code
+/// or name matches, and how many saved taxpayers each one has.
+fn rdo_lookup(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
+    reject_unknown(arguments, &["query"])?;
+    let raw = text_arg(arguments, "query")?
+        .map(|query| query.trim().to_string())
+        .filter(|query| !query.is_empty())
+        .ok_or("`query` is required: an RDO code (43A, 043) or part of its name")?;
+    // a number is padded as the table writes it (43 -> 043); 43A stays
+    let code = if raw.len() <= 3 && raw.chars().all(|c| c.is_ascii_digit()) {
+        format!("{raw:0>3}")
+    } else {
+        raw.to_ascii_uppercase()
+    };
+    let wanted = raw.to_lowercase();
+    // a plain number also finds the offices it was split into (43 -> 043,
+    // 43A East Pasig, 43B West Pasig)
+    let family = |rdo: &str| {
+        rdo.trim_start_matches('0')
+            .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+            .to_string()
+    };
+    let number = (raw.len() <= 3 && raw.chars().all(|c| c.is_ascii_digit())).then(|| family(&raw));
+    let mut matches: Vec<(String, String)> = BirApp::rdos()
+        .into_iter()
+        .map(|rdo| {
+            let office = rdo
+                .title
+                .split_once(" · ")
+                .map_or(String::new(), |(_, name)| name.to_string());
+            (rdo.value, office)
+        })
+        .filter(|(rdo, office)| {
+            rdo.eq_ignore_ascii_case(&code)
+                || rdo.eq_ignore_ascii_case(&raw)
+                || number
+                    .as_deref()
+                    .is_some_and(|number| family(rdo) == number)
+                || office.to_lowercase().contains(&wanted)
+        })
+        .collect();
+    // the code asked for first; a code (not a name) asked for alone finds
+    // only itself and the offices split from it
+    if let Some(exact) = matches
+        .iter()
+        .position(|(rdo, _)| rdo.eq_ignore_ascii_case(&code))
+    {
+        let first = matches.remove(exact);
+        let wanted_family = family(&first.0);
+        matches.retain(|(rdo, _)| number.is_some() && family(rdo) == wanted_family);
+        matches.insert(0, first);
+    }
+    if matches.is_empty() {
+        return Err(format!(
+            "no RDO matches `{}`",
+            raw.chars().take(40).collect::<String>()
+        ));
+    }
+    matches.truncate(20);
+    let taxpayers = app.list_taxpayers().map_err(|error| error.to_string())?;
+    let registered = |rdo: &str| {
+        taxpayers
+            .iter()
+            .filter(|taxpayer| !taxpayer.archived)
+            .flat_map(|taxpayer| &taxpayer.branches)
+            .filter(|branch| branch.facts.rdo_code.eq_ignore_ascii_case(rdo))
+            .count()
+    };
+    Ok(json!({
+        "mode": "rdo",
+        "matches": matches.iter().map(|(rdo, office)| {
+            let mut out = json!({ "code": rdo, "office": office, "taxpayers": registered(rdo) });
+            // an old code with no name of its own: the offices split from it
+            let split: Vec<String> = matches
+                .iter()
+                .filter(|(other, name)| office.is_empty() && other != rdo && !name.is_empty() && family(other) == family(rdo))
+                .map(|(other, name)| format!("{other} {name}"))
+                .collect();
+            if !split.is_empty() {
+                out["split_into"] = json!(split);
+            }
+            out
+        }).collect::<Vec<_>>(),
     }))
 }
 
@@ -1900,7 +2006,7 @@ fn tool_list() -> Value {
         ),
         tool(
             DUES_LIST,
-            "List returns due by eBIRForms's filing calendar, with their status. `filter`: upcoming (default, the next 45 days), overdue (past due and not filed) or all. `tin` limits it to one taxpayer.",
+            "The filing calendar as plain rows, for your own checks (no card): returns due with their status. `filter`: upcoming (default, the next 45 days), overdue (past due and not filed) or all. `tin` limits it to one taxpayer. To show the user what's due or late, use ebirforms_calendar_get instead.",
             json!({
                 "type": "object",
                 "properties": { "tin": ticket, "filter": { "type": "string", "enum": ["upcoming", "overdue", "all"] } },
@@ -1910,10 +2016,21 @@ fn tool_list() -> Value {
         ),
         tool(
             CALENDAR_GET,
-            "The filing calendar between `from` and `to` (YYYY-MM-DD; default about three months back to six ahead): each return due, its status (not_started, draft, queued, filed, confirmed, paid) and whether it is overdue. Each return comes back as a ticket (`key`) that ebirforms_form_open and ebirforms_app_open take as `form`. `tin` limits it to one taxpayer.",
+            "The filing calendar between `from` and `to` (YYYY-MM-DD; default about three months back to six ahead): each return due, its status (not_started, draft, queued, filed, confirmed, paid) and whether it is overdue. `filter: overdue` keeps only late returns (from a year back). Each return comes back as a ticket (`key`) that ebirforms_form_open and ebirforms_app_open take as `form`. `tin` limits it to one taxpayer. The answer shows the user a card (what's due, a week, a month, or late returns): don't repeat it as a list.",
             json!({
                 "type": "object",
-                "properties": { "tin": ticket, "from": { "type": "string" }, "to": { "type": "string" } },
+                "properties": { "tin": ticket, "from": { "type": "string" }, "to": { "type": "string" }, "filter": { "type": "string", "enum": ["overdue"] } },
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        tool(
+            RDO_LOOKUP,
+            "Look up a BIR revenue district office by code (43A, 043) or part of its name, from eBIRForms' RDO table, with how many saved taxpayers are registered there. The answer shows the user a card.",
+            json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"],
                 "additionalProperties": false
             }),
             true,

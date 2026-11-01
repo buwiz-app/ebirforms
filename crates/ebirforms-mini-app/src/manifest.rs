@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::cards;
 use crate::jcs;
 use crate::scope;
 use crate::server::{
@@ -59,6 +60,12 @@ const ACCOUNT_SITE: &str = "https://account.buwiz.com";
 /// The next returns due, as a card in the chat.
 pub(crate) const DEADLINES_ID: &str = "deadlines";
 pub(crate) const DEADLINES_SOURCE: &str = include_str!("../../../apps/ebirforms/deadlines.tsx");
+/// Answer cards about deadlines, inline in the chat (`crate::cards`).
+pub(crate) const CARD_DATES_ID: &str = "card-dates";
+pub(crate) const CARD_DATES_SOURCE: &str = include_str!("../../../apps/ebirforms/card-dates.tsx");
+/// Answer cards for quick lookups (an RDO).
+pub(crate) const CARD_CALC_ID: &str = "card-calc";
+pub(crate) const CARD_CALC_SOURCE: &str = include_str!("../../../apps/ebirforms/card-calc.tsx");
 pub(crate) const APP_URI_PREFIX: &str = "buwiz-app://";
 pub(crate) const APP_MIME: &str = "text/x-nsh-tsx";
 
@@ -72,7 +79,7 @@ pub(crate) struct App {
 }
 
 /// The apps, in manifest order.
-pub(crate) const APPS: [App; 5] = [
+pub(crate) const APPS: [App; 7] = [
     App {
         id: FORMS_ID,
         title: FORMS_TITLE,
@@ -102,6 +109,18 @@ pub(crate) const APPS: [App; 5] = [
         title: "Buwiz Sign-in",
         description: "Sign in to your Buwiz account on this computer, which eBIRForms will need to file returns. Preparing and saving returns works without it.",
         source: REGISTER_SOURCE,
+    },
+    App {
+        id: CARD_DATES_ID,
+        title: "BIR answer: deadlines",
+        description: "Answer cards about deadlines: what's due next, this week, a month, and late returns.",
+        source: CARD_DATES_SOURCE,
+    },
+    App {
+        id: CARD_CALC_ID,
+        title: "BIR answer: lookups",
+        description: "Answer cards for quick lookups: a revenue district office.",
+        source: CARD_CALC_SOURCE,
     },
 ];
 
@@ -236,6 +255,19 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
                 "copy": true,
             }),
         ),
+        CARD_DATES_ID | CARD_CALC_ID => {
+            let mut permissions = json!({ "tools": cards::refresh_tools(id) });
+            if id == CARD_DATES_ID {
+                // Open (a return in Forms) and Open the Calendar
+                permissions["open"] = json!({ "apps": [FORMS_ID, CALENDAR_ID] });
+            }
+            (
+                cards::props_schema(),
+                json!(["inline"]),
+                Some(cards::inline(id)),
+                permissions,
+            )
+        }
         _ => (
             ticket_only,
             json!(["inline", "full"]),
@@ -409,7 +441,15 @@ mod tests {
         let ids: Vec<&str> = apps.iter().map(|app| app["id"].as_str().unwrap()).collect();
         assert_eq!(
             ids,
-            ["forms", "tax-profile", "calendar", "deadlines", "register"]
+            [
+                "forms",
+                "tax-profile",
+                "calendar",
+                "deadlines",
+                "register",
+                "card-dates",
+                "card-calc"
+            ]
         );
         for (entry, app) in apps.iter().zip(&APPS) {
             assert_eq!(entry["entry"], format!("buwiz-app://{}", app.id));
@@ -426,6 +466,7 @@ mod tests {
                 assert!(tool.starts_with("ebirforms_"), "{tool}");
                 // every tool an app may call is one its source names
                 let named = app.source.contains(&format!("\"{tool}\""))
+                    || crate::cards::refresh_tools(app.id).contains(&tool)
                     || tool
                         .strip_prefix("ebirforms_account_")
                         .is_some_and(|action| app.source.contains(&format!("\"{action}\"")))
