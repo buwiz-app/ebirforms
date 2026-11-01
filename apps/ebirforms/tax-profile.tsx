@@ -224,7 +224,7 @@ function searchText(f: ScreenFormIndexEntry): string {
 function statusKind(status: string): "draft" | "queued" | "filed" | "not_started" {
   if (status === "Draft") return "draft";
   if (status === "Queued") return "queued";
-  if (status === "Submitted" || status === "Confirmed" || status === "Paid") return "filed";
+  if (status === "Sent" || status === "Submitted" || status === "Confirmed" || status === "Paid") return "filed";
   return "not_started";
 }
 function initials(name: string): string {

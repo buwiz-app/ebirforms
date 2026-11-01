@@ -11,8 +11,8 @@
 //! the Bot respawns this process back to back: a second process waits for it
 //! briefly, then gets a plain refusal.
 //!
-//! Nothing is sent from here: sending would need the desktop's keychain
-//! entries (bir-submit), so a return can be saved but not queued.
+//! A return is queued only once this computer is signed in to Buwiz
+//! ([`crate::account`]); the queue then sends it through Buwiz's relay.
 
 use std::fs::File;
 use std::io::Write;
@@ -35,7 +35,7 @@ pub(crate) const IN_USE: &str =
     "Another eBIRForms mini app process is saving right now: ask again in a moment.";
 
 /// What queueing a return for filing says.
-pub(crate) const NO_SENDING: &str = "Sending is not available in the eBIRForms mini app yet: the return is saved here, and nothing was queued or sent.";
+pub(crate) const SIGN_IN_FIRST: &str = "Sign in to Buwiz first (open Buwiz Sign-in): the return is saved here, and nothing was queued or sent.";
 
 /// How long a write waits for the lock.
 const WAIT: Duration = Duration::from_millis(1000);

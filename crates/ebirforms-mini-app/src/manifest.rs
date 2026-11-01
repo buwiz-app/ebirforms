@@ -100,7 +100,7 @@ pub(crate) const APPS: [App; 5] = [
     App {
         id: REGISTER_ID,
         title: "Buwiz Sign-in",
-        description: "Sign in to your Buwiz account on this computer, which eBIRForms will need to file returns. Preparing and saving returns works without it.",
+        description: "Sign in to your Buwiz account on this computer, which eBIRForms files returns with. Preparing and saving returns works without it.",
         source: REGISTER_SOURCE,
     },
 ];

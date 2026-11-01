@@ -429,7 +429,7 @@ function existingOfferFor(existing: any) {
       fastLane: false,
     };
   }
-  const filed = existing.status === "Submitted" ? "submitted" : "filed";
+  const filed = existing.status === "Submitted" || existing.status === "Sent" ? "submitted" : "filed";
   const choices = [{ id: "view", label: "View read-only", hint: `See exactly what was ${filed}.`, variant: "primary" }];
   if (has("amend")) choices.push({ id: "amend", label: "Amend this return", hint: `New amended return. ${FILED_KEPT}`, variant: "danger" });
   choices.push(keep);
@@ -1893,7 +1893,7 @@ function Chip(p: { text: string; tone?: "neutral" | "accent" | "success" | "warn
 function statusTone(status: string): "neutral" | "accent" | "success" | "warning" {
   if (status === "Draft") return "warning";
   if (status === "Queued") return "accent";
-  if (status === "Submitted" || status === "Confirmed" || status === "Paid") return "success";
+  if (status === "Sent" || status === "Submitted" || status === "Confirmed" || status === "Paid") return "success";
   return "neutral";
 }
 
