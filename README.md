@@ -12,7 +12,7 @@ The same layout as every mini app in the `buwiz-app` org (Books is the reference
 | `crates/ebirforms-mini-app/` | The mini app: MCP server, manifest and signing, tickets, TIN scrubbing. It began as `buwiz-mcp` (eBIRForms `feat/mcp-mode` @ `f0d5afa`) and keeps that history. |
 | `apps/ebirforms/` | The app screens: `forms`, `tax-profile`, `calendar`, `deadlines` (an inline card) and `register` (Buwiz Sign-in). |
 | `tests/` | Integration tests (the Bot contract, own data). |
-| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `release/prepare.sh`. |
+| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `bot/host-test.sh`, `release/prepare.sh`. |
 | `legacy/` | The first mini app, from `hexuria/buwiz-forms` branch `rox-mini-app-round2` @ `834e7203`, with its history. It is the reference for porting the remaining 12 apps and cards; it does not build here and is deleted once ported. |
 
 It builds on eBIRForms' domain crates (`bir-app-core`, pinned by commit in the root `Cargo.toml`). Only the
@@ -41,6 +41,28 @@ target/release/ebirforms-mini-app mcp              # what the Bot runs
 
 The Bot serves only a signed manifest: `EBIRFORMS_MANIFEST`, else `app.buwiz.ebirforms.manifest.json` next to the
 executable.
+
+## Checks
+
+On Linux with Node 22, Rust (see `rust-toolchain.toml`), and `lsof`:
+
+```sh
+git clone https://github.com/buwiz-bot/buwiz-bot bot
+git -C bot checkout --detach 2f93df804520738d32137668424427de70ee85ee
+(cd bot/server && npm ci)
+BUWIZ_BOT_DIR="$PWD/bot" tools/check-all.sh
+```
+
+The gates include the Rust checks, a no-detached-signal-setters check over `apps/`, Bot conformance,
+and **Bot host test**. Run just the latter with `BUWIZ_BOT_DIR="$PWD/bot" tools/bot/host-test.sh`.
+It uses a detached Bot worktree and a throwaway broker (port 8811, override with `EBIRFORMS_HOST_PORT`,
+8810 or above), per-run trust, `ebirforms-test-01`, a file keystore, and a synthetic scratch taxpayer
+database. It never uses a keychain or signs in; the account endpoint points to loopback.
+Scratch data is deleted on exit; `KEEP_TMP=1` retains it, including test keys, for local debugging.
+
+The signed `ebirforms_status` check expects refusal: status is assistant-only in the shipped manifest.
+Status succeeds through the assistant surface; Forms and Deadlines each exercise a permitted signed read.
+All four `ebirforms_account_*` tools are hidden from and refused to the assistant.
 
 ## Next
 
