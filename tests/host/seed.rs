@@ -3,8 +3,22 @@
 use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
 use ebirforms_mini_app::owner;
 
+fn main() {
+    if seed().is_err() {
+        eprintln!("host-seed: scratch taxpayer creation failed (details suppressed)");
+        std::process::exit(1);
+    }
+}
+
+fn synthetic_root() -> Result<String, getrandom::Error> {
+    let mut entropy = [0u8; 4];
+    getrandom::fill(&mut entropy)?;
+    let value = u32::from_le_bytes(entropy) % (10u32.pow(9) - 1) + 1;
+    Ok(format!("{value:09}"))
+}
+
 #[allow(unsafe_code)]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn seed() -> Result<(), Box<dyn std::error::Error>> {
     let dir = std::env::var_os("EBIRFORMS_DATA_DIR").ok_or("scratch data dir is required")?;
     let dir = std::path::Path::new(&dir);
     if !dir.join("host-test-scratch").is_file() {
@@ -17,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let app = BirApp::open_at(&path)?;
     app.create_taxpayer(&NewTaxpayer {
-        tin_root: format!("{:09}", 123_453),
+        tin_root: synthetic_root()?,
         name: "Synthetic Host Taxpayer".into(),
         taxpayer_type: "Individual".into(),
         birth_date: None,
