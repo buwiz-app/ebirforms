@@ -64,32 +64,8 @@ impl Caller {
     }
 }
 
-/// A reserved tool's answer: `structuredContent` is the object itself.
-pub(crate) fn ok(structured: Value) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": structured.to_string() }],
-        "structuredContent": structured,
-        "isError": false,
-    })
-}
-
-/// A refusal with a spec error code.
-pub(crate) fn fail(code: &str, message: &str) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": message }],
-        "structuredContent": { "code": code, "message": message },
-        "isError": true,
-    })
-}
-
-/// The reserved tools this plugin implements (7.8).
-pub(crate) const RESERVED: [&str; 5] = [
-    "buwiz.provision",
-    "buwiz.session.open",
-    "buwiz.session.close",
-    "buwiz.ticket.resolve",
-    "buwiz.uninstall",
-];
+// Result shapes and the reserved-tool list are the SDK's, byte for byte.
+pub(crate) use buwiz_plugin::{RESERVED, fail, ok};
 
 /// What `buwiz.*` keeps between requests: the plugin key (memory only, P4)
 /// and the opens it certified.

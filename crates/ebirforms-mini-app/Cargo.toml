@@ -31,6 +31,7 @@ name = "host-seed"
 path = "../../tests/host/seed.rs"
 
 [dependencies]
+buwiz-plugin = { git = "https://github.com/buwiz-app/buwiz-sdk", rev = "2120c725112e2072b22f6630079fc938b6c9b1e9" }
 bir-app-core.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -38,7 +39,6 @@ regex.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 hex = "0.4.3"
-base64 = "0.22"
 ed25519-dalek = "2"
 getrandom = "0.3"
 # Buwiz sign-in and sending (account.rs): eBIRForms' submission client on a
