@@ -62,7 +62,7 @@ async function main() {
     env: {
       PATH: process.env.PATH, HOME: RUN, TMPDIR: RUN, PORT,
       GROK_DATA_DIR: `${RUN}/data`, BUWIZ_TRUST_FILE: `${RUN}/trust.json`,
-      BUWIZ_KEYSTORE: `file:${RUN}/keys`, BUWIZ_NO_KEYCHAIN: "1", MOCK: "1",
+      BUWIZ_KEYSTORE: `file:${RUN}/keys`, BUWIZ_NO_KEYCHAIN: "1", MOCK: "1", NODE_DISABLE_COMPILE_CACHE: "1",
       EBIRFORMS_DATA_DIR: `${RUN}/ebirforms-data`, EBIRFORMS_ACCOUNT_URL: "http://127.0.0.1:1",
     },
   });
