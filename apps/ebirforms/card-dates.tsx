@@ -475,8 +475,10 @@ function stageOf(r: any): [string, Tone, string] {
     case "gave_up":
       return ["Stopped", "danger", `Back to a draft${r.reason ? `: ${r.reason}` : ""}`];
     case "sent":
-      if (r.dry_run) return ["Dry run", "plain", `Dry run on ${since}: not sent to the BIR`];
-      return ["Sent", "ok", r.receipt ? `Sent ${since} · receipt received` : `Sent ${since}`];
+      if (r.dry_run === true) return ["Dry run", "plain", `Dry run on ${since}: not sent to the BIR`];
+      // no receipt: how it was sent is not known, so it never reads as a live send
+      if (!r.receipt) return ["No receipt", "warn", `Sent, no receipt (${since}): not known whether it was a dry run`];
+      return ["Sent", "ok", `Sent ${since} · receipt received`];
     case "confirmed":
       return ["Confirmed", "ok", `Confirmed by the BIR`];
     case "paid":

@@ -19,6 +19,8 @@ use crate::tickets::{self, Subject};
 const MATCHES_MAX: usize = 20;
 /// How long a sent return stays on the queue card.
 const SENT_DAYS: i64 = 30;
+/// A sent return with no receipt: how it was sent is not known.
+const NO_RECEIPT: &str = "no receipt, so not known whether it was a dry run";
 
 fn reject_unknown(arguments: &Map<String, Value>, allowed: &[&str]) -> Result<(), String> {
     match arguments
@@ -312,7 +314,12 @@ fn stage(stage: Option<&SendStage>, out: &mut Value) {
         Some(SendStage::Sent { at, receipt }) => {
             out["sent_at"] = json!(at);
             out["receipt"] = json!(receipt.is_some());
-            out["dry_run"] = json!(receipt.as_ref().is_some_and(|r| r.is_test()));
+            // only a receipt says how it was sent: without one, `dry_run`
+            // stays unset rather than reading as a live send
+            match receipt {
+                Some(receipt) => out["dry_run"] = json!(receipt.is_test()),
+                None => out["receipt_note"] = json!(NO_RECEIPT),
+            }
         }
         _ => {}
     }
@@ -376,7 +383,7 @@ pub(crate) fn queue_list(
         "waiting": waiting,
         "sent": sent,
         "note": if signed_in {
-            "waiting: queued in Forms, sent to the BIR in the background. sent: sent in the last 30 days. A dry_run receipt means the server only simulated the send. The user queues and cancels in the Forms app."
+            "waiting: queued in Forms, sent to the BIR in the background. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
         } else {
             "This computer is not signed in to Buwiz, so nothing is sent: the user signs in in the Sign-in app (ebirforms_app_open `register`). The user queues and cancels in the Forms app."
         },
@@ -540,6 +547,41 @@ mod tests {
             .filter(|atc| atc_rate(&BirApp::atc_rates(&atc.value)).1)
             .count();
         assert_eq!(varies, 96);
+    }
+
+    #[test]
+    fn a_sent_return_without_a_receipt_has_no_dry_run() {
+        let at = Some("2026-11-01T02:50:44Z".to_string());
+        let mut bare = json!({});
+        stage(
+            Some(&SendStage::Sent {
+                at: at.clone(),
+                receipt: None,
+            }),
+            &mut bare,
+        );
+        assert_eq!(bare["stage"], "sent");
+        assert_eq!(bare["receipt"], false);
+        assert!(bare.get("dry_run").is_none(), "{bare}");
+        assert_eq!(bare["receipt_note"], NO_RECEIPT);
+        for (mode, dry_run) in [("dry_run", true), ("live", false)] {
+            let receipt = bir_app_core::ReceiptInfo {
+                jti: None,
+                mode: mode.into(),
+                iat: None,
+            };
+            let mut row = json!({});
+            stage(
+                Some(&SendStage::Sent {
+                    at: at.clone(),
+                    receipt: Some(receipt),
+                }),
+                &mut row,
+            );
+            assert_eq!(row["receipt"], true);
+            assert_eq!(row["dry_run"], dry_run, "{mode}");
+            assert!(row.get("receipt_note").is_none());
+        }
     }
 
     #[test]
