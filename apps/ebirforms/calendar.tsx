@@ -151,7 +151,7 @@ function errText(e: unknown) {
 function statusKind(status: string) {
   if (status === "Draft") return "draft";
   if (status === "Queued") return "queued";
-  if (status === "Submitted" || status === "Confirmed" || status === "Paid") return "filed";
+  if (status === "Sent" || status === "Submitted" || status === "Confirmed" || status === "Paid") return "filed";
   return "not_started";
 }
 /** Who a row belongs to: the taxpayer, plus the branch when it has several (home.js `whoLine`). */
