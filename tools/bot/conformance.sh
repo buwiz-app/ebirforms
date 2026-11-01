@@ -81,6 +81,7 @@ cat >"$TMP/trust.json" <<JSON
 }
 JSON
 export BUWIZ_TRUST_FILE="$TMP/trust.json"
+export BUWIZ_KEYSTORE="file:$TMP/keys"
 
 # 5. generate under the test key id, sign with the test key file
 "$BIN" manifest --key-id "$KEY_ID" >"$TMP/manifest.json"
@@ -100,7 +101,8 @@ node --disable-warning=ExperimentalWarning "$RUNNER" \
   --command "$BIN" --args mcp \
   --manifest "$TMP/signed.json" --key-file "$TMP/test.key" \
   --manifest-env EBIRFORMS_MANIFEST \
-  --env "EBIRFORMS_DATA_DIR=$TMP/ebirforms-data" "$@"
+  --env "EBIRFORMS_DATA_DIR=$TMP/ebirforms-data" \
+  --env "EBIRFORMS_ACCOUNT_URL=http://127.0.0.1:1" "$@"
 STATUS=$?
 set -e
 exit "$STATUS"

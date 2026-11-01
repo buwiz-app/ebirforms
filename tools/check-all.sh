@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # tools/check-all.sh — every gate a commit must pass, in order: rustfmt,
 # clippy with warnings denied, the Rust tests, and the Buwiz Bot's conformance
-# runner.
+# runner and real-broker host test, plus the TSX setter guard.
 #
 # It prints one line per gate and a summary, keeps each gate's output in a
 # temp folder, and exits non-zero when any gate fails.
 #
 # Env: BUWIZ_BOT_DIR  a Buwiz Bot checkout at protocol 2.0 for the conformance runner
-#      SKIP_BOT=1     skip Bot conformance (no Bot checkout at hand); the
+#      SKIP_BOT=1     skip both Bot gates (no Bot checkout at hand); the
 #                     summary says so, and the run cannot pass
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,15 +32,30 @@ summary() {
 tests_total() {
   cargo test --quiet 2>&1 | tee "$OUT/cargo-test-full.log" | grep -E '^test result' | awk '{p+=$4; f+=$6} END {printf "test result: %d passed; %d failed\n", p, f; exit (f > 0)}'
 }
+no_detached_setters() {
+  local status=0
+  grep -RnE '=[[:blank:]]*\{[[:blank:]]*[A-Za-z_$][[:alnum:]_$.]*\.set[[:blank:]]*\}' apps/ || status=$?
+  case "$status" in
+    1) echo "no detached setters: pass" ;;
+    0) echo 'use onChange={(v) => x.set(v)}, not a detached setter' >&2; return 1 ;;
+    *) return "$status" ;;
+  esac
+}
+setters_total() {
+  node --test tests/detached-setters.mjs && no_detached_setters
+}
 
 gate "cargo fmt --check" fmt cargo fmt --check
 gate "cargo clippy -D warnings" clippy cargo clippy --all-targets -- -D warnings
 gate "cargo test" cargo-test tests_total
+gate "No detached setters" detached-setters setters_total
 if [ "${SKIP_BOT:-0}" = "1" ]; then
   printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot conformance"
+  printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot host test"
   skipped=1
 else
   gate "Bot conformance" conformance bash tools/bot/conformance.sh
+  gate "Bot host test" host-test bash tools/bot/host-test.sh
 fi
 
 echo "logs: $OUT"
