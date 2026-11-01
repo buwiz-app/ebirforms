@@ -29,7 +29,7 @@ pub(crate) enum Rule {
     Rows,
 }
 
-/// How a call touches the database, for the owner lock (`owner.rs`).
+/// How a call touches the database: only a read runs for a resolve or routine call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Access {
     /// Reads or computes only.
@@ -37,10 +37,10 @@ pub(crate) enum Access {
     /// Writes only this protocol's or the page's own bookkeeping (a
     /// one-time note marked seen), never a return, taxpayer or the queue.
     Bookkeeping,
-    /// Changes filing data: needs the owner lock.
+    /// Changes filing data.
     Write,
-    /// Puts a return in the sending queue: needs the owner lock, then the
-    /// queue runs once through the relay.
+    /// Puts a return in the sending queue (signed in only), then the queue
+    /// runs once through the relay.
     Queue,
 }
 

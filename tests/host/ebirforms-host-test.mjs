@@ -178,7 +178,7 @@ async function main() {
     const agentStatus = await broker("agent", "ebirforms_status");
     const state = JSON.parse(agentStatus.content);
     check("assistant status answers from the scratch database with sending off", agentStatus.is_error === false
-      && state.taxpayers === 1 && state.sending === false && state.signed_in === false && state.writable === true);
+      && state.taxpayers === 1 && state.sending === false && state.signed_in === false);
     const notGranted = await post("/v1/host/call", envelope(deadlines, "ebirforms_resolve", {}));
     check("a tool outside Deadlines permissions is refused", refused(notGranted, "permission_denied"));
     const forged = await post("/v1/host/call", envelope(forms, "ebirforms_app_screen_forms_index", { args: [] }, {}, generate().seed));

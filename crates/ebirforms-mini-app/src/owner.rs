@@ -7,9 +7,10 @@
 //! keychain: the database key is a 0600 file in that folder, made on first
 //! run. Old desktop data comes in by export, later.
 //!
-//! The database's owner lock is taken per write and let go after, because
-//! the Bot respawns this process back to back: a second process waits for it
-//! briefly, then gets a plain refusal.
+//! Several processes may have the database open at once (the Bot respawns
+//! this process back to back): eBIRForms shares the file between them, and a
+//! write that collides with another process's answers eBIRForms' own "another
+//! app is saving" error.
 //!
 //! A return is queued only once this computer is signed in to Buwiz
 //! ([`crate::account`]); the queue then sends it through Buwiz's relay.
@@ -17,9 +18,6 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use bir_app_core::bir_core::db::{DbError, try_acquire_live_owner_lock};
 
 use crate::manifest::PLUGIN_ID;
 
@@ -30,16 +28,8 @@ pub const DATABASE_FILE: &str = "ebirforms.db";
 /// The database key file in the data folder (64 hex digits, mode 0600).
 pub const KEY_FILE: &str = "ebirforms.key";
 
-/// What a refused write says while another process holds the database.
-pub(crate) const IN_USE: &str =
-    "Another eBIRForms mini app process is saving right now: ask again in a moment.";
-
 /// What queueing a return for filing says.
 pub(crate) const SIGN_IN_FIRST: &str = "Sign in to Buwiz first (open Buwiz Sign-in): the return is saved here, and nothing was queued or sent.";
-
-/// How long a write waits for the lock.
-const WAIT: Duration = Duration::from_millis(1000);
-const STEP: Duration = Duration::from_millis(100);
 
 /// The data folder: [`DATA_DIR_ENV`], else the platform's.
 pub fn data_dir() -> PathBuf {
@@ -110,7 +100,7 @@ pub unsafe fn prepare(dir: &Path) -> Result<PathBuf, String> {
         std::env::set_var("BUWIZ_DB_KEY_FILE", &key);
         std::env::remove_var("BUWIZ_DB_KEY");
         std::env::set_var("BUWIZ_DATABASE_PATH", &database);
-        std::env::set_var("BIR_LOG_DIR", dir.join("logs"));
+        std::env::set_var("BUWIZ_LOG_DIR", dir.join("logs"));
     }
     Ok(database)
 }
@@ -125,29 +115,4 @@ pub(crate) fn restrict(path: &Path, mode: u32) -> Result<(), String> {
 #[cfg(not(unix))]
 pub(crate) fn restrict(_path: &Path, _mode: u32) -> Result<(), String> {
     Ok(())
-}
-
-/// The owner lock, held while this value lives.
-pub(crate) struct OwnerLock(#[allow(dead_code)] File);
-
-/// Take the owner lock of the database at `path`, waiting up to a second.
-pub(crate) fn acquire(path: &Path) -> Result<OwnerLock, String> {
-    let mut waited = Duration::ZERO;
-    loop {
-        match try_acquire_live_owner_lock(path) {
-            Ok(file) => return Ok(OwnerLock(file)),
-            Err(DbError::LiveDatabaseInUse(_)) if waited < WAIT => {
-                std::thread::sleep(STEP);
-                waited += STEP;
-            }
-            Err(DbError::LiveDatabaseInUse(_)) => return Err(IN_USE.to_string()),
-            Err(error) => return Err(format!("the database lock: {error}")),
-        }
-    }
-}
-
-/// Whether a write would get the lock now (for `ebirforms_status`); the lock is
-/// let go again at once.
-pub(crate) fn writable(path: &Path) -> bool {
-    try_acquire_live_owner_lock(path).is_ok()
 }

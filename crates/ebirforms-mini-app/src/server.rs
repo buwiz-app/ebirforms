@@ -16,7 +16,7 @@
 //! Buwiz Bot speaks the Mini App Protocol 2.0: `buwiz.provision` first, then
 //! every call carries its caller (`_meta["buwiz/caller"]`), and
 //! [`Server::authorize`] holds each origin to what it may do before a tool
-//! runs. Writes take the database's owner lock for the call only
+//! runs. eBIRForms shares the database with this mini app's other processes
 //! ([`crate::owner`]).
 
 use std::collections::BTreeMap;
@@ -29,6 +29,7 @@ use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::account::Account;
+use crate::answers;
 use crate::cards;
 use crate::manifest::{self, ManifestSource};
 use crate::owner;
@@ -56,6 +57,12 @@ pub(crate) const DUES_LIST: &str = "ebirforms_dues_list";
 pub(crate) const CALENDAR_GET: &str = "ebirforms_calendar_get";
 /// A revenue district office by code or name, from eBIRForms' RDO table.
 pub(crate) const RDO_LOOKUP: &str = "ebirforms_rdo_lookup";
+/// An ATC from eBIRForms' ATC table, with the rate it lists.
+pub(crate) const ATC_LOOKUP: &str = "ebirforms_atc_lookup";
+/// What filing late costs, from eBIRForms' penalty engine.
+pub(crate) const PENALTY_ESTIMATE: &str = "ebirforms_penalty_estimate";
+/// The sending queue: waiting, and sent in the last 30 days.
+pub(crate) const QUEUE_LIST: &str = "ebirforms_queue_list";
 pub(crate) const DRAFTS_LIST: &str = "ebirforms_drafts_list";
 pub(crate) const FORM_OPEN: &str = "ebirforms_form_open";
 pub(crate) const FORM_FIELDS: &str = "ebirforms_form_fields";
@@ -87,8 +94,11 @@ const ACCOUNT_TOOLS: [&str; 4] = [
 
 /// The assistant's tools that change nothing (`readOnlyHint`, P8): the ones
 /// a routine or resolve call may run.
-const READ_ONLY: [&str; 9] = [
+const READ_ONLY: [&str; 12] = [
     RDO_LOOKUP,
+    ATC_LOOKUP,
+    PENALTY_ESTIMATE,
+    QUEUE_LIST,
     STATUS,
     RESOLVE,
     PROFILES_LIST,
@@ -106,7 +116,10 @@ in ebirforms_form_open's `code` and ebirforms_app_open's `form`. Never ask the u
 one out; use the taxpayer's name. ebirforms_profiles_list lists the taxpayers, ebirforms_drafts_list a \
 taxpayer's saved returns. To answer what is due or late, call ebirforms_calendar_get (`filter: overdue` \
 for late returns): the user sees its card, so answer in a sentence and don't repeat the list; \
-ebirforms_dues_list is the same calendar as plain rows, for your own checks. To let the user work visually, call ebirforms_app_open \
+ebirforms_dues_list is the same calendar as plain rows, for your own checks. \
+For what filing late costs, call ebirforms_penalty_estimate with the return's `form` (its ticket) and `due` \
+from the calendar; for an ATC, ebirforms_atc_lookup; for an RDO, ebirforms_rdo_lookup; for what is \
+waiting to be sent, ebirforms_queue_list. Each shows the user a card. To let the user work visually, call ebirforms_app_open \
 with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` to open one \
 return), `app: \"tax-profile\"` for a taxpayer's registration, `app: \"calendar\"` for the \
 filing calendar, or `app: \"deadlines\"` for the next returns due as a card in the chat. You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
@@ -127,7 +140,6 @@ struct OpenForm {
 
 pub struct Server {
     app: Result<Arc<BirApp>, String>,
-    db_path: PathBuf,
     manifest: ManifestSource,
     host: Host,
     form: Option<OpenForm>,
@@ -182,7 +194,6 @@ impl Server {
         let dir = db_path.parent().map(PathBuf::from).unwrap_or_default();
         Self {
             app,
-            db_path,
             manifest,
             host: Host::new(require_provision),
             form: None,
@@ -375,8 +386,8 @@ impl Server {
     }
 
     /// One `ebirforms_app_<function>` call: arguments read, the ticket turned into
-    /// the scope, the owner lock taken for a write, the answer held to the
-    /// scope and a list's rows given their tickets.
+    /// the scope, the answer held to the scope and a list's rows given their
+    /// tickets.
     fn host_call(
         &mut self,
         app: &Arc<BirApp>,
@@ -403,14 +414,9 @@ impl Server {
         if access == Access::Queue && !self.account.signed_in() {
             return Err(owner::SIGN_IN_FIRST.to_string());
         }
-        let lock = match access {
-            Access::Queue | Access::Write => Some(owner::acquire(&self.db_path)?),
-            Access::Read | Access::Bookkeeping => None,
-        };
         let value = app
             .call(function, args.clone())
             .map_err(|error| error.to_string())?;
-        drop(lock);
         // a return just queued goes out now, not at the queue's next minute
         if access == Access::Queue {
             self.account.send_now();
@@ -445,6 +451,9 @@ impl Server {
             DUES_LIST => dues_list(app, arguments, today),
             CALENDAR_GET => calendar_get(app, arguments, today),
             RDO_LOOKUP => rdo_lookup(app, arguments),
+            ATC_LOOKUP => answers::atc_lookup(arguments),
+            PENALTY_ESTIMATE => answers::penalty_estimate(arguments, today),
+            QUEUE_LIST => answers::queue_list(app, arguments, today, self.account.signed_in()),
             DRAFTS_LIST => drafts_list(app, arguments),
             FORM_OPEN => self.form_open(app, arguments, today),
             FORM_FIELDS => self.form_fields(arguments),
@@ -467,8 +476,6 @@ impl Server {
             "plugin_version": manifest::VERSION,
             // the mini app's own taxpayers, not either desktop app's
             "database": "eBIRForms mini app (its own data)",
-            // false only for a moment while another process of this mini app saves
-            "writable": owner::writable(&self.db_path),
             // signed in to Buwiz: a return queued in the Forms app is sent
             "sending": self.account.signed_in(),
             // the Sign-in app's account
@@ -693,11 +700,10 @@ impl Server {
 
     fn form_save(&mut self, app: &BirApp) -> Result<Value, String> {
         self.open_form()?;
-        let _lock = owner::acquire(&self.db_path)?;
         self.save_open(app)
     }
 
-    /// Save the open return (the owner lock held by the caller).
+    /// Save the open return.
     fn save_open(&mut self, app: &BirApp) -> Result<Value, String> {
         let form = self
             .form
@@ -2050,6 +2056,39 @@ fn tool_list() -> Value {
                 "required": ["query"],
                 "additionalProperties": false
             }),
+            true,
+        ),
+        tool(
+            ATC_LOOKUP,
+            "Look up a BIR alphanumeric tax code (ATC) by code (WV010, WC158) or part of its description, from eBIRForms' ATC table, with the rate the table lists (null when the return sets it). Some codes list more than one rate there: tell the user to check the rate on the form. It never computes a tax. The answer shows the user a card.",
+            json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        tool(
+            PENALTY_ESTIMATE,
+            "Estimate what filing a return late costs, from eBIRForms' penalty engine: surcharge, interest and compromise, as peso text. `form`: a form code (2551Q) or a return's ticket (`key` from ebirforms_calendar_get). `due`: the return's due date (YYYY-MM-DD, from the calendar). `tax_due`: the unpaid tax in pesos as text (\"12500.50\"; default 0). `filed_on`: when it will be filed (default today). An estimate at the regular rates (a medium or large taxpayer; a micro or small one pays less under the EOPT Act), and BIR assesses the final amount. The answer shows the user a card with every amount, where they can change the tax due and filing date: answer in a sentence (the total and how many days late) and don't repeat the amounts as a list or table.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "form": { "type": "string" },
+                    "due": { "type": "string" },
+                    "tax_due": { "type": ["string", "integer"] },
+                    "filed_on": { "type": "string" }
+                },
+                "required": ["form", "due"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
+        tool(
+            QUEUE_LIST,
+            "The sending queue: returns the user queued in Forms that wait to be sent to the BIR (with why a send failed, if one did), and those sent in the last 30 days (with whether a receipt came back, and whether it was a dry run). Each return comes back as a ticket (`key`). `sending` says whether this computer is signed in to Buwiz, without which nothing is sent. It changes nothing; the user queues and cancels in Forms. The answer shows the user a card: answer in a sentence and don't repeat the list.",
+            empty_schema(),
             true,
         ),
         tool(

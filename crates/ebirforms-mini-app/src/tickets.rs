@@ -13,8 +13,7 @@
 //! root. Titles are read live, so a renamed taxpayer's chips follow and a
 //! deleted one's tickets no longer resolve.
 //!
-//! The row is bookkeeping of this protocol, not filing data, so it is
-//! written without the owner lock (see `owner.rs`).
+//! The row is bookkeeping of this protocol, not filing data.
 
 use bir_app_core::BirApp;
 use bir_app_core::bir_core::forms::taxform;
