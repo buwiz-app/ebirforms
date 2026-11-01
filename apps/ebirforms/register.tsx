@@ -7,8 +7,8 @@
 // device flow (RFC 8628), run by the mini app (`ebirforms_account_*`): the
 // app never sees a token, only the code to type and who is signed in.
 //
-// Signing in only prepares for filing: sending stays off in the mini app for
-// now. The desktop's first-run setup (solo or help desk, admin PIN) and the
+// Signing in turns filing on: a return queued in BIR Forms is then sent to
+// the BIR through this account and comes back with a receipt. The desktop's first-run setup (solo or help desk, admin PIN) and the
 // taxpayer-database unlock are left out: this mini app keeps its own data.
 
 import { signal, computed, cleanup, Text, View, Scroll } from "nsh";
@@ -225,7 +225,7 @@ export default function R() {
   // ---------------------------------------------------------------- views
 
   const accountView = () => (
-    <Card icon="☁" title="Sign in to Buwiz" line="eBIRForms will need your Buwiz account to file returns. Preparing and saving returns works without it.">
+    <Card icon="☁" title="Sign in to Buwiz" line="eBIRForms files returns with the BIR through your Buwiz account. Preparing and saving returns works without it.">
       <View class={`rounded-xl px-4 py-3 gap-1 ${C.inset}`}>
         <Text class={`text-sm ${C.fg}`}>This computer isn't signed in to Buwiz yet.</Text>
       </View>
@@ -270,7 +270,7 @@ export default function R() {
   const signedInView = () => (
     <Card icon="✓" title="Signed in" line={`Signed in to Buwiz as ${status()?.email || "your account"}.`}>
       <View class={`rounded-xl px-4 py-3 gap-1 ${C.inset}`}>
-        <Text class={`text-sm ${C.fg}`}>Filing from the Buwiz Bot isn't turned on yet. Returns you prepare are saved here, ready for it.</Text>
+        <Text class={`text-sm ${C.fg}`}>Returns you queue in BIR Forms are sent to the BIR through this account, and each comes back with a receipt.</Text>
       </View>
       <ErrorText text={error()} />
       <View class="items-center">

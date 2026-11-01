@@ -165,7 +165,7 @@ fn the_bot_contract_over_a_scratch_database() {
         tools
             .iter()
             .all(|tool| tool["name"] != "ebirforms_form_send"),
-        "no sending from the mini app"
+        "the assistant never sends: the user queues in the Forms app"
     );
     for name in [
         "ebirforms_status",
@@ -602,14 +602,14 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert!(drafts.iter().all(|row| row["tin"] == ticket));
 
-    // nothing is queued or sent from the mini app
+    // signed out of Buwiz: nothing is queued or sent
     let queued = bot.call_as(
         forms_app.clone(),
         "ebirforms_app_queue_form_draft",
         json!({ "args": [tin, "2551Q", 2026, 1], "ticket": ticket }),
     );
     assert!(
-        error_text(&queued).contains("Sending is not available"),
+        error_text(&queued).contains("Sign in to Buwiz first"),
         "{queued}"
     );
     let gone = bot.call_as(

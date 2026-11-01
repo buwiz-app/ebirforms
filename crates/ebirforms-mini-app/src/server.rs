@@ -105,7 +105,9 @@ with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` t
 return), `app: \"tax-profile\"` for a taxpayer's registration, `app: \"calendar\"` for the \
 filing calendar, or `app: \"deadlines\"` for the next returns due as a card in the chat. You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
 `source`), ebirforms_form_validate, ebirforms_form_save_draft, ebirforms_form_dismiss; one return is open at a time. \
-Filing is not available here yet: a return can be saved, but nothing is queued or sent. Tools whose description starts with \"Mini apps only\" and ebirforms_resolve belong \
+You never queue or send a return: the user does that in the Forms app (Queue), once signed in \
+to Buwiz in the Sign-in app (ebirforms_app_open `register`); it is then sent to the BIR and comes back \
+with a receipt. Tools whose description starts with \"Mini apps only\" and ebirforms_resolve belong \
 to the mini apps and to the Bot: do not call them.";
 
 /// The return the assistant has open.
@@ -144,7 +146,14 @@ impl Server {
         if let Err(problem) = &app {
             tracing::warn!("{problem}");
         }
-        Self::new(app, db_path, manifest, true)
+        let server = Self::new(app, db_path, manifest, true);
+        // the queue: queued returns go out through Buwiz while signed in
+        if let Ok(app) = &server.app
+            && let Err(error) = app.start_queue_worker(server.account.transport())
+        {
+            tracing::warn!("the sending queue did not start: {error}");
+        }
+        server
     }
 
     /// A server over `app` (whose file is `db_path`). `require_provision`:
@@ -379,14 +388,21 @@ impl Server {
         if let Some(root) = &root {
             scope::check_args(function, rule, &args, root)?;
         }
-        let _lock = match access {
-            Access::Queue => return Err(owner::NO_SENDING.to_string()),
-            Access::Write => Some(owner::acquire(&self.db_path)?),
+        if access == Access::Queue && !self.account.signed_in() {
+            return Err(owner::SIGN_IN_FIRST.to_string());
+        }
+        let lock = match access {
+            Access::Queue | Access::Write => Some(owner::acquire(&self.db_path)?),
             Access::Read | Access::Bookkeeping => None,
         };
         let value = app
             .call(function, args.clone())
             .map_err(|error| error.to_string())?;
+        drop(lock);
+        // a return just queued goes out now, not at the queue's next minute
+        if access == Access::Queue {
+            self.account.send_now();
+        }
         let value = match &root {
             Some(root) => scope::filter_result(function, rule, &args, value, root)?,
             None => value,
@@ -440,8 +456,9 @@ impl Server {
             "database": "eBIRForms mini app (its own data)",
             // false only for a moment while another process of this mini app saves
             "writable": owner::writable(&self.db_path),
-            "sending": false,
-            // Buwiz sign-in only prepares for sending (the Sign-in app)
+            // signed in to Buwiz: a return queued in the Forms app is sent
+            "sending": self.account.signed_in(),
+            // the Sign-in app's account
             "signed_in": self.account.signed_in(),
         });
         if let Ok(taxpayers) = app.list_taxpayers() {
@@ -1888,7 +1905,7 @@ fn tool_list() -> Value {
     let mut tools = vec![
         tool(
             STATUS,
-            "Report the eBIRForms mini app: its version, that it keeps its own data, whether saving works right now, that sending is off, and how many taxpayers are saved. Use it for \"is eBIRForms working?\".",
+            "Report the eBIRForms mini app: its version, that it keeps its own data, whether saving works right now, whether this computer is signed in to Buwiz (and so can send), and how many taxpayers are saved. Use it for \"is eBIRForms working?\".",
             empty_schema(),
             true,
         ),
