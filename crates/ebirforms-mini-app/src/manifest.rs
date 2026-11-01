@@ -113,13 +113,13 @@ pub(crate) const APPS: [App; 7] = [
     App {
         id: CARD_DATES_ID,
         title: "BIR answer: deadlines",
-        description: "Answer cards about deadlines: what's due next, this week, a month, and late returns.",
+        description: "Answer cards about deadlines: what's due next, this week, a month, late returns, a late-filing penalty estimate and the sending queue.",
         source: CARD_DATES_SOURCE,
     },
     App {
         id: CARD_CALC_ID,
         title: "BIR answer: lookups",
-        description: "Answer cards for quick lookups: a revenue district office.",
+        description: "Answer cards for quick lookups: a revenue district office or an ATC.",
         source: CARD_CALC_SOURCE,
     },
 ];

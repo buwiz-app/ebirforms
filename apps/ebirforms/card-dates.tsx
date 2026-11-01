@@ -1,8 +1,10 @@
 // eBIRForms answer cards about deadlines (spec 9.8): what's due next (dues),
 // the next seven days for every taxpayer (week), one month (month) and
 // returns already late (overdue), all from the filing calendar
-// (ebirforms_calendar_get). Buttons open the return in BIR Forms or the full
-// Calendar; nothing here changes eBIRForms' data.
+// (ebirforms_calendar_get); what filing late costs (penalty, from eBIRForms'
+// penalty engine, ebirforms_penalty_estimate) and the sending queue (queue,
+// ebirforms_queue_list). Buttons open the return in BIR Forms or the full
+// Calendar; nothing here changes eBIRForms' data, queues or sends.
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { buwiz } from "buwiz";
@@ -404,9 +406,119 @@ function Week() {
   );
 }
 
+// ------------------------------------------------------------ penalty
+
+/** Peso text from the tool (`"1234.50"`, made from centavos) with commas,
+ *  as text: never through a float (the kit's `peso` is for whole numbers). */
+function pesoText(value: unknown) {
+  const text = String(value ?? "");
+  if (!/^-?\d+\.\d{2}$/.test(text)) return "—";
+  const [whole, cents] = text.split(".");
+  return `₱${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${cents}`;
+}
+
+function Penalty() {
+  const s = () => snap() || {};
+  const tax = signal(s().tax_due && s().tax_due !== "0.00" ? String(s().tax_due) : "");
+  const filed = signal(String(s().filed_on || ""));
+  let timer: any;
+  // the engine recomputes as the user types; the tool reads only
+  const recompute = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const args = { form: s().form, due: s().due, filed_on: filed(), tax_due: tax() || "0" };
+      act(async () => snap.set(answerOf(await buwiz.call("ebirforms_penalty_estimate", args as any))));
+    }, 400);
+  };
+  const line = (label: string, value: unknown, strong?: boolean) => (
+    <View class="flex-row justify-between px-2 py-1">
+      <Text class={`text-sm ${strong ? `font-semibold ${K.fg}` : K.fg2}`}>{label}</Text>
+      <Text class={`text-sm ${strong ? "font-semibold" : ""} ${K.fg}`}>{pesoText(value)}</Text>
+    </View>
+  );
+  return (
+    <Card
+      title={s().late ? `${s().form || ""} filed ${s().days_late || 0} days late` : `${s().form || ""} is not late`}
+      sub={`Due ${shortDate(s().due)} · estimate at the regular rates (medium or large taxpayer)`}
+      foot={P.ticket ? <Btn label="Open the return" onPress={() => openApp("forms", P.ticket, { form: s().form, action: "file" })} /> : undefined}>
+      <View class="flex-row flex-wrap gap-2">
+        <Field label="Tax due (₱)" value={tax()} onChange={(v) => (tax.set(v), recompute())} placeholder="0.00" />
+        <Field label="Filed and paid on" value={filed()} onChange={(v) => (filed.set(v), recompute())} placeholder="2026-12-10" width={120} />
+      </View>
+      <If when={!s().late}><Empty text={String(s().note || "Filed by the due date: no penalty.")} /></If>
+      <If when={Boolean(s().late)}>
+        <View class={`rounded-lg ${K.soft}`}>
+          {line("Surcharge", s().surcharge)}
+          {line("Interest", s().interest)}
+          {line("Compromise", s().compromise)}
+          {line("Penalties", s().total_penalties, true)}
+          {line("Tax and penalties", s().total_to_pay, true)}
+        </View>
+      </If>
+      <Text class={`text-xs ${K.fg3}`}>{String(s().basis || "")}</Text>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------ queue
+
+/** A queued or sent return's chip and the line under it. */
+function stageOf(r: any): [string, Tone, string] {
+  const since = shortDate(String(r.since || "").slice(0, 10));
+  switch (r.stage) {
+    case "sending":
+      return ["Sending", "info", "Being sent to the BIR now"];
+    case "failed":
+      return ["Retrying", "warn", `Send failed${r.reason ? `: ${r.reason}` : ""} · it tries again by itself`];
+    case "needs_attention":
+      return ["Check", "danger", `The BIR may have it already${r.reason ? `: ${r.reason}` : ""} · open it in Forms`];
+    case "gave_up":
+      return ["Stopped", "danger", `Back to a draft${r.reason ? `: ${r.reason}` : ""}`];
+    case "sent":
+      if (r.dry_run) return ["Dry run", "plain", `Dry run on ${since}: not sent to the BIR`];
+      return ["Sent", "ok", r.receipt ? `Sent ${since} · receipt received` : `Sent ${since}`];
+    case "confirmed":
+      return ["Confirmed", "ok", `Confirmed by the BIR`];
+    case "paid":
+      return ["Paid", "ok", "Paid"];
+    default:
+      return ["Waiting", "info", `Waiting to send since ${since}`];
+  }
+}
+
+function Queue() {
+  const s = () => snap() || {};
+  const waiting = () => (s().waiting || []) as any[];
+  const sent = () => (s().sent || []) as any[];
+  const row = (r: any) => {
+    const [chip, tone, sub] = stageOf(r);
+    return (
+      <Row title={`${r.label} · ${r.taxpayer}`} sub={sub}
+        right={
+          <View class="flex-row gap-2 items-center">
+            <Chip text={chip} tone={tone} />
+            <Btn label="Open" onPress={() => openApp("forms", r.key, { form: r.form, period: r.period, action: "view" })} />
+          </View>
+        } />
+    );
+  };
+  return (
+    <Card title="Sending queue" sub={`${waiting().length} waiting · ${sent().length} sent in the last 30 days`}>
+      <If when={s().sending === false && waiting().length > 0}>
+        <Text class={`text-xs ${K.warn}`}>This computer isn't signed in to Buwiz, so nothing is sent yet. Sign in from the Sign-in app.</Text>
+      </If>
+      <If when={waiting().length + sent().length === 0}><Empty text="Nothing is waiting, and nothing was sent in the last 30 days." /></If>
+      <Each of={waiting()} key={(r) => r.key}>{(r) => row(r())}</Each>
+      <Each of={sent()} key={(r) => r.key}>{(r) => row(r())}</Each>
+    </Card>
+  );
+}
+
 export default function DatesCard() {
   if (P.card === "week") return <Week />;
   if (P.card === "month") return <Month />;
   if (P.card === "overdue") return <Overdue />;
+  if (P.card === "penalty") return <Penalty />;
+  if (P.card === "queue") return <Queue />;
   return <Dues />;
 }

@@ -1,6 +1,6 @@
 // eBIRForms answer cards for quick lookups (spec 9.8): a revenue district
-// office (rdo), read from eBIRForms' own RDO table through
-// ebirforms_rdo_lookup. It changes nothing.
+// office (rdo, ebirforms_rdo_lookup) or an ATC (atc, ebirforms_atc_lookup),
+// read from eBIRForms' own tables. It changes nothing.
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { buwiz } from "buwiz";
@@ -283,6 +283,33 @@ function Rdo() {
   );
 }
 
+// ------------------------------------------------------------ atc
+
+/** An ATC from eBIRForms' table: what it covers and the rate the table
+ *  lists. Facts only: it never computes a tax on an amount. */
+function Atc() {
+  const s = () => snap() || {};
+  const matches = () => (s().matches || []) as any[];
+  // a percentage only when the table has one number for the code
+  const rate = (m: any) => (m.rate_varies ? "Varies: check the form" : m.rate == null ? "Check the form" : String(m.rate));
+  return (
+    <Card title={matches().length === 1 ? `ATC ${matches()[0].code}` : "Alphanumeric tax codes"}
+      sub={matches().length === 1 ? "Alphanumeric tax code" : `${matches().length}${s().more ? "+" : ""} match`}>
+      <If when={matches().length === 1}>
+        <Fact label="Covers" value={String(matches()[0]?.description || "")} />
+        <Fact label="Rate in the table" value={rate(matches()[0] || {})} strong />
+      </If>
+      <If when={matches().length > 1}>
+        <Each of={matches()} key={(m) => m.code}>
+          {(m) => <Row title={`${m().code} · ${rate(m())}`} sub={String(m().description || "")} />}
+        </Each>
+      </If>
+      <Text class={`text-xs ${K.fg3}`}>From eBIRForms' ATC table: check the rate on the form before you use it.</Text>
+    </Card>
+  );
+}
+
 export default function CalcCard() {
+  if (P.card === "atc") return <Atc />;
   return <Rdo />;
 }

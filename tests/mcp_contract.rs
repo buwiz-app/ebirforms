@@ -258,7 +258,6 @@ fn the_bot_contract_over_a_scratch_database() {
     let status = bot.agent("ebirforms_status", json!({}));
     let status = result_of(&status).clone();
     assert_eq!(status["taxpayers"], 2, "{status}");
-    assert_eq!(status["writable"], true, "the app is not running");
     let listed = bot.agent("ebirforms_profiles_list", json!({}));
     let text = listed["content"][0]["text"].as_str().unwrap();
     assert!(
@@ -461,6 +460,32 @@ fn the_bot_contract_over_a_scratch_database() {
         error_text(&bot.agent("ebirforms_rdo_lookup", json!({ "query": "nowhere at all" })))
             .contains("no RDO")
     );
+    // an ATC: the code first, its rate only as a percentage, on card-calc
+    let atc = bot.agent("ebirforms_atc_lookup", json!({ "query": "wv010" }));
+    let found = &result_of(&atc)["matches"][0];
+    assert_eq!(found["code"], "WV010", "{atc}");
+    assert!(
+        found["rate"]
+            .as_str()
+            .is_some_and(|rate| rate.ends_with('%')),
+        "{atc}"
+    );
+    let card = &atc["_meta"]["buwiz/open"];
+    assert_eq!(
+        (card["app"].as_str(), card["props"]["card"].as_str()),
+        (Some("card-calc"), Some("atc"))
+    );
+    assert!(
+        error_text(&bot.agent("ebirforms_atc_lookup", json!({ "query": "zz-none" })))
+            .contains("no ATC")
+    );
+    // the estimate only reads, so a routine may ask for it
+    let routine = bot.call_as(
+        json!({ "origin": "routine" }),
+        "ebirforms_penalty_estimate",
+        json!({ "form": "2551Q", "due": "2026-07-25" }),
+    );
+    assert_eq!(routine["isError"], false, "{routine}");
 
     // what it lists: returns as tickets, never TINs
     let calendar = bot.agent(
@@ -644,19 +669,12 @@ fn the_bot_contract_over_a_scratch_database() {
     // unsaved edits keep it open
     assert!(error_text(&bot.agent("ebirforms_form_dismiss", json!({}))).contains("unsaved"));
 
-    // another process of this mini app saving: refused for that moment
-    let held = bir_app_core::bir_core::db::try_acquire_live_owner_lock(&path).unwrap();
+    // another process of this mini app with the database open (eBIRForms
+    // shares the file): saving still goes through
+    let other = BirApp::open_at(&path).unwrap();
+    assert_eq!(other.list_taxpayers().unwrap().len(), 2);
     let status = bot.agent("ebirforms_status", json!({}));
-    assert_eq!(result_of(&status)["writable"], false);
     assert_eq!(result_of(&status)["sending"], false);
-    let refused = bot.agent("ebirforms_form_save_draft", json!({}));
-    assert!(
-        error_text(&refused).contains("Another eBIRForms mini app process"),
-        "{refused}"
-    );
-    drop(held);
-
-    // let go: saving goes through
     let saved = bot.agent("ebirforms_form_save_draft", json!({}));
     let saved = result_of(&saved).clone();
     assert_eq!(saved["saved"], true, "{saved}");
@@ -705,6 +723,39 @@ fn the_bot_contract_over_a_scratch_database() {
             .unwrap()
             .contains("<")
     );
+
+    // the sending queue (nothing queued here: signed out), on card-dates
+    let queue = bot.agent("ebirforms_queue_list", json!({}));
+    let listed = result_of(&queue).clone();
+    assert_eq!(listed["mode"], "queue", "{queue}");
+    assert_eq!(listed["waiting"], json!([]));
+    assert_eq!(listed["sent"], json!([]));
+    assert_eq!(listed["sending"], false);
+    let card = &queue["_meta"]["buwiz/open"];
+    assert_eq!(
+        (card["app"].as_str(), card["props"]["card"].as_str()),
+        (Some("card-dates"), Some("queue"))
+    );
+    assert!(
+        error_text(&bot.agent("ebirforms_queue_list", json!({ "tin": ticket })))
+            .contains("no arguments")
+    );
+    // what filing late costs, on card-dates
+    let cost = bot.agent(
+        "ebirforms_penalty_estimate",
+        json!({ "form": "2551Q", "due": "2026-04-25", "filed_on": "2026-05-25", "tax_due": "10,000.50" }),
+    );
+    let estimate = result_of(&cost).clone();
+    assert_eq!(estimate["late"], true, "{cost}");
+    assert_eq!(estimate["days_late"], 30);
+    assert_eq!(estimate["tax_due"], "10000.50");
+    assert!(estimate["total_to_pay"].as_str().is_some(), "{cost}");
+    let card = &cost["_meta"]["buwiz/open"];
+    assert_eq!(
+        (card["app"].as_str(), card["props"]["card"].as_str()),
+        (Some("card-dates"), Some("penalty"))
+    );
+    assert!(card.get("ticket").is_none());
 
     // dismissed after saving; buwiz.uninstall forgets every ticket
     assert_eq!(

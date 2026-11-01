@@ -8,12 +8,15 @@
 //!
 //! Round 1 (ported from `legacy/src/mini_app/cards.rs`): `card-dates` (what's
 //! due, this week, this month, late returns) over the filing calendar, and
-//! `card-calc` (an RDO). `props.card` says which card an app draws.
+//! `card-calc` (an RDO). Round 2 adds the penalty estimate and the sending
+//! queue to `card-dates`, and an ATC to `card-calc`. Every card only reads:
+//! none can queue, send or cancel. `props.card` says which card an app draws.
 
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
-use crate::server::{CALENDAR_GET, RDO_LOOKUP};
+use crate::server::{ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, RDO_LOOKUP};
+use crate::tickets;
 
 /// Card kinds: id, app, small.
 const KINDS: &[(&str, &str, bool)] = &[
@@ -21,15 +24,18 @@ const KINDS: &[(&str, &str, bool)] = &[
     ("week", "card-dates", false),
     ("month", "card-dates", false),
     ("overdue", "card-dates", false),
+    ("penalty", "card-dates", false),
+    ("queue", "card-dates", false),
     ("rdo", "card-calc", true),
+    ("atc", "card-calc", true),
 ];
 
 /// The read tool a card app's Refresh re-runs (named by the card's props,
 /// so not written in its source): all the app may call.
 pub(crate) fn refresh_tools(app: &str) -> &'static [&'static str] {
     match app {
-        "card-dates" => &[CALENDAR_GET],
-        "card-calc" => &[RDO_LOOKUP],
+        "card-dates" => &[CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST],
+        "card-calc" => &[RDO_LOOKUP, ATC_LOOKUP],
         _ => &[],
     }
 }
@@ -140,6 +146,23 @@ pub(crate) fn decorate(tool: &str, args: &Map<String, Value>, result: &mut Value
             open(id, title, ticket, data, tool, args_value)
         }
         RDO_LOOKUP => open("rdo", "RDO", None, data, tool, args_value),
+        ATC_LOOKUP => open("atc", "ATC", None, data, tool, args_value),
+        PENALTY_ESTIMATE => {
+            // a return's ticket in `form` opens that return in Forms
+            let ticket = args
+                .get("form")
+                .and_then(Value::as_str)
+                .filter(|form| tickets::is_ticket(form));
+            open(
+                "penalty",
+                "Penalty estimate",
+                ticket,
+                data,
+                tool,
+                args_value,
+            )
+        }
+        QUEUE_LIST => open("queue", "Sending queue", None, data, tool, args_value),
         _ => return,
     };
     result["_meta"]["buwiz/open"] = card;
@@ -255,6 +278,41 @@ mod tests {
                 "{kind}: {app} is not shipped"
             );
         }
+    }
+
+    #[test]
+    fn round_two_answers_pick_their_cards() {
+        let result =
+            || json!({ "isError": false, "structuredContent": { "result": { "mode": "x" } } });
+        for (tool, sent, app, card) in [
+            (ATC_LOOKUP, json!({"query": "WV010"}), "card-calc", "atc"),
+            (
+                PENALTY_ESTIMATE,
+                json!({"form": "2551Q", "due": "2026-07-25"}),
+                "card-dates",
+                "penalty",
+            ),
+            (QUEUE_LIST, json!({}), "card-dates", "queue"),
+        ] {
+            let mut answer = result();
+            decorate(tool, &args(sent), &mut answer);
+            let open = &answer["_meta"]["buwiz/open"];
+            assert_eq!(open["app"], app, "{tool}");
+            assert_eq!(open["props"]["card"], card, "{tool}");
+            assert!(
+                refresh_tools(app).contains(&tool),
+                "{tool} is not {app}'s to call"
+            );
+            assert!(open.get("ticket").is_none(), "{tool}");
+        }
+        let mut answer = result();
+        let ticket = "tkt_0000000000000000000000000A";
+        decorate(
+            PENALTY_ESTIMATE,
+            &args(json!({"form": ticket, "due": "2026-07-25"})),
+            &mut answer,
+        );
+        assert_eq!(answer["_meta"]["buwiz/open"]["ticket"], ticket);
     }
 
     #[test]

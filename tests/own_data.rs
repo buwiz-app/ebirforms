@@ -51,7 +51,7 @@ fn a_first_run_makes_its_own_folder_key_and_database() {
         Some(database.clone().into_os_string())
     );
     assert_eq!(
-        std::env::var_os("BIR_LOG_DIR"),
+        std::env::var_os("BUWIZ_LOG_DIR"),
         Some(data.join("logs").into_os_string())
     );
 
