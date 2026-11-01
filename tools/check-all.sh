@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # tools/check-all.sh — every gate a commit must pass, in order: rustfmt,
-# clippy with warnings denied, the Rust tests, and Rox conformance.
+# clippy with warnings denied, the Rust tests, and the Buwiz Bot's conformance
+# runner.
 #
 # It prints one line per gate and a summary, keeps each gate's output in a
 # temp folder, and exits non-zero when any gate fails.
 #
-# Env: ROX_DIR   a Rox checkout or worktree for the conformance runner
-#      SKIP_ROX=1  skip Rox conformance (no Rox checkout at hand); the
-#                  summary says so, and the run cannot pass
+# Env: BUWIZ_BOT_DIR  a Buwiz Bot checkout at protocol 2.0 for the conformance runner
+#      SKIP_BOT=1     skip Bot conformance (no Bot checkout at hand); the
+#                     summary says so, and the run cannot pass
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/ebirforms-gates.XXXXXX")"
@@ -35,11 +36,11 @@ tests_total() {
 gate "cargo fmt --check" fmt cargo fmt --check
 gate "cargo clippy -D warnings" clippy cargo clippy --all-targets -- -D warnings
 gate "cargo test" cargo-test tests_total
-if [ "${SKIP_ROX:-0}" = "1" ]; then
-  printf 'SKIP  %-28s SKIP_ROX=1\n' "Rox conformance"
+if [ "${SKIP_BOT:-0}" = "1" ]; then
+  printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot conformance"
   skipped=1
 else
-  gate "Rox conformance" conformance bash tools/rox/conformance.sh
+  gate "Bot conformance" conformance bash tools/bot/conformance.sh
 fi
 
 echo "logs: $OUT"

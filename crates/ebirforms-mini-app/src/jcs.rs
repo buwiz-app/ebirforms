@@ -1,4 +1,4 @@
-//! JSON Canonicalization Scheme (RFC 8785) for the objects v1 signs and
+//! JSON Canonicalization Scheme (RFC 8785) for the objects the protocol signs and
 //! hashes: the manifest, session certificates and permissions.
 //!
 //! The Bot's broker hashes the manifest it reads (`manifest_sha256`), checks the

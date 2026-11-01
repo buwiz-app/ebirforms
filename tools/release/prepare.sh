@@ -4,16 +4,16 @@
 # and writes, to dist/release/ (or $1):
 #   manifest.json     unsigned, publisher.key_id gc-2026-01
 #   app-<id>.tsx      each app's source, exactly as the binary serves it
-# then prints the three owner steps: the trust entry (Rox owner), the
+# then prints the three owner steps: the trust entry (Bot owner), the
 # signature with gc-2026-01 from the login Keychain (the owner), and the
-# install in the owner's Rox. This script never reads a key or the Keychain.
+# install in the owner's Buwiz Bot. This script never reads a key or the Keychain.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${1:-$REPO/dist/release}"
-ROX="${ROX_DIR:-/Volumes/goldcoders/Projects/rox}"
-# the signer the owner runs: rox-broker (hexuria/rox main) when ROX_BROKER_BIN names
-# one, else Rox's older server/src/v1/sign-manifest.mjs; the same arguments either way
-if [ -n "${ROX_BROKER_BIN:-}" ]; then SIGNER="$ROX_BROKER_BIN sign-manifest"; else SIGNER="node $ROX/server/src/v1/sign-manifest.mjs"; fi
+BOT="${BUWIZ_BOT_DIR:-/Volumes/goldcoders/Projects/rox}"
+# the signer the owner runs: rox-broker (buwiz-bot main) when BUWIZ_BROKER_BIN names
+# one, else the Bot's server/src/v1/sign-manifest.mjs; the same arguments either way
+if [ -n "${BUWIZ_BROKER_BIN:-}" ]; then SIGNER="$BUWIZ_BROKER_BIN sign-manifest"; else SIGNER="node $BOT/server/src/v1/sign-manifest.mjs"; fi
 cd "$REPO"
 cargo build --release -p ebirforms-mini-app >/dev/null
 BIN="$REPO/target/release/ebirforms-mini-app"
@@ -29,7 +29,7 @@ VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["vers
 cat <<STEPS
 Prepared app.buwiz.ebirforms $VERSION in $OUT (publisher.key_id $KEY_ID).
 
-1. Rox owner: add to approved_plugins in $ROX/server/src/v1/trust.json
+1. Bot owner: add to approved_plugins in $BOT/server/src/v1/trust.json
      { "id": "app.buwiz.ebirforms", "publisher_key_id": "$KEY_ID" }
 
 2. You: sign with the publisher key from the login Keychain
@@ -37,7 +37,7 @@ Prepared app.buwiz.ebirforms $VERSION in $OUT (publisher.key_id $KEY_ID).
        --keychain $KEY_ID ${APPS[*]} \\
        --out $OUT/manifest.signed.json
 
-3. You: install in your Rox (Connect apps), as a local plugin
+3. You: install in your Buwiz Bot (Connect apps), as a local plugin
      command  $BIN
      args     mcp
      env      EBIRFORMS_MANIFEST=$OUT/manifest.signed.json

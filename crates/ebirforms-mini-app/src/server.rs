@@ -9,10 +9,10 @@
 //! - the assistant's tools: status, taxpayers, dues, drafts, opening the
 //!   Forms app, and one open return to read, fill, validate or save;
 //! - `ebirforms_resolve` for the manifest's `taxprofile` scope;
-//! - the reserved `rox.*` tools ([`crate::protocol`]).
+//! - the reserved `buwiz.*` tools ([`crate::protocol`]).
 //!
-//! Buwiz Bot speaks the Mini App Protocol v1: `rox.provision` first, then
-//! every call carries its caller (`_meta["rox/caller"]`), and
+//! Buwiz Bot speaks the Mini App Protocol 2.0: `buwiz.provision` first, then
+//! every call carries its caller (`_meta["buwiz/caller"]`), and
 //! [`Server::authorize`] holds each origin to what it may do before a tool
 //! runs. Writes take the database's owner lock for the call only
 //! ([`crate::owner`]).
@@ -128,7 +128,7 @@ impl Server {
     }
 
     /// A server over `app` (whose file is `db_path`). `require_provision`:
-    /// answer no tool before `rox.provision`, as the Bot expects.
+    /// answer no tool before `buwiz.provision`, as the Bot expects.
     pub fn with_app(
         app: Arc<BirApp>,
         db_path: PathBuf,
@@ -222,7 +222,7 @@ impl Server {
             Some(Value::Object(arguments)) => arguments,
             Some(_) => return Ok(tool_error("arguments must be a JSON object".into())),
         };
-        if name.starts_with("rox.") {
+        if name.starts_with("buwiz.") {
             let app = self.app.as_deref().map_err(String::as_str);
             return match self.host.reserved(&self.manifest, app, name, arguments) {
                 None => Err((
@@ -234,7 +234,7 @@ impl Server {
             };
         }
         if !self.host.ready() {
-            return Err((INVALID_REQUEST, "rox.provision must come first".into()));
+            return Err((INVALID_REQUEST, "buwiz.provision must come first".into()));
         }
         let caller = Caller::of(params);
         if let Err(message) = self.authorize(name, &caller) {
@@ -1245,7 +1245,7 @@ fn app_open(
     Ok(json!({
         "content": [{ "type": "text", "text": format!("Opening {title}…") }],
         "isError": false,
-        "_meta": { "rox/open": open },
+        "_meta": { "buwiz/open": open },
     }))
 }
 
@@ -1399,7 +1399,7 @@ fn resource_list() -> Value {
             "uri": manifest::MANIFEST_URI,
             "name": "manifest",
             "title": "BIR plugin manifest",
-            "description": "The Mini App Protocol v1 manifest: identity, the taxprofile scope and the Forms app.",
+            "description": "The Mini App Protocol 2.0 manifest: identity, the taxprofile scope and the Forms app.",
             "mimeType": manifest::MANIFEST_MIME,
         },
     ] })
@@ -1416,7 +1416,7 @@ fn app_only(name: &str, description: &str, schema: Value, read_only: bool) -> Va
         schema,
         read_only,
     );
-    tool["_meta"] = json!({ "rox/audience": ["app"] });
+    tool["_meta"] = json!({ "buwiz/audience": ["app"] });
     tool
 }
 

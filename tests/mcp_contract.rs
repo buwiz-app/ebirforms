@@ -37,7 +37,7 @@ impl Bot {
     fn call_as(&mut self, caller: Value, name: &str, arguments: Value) -> Value {
         let reply = self.send(
             "tools/call",
-            json!({ "name": name, "arguments": arguments, "_meta": { "rox/caller": caller } }),
+            json!({ "name": name, "arguments": arguments, "_meta": { "buwiz/caller": caller } }),
         );
         reply
             .get("result")
@@ -103,7 +103,7 @@ fn the_bot_contract_over_a_scratch_database() {
         next: 0,
     };
 
-    // initialize, and nothing before rox.provision
+    // initialize, and nothing before buwiz.provision
     let init = bot.send("initialize", json!({ "protocolVersion": "2025-06-18" }));
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init["result"]["serverInfo"]["name"], "ebirforms-mini-app");
@@ -113,7 +113,7 @@ fn the_bot_contract_over_a_scratch_database() {
         -32600
     );
     assert_eq!(
-        bot.send("tools/call", json!({ "name": "rox.nope" }))["error"]["code"],
+        bot.send("tools/call", json!({ "name": "buwiz.nope" }))["error"]["code"],
         -32601
     );
     assert_eq!(bot.send("nope/nope", json!({}))["error"]["code"], -32601);
@@ -125,18 +125,18 @@ fn the_bot_contract_over_a_scratch_database() {
             .is_none()
     );
 
-    // rox.provision: the plugin id is app.buwiz.ebirforms
+    // buwiz.provision: the plugin id is app.buwiz.ebirforms
     let seed = [7u8; 32];
     let signing = SigningKey::from_bytes(&seed);
     let public = b64(signing.verifying_key().as_bytes());
-    let provision = json!({ "protocol": "1.0.0", "plugin": "app.buwiz.ebirforms", "key": { "alg": "ed25519", "seed": b64(&seed) }, "pub": public });
+    let provision = json!({ "protocol": "2.0.0", "plugin": "app.buwiz.ebirforms", "key": { "alg": "ed25519", "seed": b64(&seed) }, "pub": public });
     let mut wrong = provision.clone();
-    wrong["plugin"] = json!("dev.goldcoders.bir");
+    wrong["plugin"] = json!("app.buwiz.books");
     assert_eq!(
-        bot.call_as(json!({}), "rox.provision", wrong)["isError"],
+        bot.call_as(json!({}), "buwiz.provision", wrong)["isError"],
         true
     );
-    let provisioned = bot.call_as(json!({}), "rox.provision", provision);
+    let provisioned = bot.call_as(json!({}), "buwiz.provision", provision);
     assert_eq!(
         provisioned["structuredContent"]["ok"], true,
         "{provisioned}"
@@ -183,7 +183,7 @@ fn the_bot_contract_over_a_scratch_database() {
         "ebirforms_app_print_preview",
     ] {
         assert_eq!(
-            tool(name)["_meta"]["rox/audience"],
+            tool(name)["_meta"]["buwiz/audience"],
             json!(["app"]),
             "{name}"
         );
@@ -203,18 +203,18 @@ fn the_bot_contract_over_a_scratch_database() {
         .iter()
         .map(|r| r["uri"].as_str().unwrap())
         .collect();
-    assert_eq!(uris, ["rox-app://forms", "rox://manifest"]);
+    assert_eq!(uris, ["buwiz-app://forms", "buwiz://manifest"]);
     let manifest: Value =
         serde_json::from_str(
-            bot.send("resources/read", json!({ "uri": "rox://manifest" }))["result"]["contents"][0]
-                ["text"]
+            bot.send("resources/read", json!({ "uri": "buwiz://manifest" }))["result"]["contents"]
+                [0]["text"]
                 .as_str()
                 .unwrap(),
         )
         .unwrap();
     assert_eq!(manifest["id"], "app.buwiz.ebirforms");
     let forms =
-        bot.send("resources/read", json!({ "uri": "rox-app://forms" }))["result"]["contents"][0]
+        bot.send("resources/read", json!({ "uri": "buwiz-app://forms" }))["result"]["contents"][0]
             .clone();
     assert_eq!(forms["mimeType"], "text/x-nsh-tsx");
     assert!(forms["text"].as_str().unwrap().contains("ebirforms_app_"));
@@ -264,7 +264,11 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(branch_ticket, ticket, "the head office is the taxpayer");
 
     // the Bot resolves a ticket's title and the taxprofile scope
-    let title = bot.call_as(json!({}), "rox.ticket.resolve", json!({ "ticket": ticket }));
+    let title = bot.call_as(
+        json!({}),
+        "buwiz.ticket.resolve",
+        json!({ "ticket": ticket }),
+    );
     assert_eq!(
         title["structuredContent"],
         json!({ "valid": true, "title": "Juana Santos" })
@@ -311,7 +315,7 @@ fn the_bot_contract_over_a_scratch_database() {
 
     // ebirforms_app_open hands the Bot the Forms app on a return's ticket
     let opened = bot.agent("ebirforms_app_open", json!({ "app": "forms", "tin": ticket, "form": "2551Q", "period": "2026-Q3", "action": "file" }));
-    let open = &opened["_meta"]["rox/open"];
+    let open = &opened["_meta"]["buwiz/open"];
     assert_eq!(open["app"], "forms", "{opened}");
     assert_eq!(open["placement"], "full");
     assert_eq!(open["props"]["form"], "2551Q");
@@ -328,7 +332,7 @@ fn the_bot_contract_over_a_scratch_database() {
     };
     let open_id = b64(&[1u8; 16]);
     let not_after = chrono::Utc::now().timestamp_millis() + 3_600_000;
-    let session = bot.call_as(json!({}), "rox.session.open", json!({
+    let session = bot.call_as(json!({}), "buwiz.session.open", json!({
         "app": "forms", "open_id": open_id, "ks_pub": b64(&[2u8; 32]), "perms_sha256": perms, "not_after": not_after,
     }));
     let cert = session["structuredContent"]["cert"].clone();
@@ -503,16 +507,20 @@ fn the_bot_contract_over_a_scratch_database() {
             .contains("<")
     );
 
-    // dismissed after saving; rox.uninstall forgets every ticket
+    // dismissed after saving; buwiz.uninstall forgets every ticket
     assert_eq!(
         result_of(&bot.agent("ebirforms_form_dismiss", json!({})))["dismissed"],
         true
     );
     assert_eq!(
-        bot.call_as(json!({}), "rox.uninstall", json!({}))["structuredContent"]["ok"],
+        bot.call_as(json!({}), "buwiz.uninstall", json!({}))["structuredContent"]["ok"],
         true
     );
-    let gone = bot.call_as(json!({}), "rox.ticket.resolve", json!({ "ticket": ticket }));
+    let gone = bot.call_as(
+        json!({}),
+        "buwiz.ticket.resolve",
+        json!({ "ticket": ticket }),
+    );
     assert_eq!(gone["structuredContent"]["valid"], false);
 }
 

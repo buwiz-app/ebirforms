@@ -1,43 +1,44 @@
 #!/usr/bin/env bash
-# tools/rox/conformance.sh — run Rox's plugin conformance tool
-# (rox-plugin-test) against the release build of ebirforms-mini-app.
+# tools/bot/conformance.sh — run the Buwiz Bot's plugin conformance tool
+# (buwiz-plugin-test) against the release build of ebirforms-mini-app.
 #
-# The same steps as Books' tools/rox/conformance.sh, then the runner:
+# The same steps as Books' tools/bot/conformance.sh, then the runner:
 #   1. build the release binary;
 #   2. a fresh 0700 temp dir outside the repo;
-#   3. a throwaway ed25519 test key (rox-plugin-test --keygen);
+#   3. a throwaway ed25519 test key (buwiz-plugin-test --keygen);
 #   4. a per-run trust file mapping a TEST key id to that key, approving
 #      app.buwiz.ebirforms under it (never gc-2026-01);
 #   5. the manifest generated under the test key id and signed with the test
 #      key file (--key-file, never --keychain) by `rox-broker sign-manifest`
-#      when ROX_BROKER_BIN names a rox-broker build, else by Rox's older
+#      when BUWIZ_BROKER_BIN names a broker build, else by the Bot's
 #      server/src/v1/sign-manifest.mjs (same arguments, byte-identical output);
-#   then rox-plugin-test --manifest <signed> --key-file <test key>, whose
+#   then buwiz-plugin-test --manifest <signed> --key-file <test key>, whose
 #   own in-process broker uses a temp trust store of the same shape.
 #
 # The release manifest keeps publisher.key_id gc-2026-01; only the owner
-# signs that one (Rox SDK README step 10). Nothing here touches the
-# Keychain, Rox's or the broker's data folder, or Rox's trust.json.
+# signs that one (the Bot's SDK README step 10). Nothing here touches the
+# Keychain, the Bot's or the broker's data folder, or the Bot's trust.json.
 #
-# Usage: tools/rox/conformance.sh [extra rox-plugin-test args, e.g. --json]
-# Env:   ROX_DIR (default /Volumes/goldcoders/Projects/rox)
-#        ROX_BROKER_BIN (a rox-broker binary from hexuria/rox main; signs in place
-#          of server/src/v1/sign-manifest.mjs, which Rox's phase 7 removes)
+# Usage: tools/bot/conformance.sh [extra buwiz-plugin-test args, e.g. --json]
+# Env:   BUWIZ_BOT_DIR (default /Volumes/goldcoders/Projects/rox): a Buwiz Bot
+#          checkout at protocol 2.0 (main ca7a1dd1 or later)
+#        BUWIZ_BROKER_BIN (a rox-broker binary from buwiz-bot main; signs in place
+#          of server/src/v1/sign-manifest.mjs)
 #        EBIRFORMS_TEST_KEY_ID (default ebirforms-test-01)
 #        KEEP_TMP=1 keeps the temp dir (it holds a test key; delete it after)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ROX_DIR="${ROX_DIR:-/Volumes/goldcoders/Projects/rox}"
+BOT_DIR="${BUWIZ_BOT_DIR:-/Volumes/goldcoders/Projects/rox}"
 KEY_ID="${EBIRFORMS_TEST_KEY_ID:-ebirforms-test-01}"
 PLUGIN_ID="app.buwiz.ebirforms"
-RUNNER="$ROX_DIR/server/sdk/mini-app/bin/rox-plugin-test.mjs"
-if [ -n "${ROX_BROKER_BIN:-}" ]; then
-  [ -x "$ROX_BROKER_BIN" ] || { echo "conformance: ROX_BROKER_BIN $ROX_BROKER_BIN is not executable" >&2; exit 2; }
-  SIGN=("$ROX_BROKER_BIN" sign-manifest)
+RUNNER="$BOT_DIR/server/sdk/mini-app/bin/buwiz-plugin-test.mjs"
+if [ -n "${BUWIZ_BROKER_BIN:-}" ]; then
+  [ -x "$BUWIZ_BROKER_BIN" ] || { echo "conformance: BUWIZ_BROKER_BIN $BUWIZ_BROKER_BIN is not executable" >&2; exit 2; }
+  SIGN=("$BUWIZ_BROKER_BIN" sign-manifest)
   SIGNER=""
 else
-  SIGNER="$ROX_DIR/server/src/v1/sign-manifest.mjs"
+  SIGNER="$BOT_DIR/server/src/v1/sign-manifest.mjs"
   SIGN=(node "$SIGNER")
 fi
 
@@ -46,11 +47,11 @@ if [ "$KEY_ID" = "gc-2026-01" ]; then
   exit 2
 fi
 for f in "$RUNNER" ${SIGNER:+"$SIGNER"}; do
-  [ -f "$f" ] || { echo "conformance: $f not found (set ROX_DIR, or ROX_BROKER_BIN for the signer)" >&2; exit 2; }
+  [ -f "$f" ] || { echo "conformance: $f not found (set BUWIZ_BOT_DIR to a Bot checkout at protocol 2.0, or BUWIZ_BROKER_BIN for the signer)" >&2; exit 2; }
 done
-command -v node >/dev/null || { echo "conformance: node is needed to run Rox's tools" >&2; exit 2; }
-[ -d "$ROX_DIR/server/node_modules/@modelcontextprotocol/sdk" ] && [ -d "$ROX_DIR/server/node_modules/esbuild" ] || {
-  echo "conformance: Rox's server/node_modules lacks @modelcontextprotocol/sdk or esbuild; install them in the Rox checkout yourself" >&2
+command -v node >/dev/null || { echo "conformance: node is needed to run the Bot's tools" >&2; exit 2; }
+[ -d "$BOT_DIR/server/node_modules/@modelcontextprotocol/sdk" ] && [ -d "$BOT_DIR/server/node_modules/esbuild" ] || {
+  echo "conformance: the Bot's server/node_modules lacks @modelcontextprotocol/sdk or esbuild; install them in the Bot checkout yourself" >&2
   exit 2
 }
 
@@ -79,7 +80,7 @@ cat >"$TMP/trust.json" <<JSON
   "approved_plugins": [ { "id": "$PLUGIN_ID", "publisher_key_id": "$KEY_ID" } ]
 }
 JSON
-export ROX_TRUST_FILE="$TMP/trust.json"
+export BUWIZ_TRUST_FILE="$TMP/trust.json"
 
 # 5. generate under the test key id, sign with the test key file
 "$BIN" manifest --key-id "$KEY_ID" >"$TMP/manifest.json"

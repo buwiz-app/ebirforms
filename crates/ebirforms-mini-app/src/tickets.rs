@@ -4,7 +4,7 @@
 //! A ticket is `tkt_` and 26 Crockford base32 characters, 130 random bits,
 //! with no subject data in it. The map from ticket to subject is one row of
 //! the mini app's own (encrypted) settings, so it survives restarts and never
-//! leaves this process: the Bot learns a title only (`rox.ticket.resolve`),
+//! leaves this process: the Bot learns a title only (`buwiz.ticket.resolve`),
 //! and an app learns the TIN of a ticket only by asking with that ticket
 //! (`ebirforms_ticket_subject`). One subject has one ticket.
 //!
@@ -277,7 +277,7 @@ pub(crate) fn subject_of(app: &BirApp, ticket: &str) -> Result<Subject, String> 
         .ok_or_else(|| "the ticket is not one eBIRForms issued, or it was revoked".to_string())
 }
 
-/// `rox.uninstall`: every ticket forgotten.
+/// `buwiz.uninstall`: every ticket forgotten.
 pub(crate) fn forget_all(app: &BirApp) -> Result<(), String> {
     save(app, &Map::new())
 }
