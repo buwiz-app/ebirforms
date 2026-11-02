@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tools/check-all.sh — every gate a commit must pass, in order: rustfmt,
 # clippy with warnings denied, the Rust tests, and the Buwiz Bot's conformance
-# runner and real-broker host test, plus the TSX setter guard.
+# runner and real-broker host test, plus the TSX setter guard and the SDK-1
+# import gate (the Bot refuses to open an app importing outside its table).
 #
 # It prints one line per gate and a summary, keeps each gate's output in a
 # temp folder, and exits non-zero when any gate fails.
@@ -44,11 +45,15 @@ no_detached_setters() {
 setters_total() {
   node --test tests/detached-setters.mjs && no_detached_setters
 }
+nsh_imports_total() {
+  node --test tests/nsh-imports.mjs && node tools/check-nsh-imports.mjs
+}
 
 gate "cargo fmt --check" fmt cargo fmt --check
 gate "cargo clippy -D warnings" clippy cargo clippy --all-targets -- -D warnings
 gate "cargo test" cargo-test tests_total
 gate "No detached setters" detached-setters setters_total
+gate "SDK-1 nsh imports" nsh-imports nsh_imports_total
 if [ "${SKIP_BOT:-0}" = "1" ]; then
   printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot conformance"
   printf 'SKIP  %-28s SKIP_BOT=1\n' "Bot host test"

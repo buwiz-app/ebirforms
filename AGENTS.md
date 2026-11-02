@@ -52,7 +52,9 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 ## Gates
 
 `tools/check-all.sh` must pass before every commit: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-`cargo test`, and `tools/bot/conformance.sh`. Conformance signs with a throwaway test key (`ebirforms-test-01`,
+`cargo test`, the SDK-1 import gate (`node tools/check-nsh-imports.mjs`: an app may import from `nsh` only the
+names the Bot's loader allows, `buwiz-bot app/src/mini_v1/load.rs` `SDK1_NSH`; anything else and the Bot refuses to
+open it), and `tools/bot/conformance.sh`. Conformance signs with a throwaway test key (`ebirforms-test-01`,
 never `gc-2026-01`) and runs the Bot's `buwiz-plugin-test`. It needs a Buwiz Bot checkout at protocol 1.0
 (`BUWIZ_BOT_DIR`) with its `server/node_modules`. Never switch branches in the Bot checkout itself.
 

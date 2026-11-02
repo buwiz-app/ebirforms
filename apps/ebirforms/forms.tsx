@@ -3266,6 +3266,9 @@ async function followReturn(p: FormsProps) {
     try {
       const row = (await H.returns("all")).find((r) => Number(r.id) === id && normCode(r.form_code) === code);
       if (row) return openForm({ tin: TIN(), code, year: row.taxable_year, period: row.period, ...(row.return_key != null ? { returnKey: row.return_key } : {}), ...flags });
+      // gone: the taxpayer's forms, with why
+      toast(RETURN_GONE, "danger");
+      return;
     } catch (e) {
       toast(errText(e), "danger");
     }
@@ -3300,15 +3303,30 @@ function followDeepLink() {
   const period = num(p.period);
   const key = num(p.key);
   picker.focus(code, year);
-  if (year != null && period != null) openForm({ tin: TIN(), code, year, period, ...(key != null ? { returnKey: key } : {}) });
+  if (year != null && period != null)
+    openForm({ tin: TIN(), code, year, period, ...(key != null ? { returnKey: key } : {}) }, (error) => {
+      // a stored return by its key that is gone: the taxpayer's forms, with why
+      if (error && key != null) {
+        view.set("picker");
+        toast(RETURN_GONE, "danger");
+      }
+    });
 }
 
 // The Bot's nsh ignores contentContainerClass: each Scroll's padding lives on a View inside it.
 /** Why the ticket did not open, if it did not. */
 const opening = signal("");
+/** The ticket names no taxpayer eBIRForms has (deleted, or another app's). */
+const unknownTicket = signal(false);
+/** What a ticket that does not resolve says. */
+const NOT_HERE = "This taxpayer isn't in eBIRForms. It may have been deleted, or it's from the old BIR app.";
+/** What a return or draft id that is gone says. */
+const RETURN_GONE = "This return isn't saved any more.";
 
 /** What the props' ticket stands for, from BIR; a return's ticket also gets its branch's own ticket. */
 async function openTicket(ticket: string) {
+  opening.set("");
+  unknownTicket.set(false);
   try {
     const r: any = await buwiz.call("ebirforms_ticket_subject", { ticket });
     const s = r?.result as Subject;
@@ -3319,8 +3337,89 @@ async function openTicket(ticket: string) {
     subject.set(s);
     followDeepLink();
   } catch (e) {
-    opening.set(errText(e));
+    const why = errText(e);
+    if (/not one eBIRForms issued|revoked|no longer (saved|available)|not saved/i.test(why)) unknownTicket.set(true);
+    else opening.set(why);
   }
+}
+
+/** A saved taxpayer as `ebirforms_taxpayers_list` answers it (Tax Profile's rows). */
+interface TaxpayerRow { ticket: string; name: string; tin_display: string; taxpayer_type: string; rdo_code: string; rdo_office: string }
+
+/** Forms opened on no taxpayer (or on one eBIRForms no longer has): the
+ *  saved taxpayers to pick from, each opening its forms here; with none,
+ *  New taxpayer, which opens Tax Profile's form. */
+function TaxpayerPicker() {
+  const rows = signal<TaxpayerRow[] | null>(null);
+  const failed = signal("");
+  const load = () => {
+    failed.set("");
+    buwiz
+      .call!("ebirforms_taxpayers_list", {})
+      .then((r: any) => rows.set(Array.isArray(r?.result?.taxpayers) ? r.result.taxpayers : []))
+      .catch((e: unknown) => failed.set(errText(e)));
+  };
+  load();
+  const list = () => rows() || [];
+  const rdo = (t: TaxpayerRow) => (t.rdo_code ? `RDO ${t.rdo_code}${t.rdo_office ? ` ${t.rdo_office}` : ""}` : "");
+  const newTaxpayer = () => {
+    buwiz.open!({ app: "tax-profile", props: { start: "new" } }).catch((e: unknown) => failed.set(errText(e)));
+  };
+  return (
+    <Scroll style={{ flex: 1 }}>
+      <View class="w-full items-center px-6 py-6">
+        <View class="gap-4" style={{ width: "100%", maxWidth: 720 }}>
+          <If when={unknownTicket()}>
+            <View class={`rounded-lg px-3 py-2 ${C.dangerSoft}`}>
+              <Text class={`text-sm ${C.danger}`}>{NOT_HERE}</Text>
+            </View>
+          </If>
+          <View class="gap-0.5">
+            <Text class={`text-xl font-semibold ${C.fg}`}>BIR Forms</Text>
+            <Text class={`text-sm ${C.fg2}`}>
+              {rows() === null ? "Loading the taxpayers…" : list().length ? "Pick a taxpayer to see their forms." : "No tax profiles yet."}
+            </Text>
+          </View>
+          <If when={Boolean(failed())}>
+            <View class="flex-row items-center gap-2">
+              <Text class={`text-xs flex-1 ${C.danger}`}>{`Could not load the taxpayers: ${failed()}`}</Text>
+              <Btn label="Retry" small onPress={load} />
+            </View>
+          </If>
+          <If when={rows() !== null && !list().length && !failed()}>
+            <View class="flex-row flex-wrap items-center gap-2">
+              <Btn label="New taxpayer" variant="primary" onPress={newTaxpayer} />
+              <Text class={`text-xs ${C.fg2}`}>or type /taxprofile create in the chat</Text>
+            </View>
+          </If>
+          <If when={list().length > 0}>
+            <View class={`rounded-xl border ${C.line} ${C.pane} overflow-hidden`}>
+              <Each of={list()}>
+                {(t, i) => (
+                  <View
+                    onPress={() => void openTicket(t().ticket)}
+                    activeStyle={{ opacity: 0.7 }}
+                    role="button"
+                    accessibilityLabel={`Open ${t().name}'s forms`}
+                    class={`flex-row items-center gap-3 px-4 py-2 ${i() === 0 ? "" : "border-t border-black/5 dark:border-white/5"}`}
+                    style={{ minHeight: 48 }}
+                  >
+                    <View class="flex-1 gap-0.5" style={{ minWidth: 0 }}>
+                      <Text class={`text-sm ${C.fg}`} style={{ numberOfLines: 1 }}>{t().name}</Text>
+                      <Text class={`text-xs ${C.fg2}`} style={{ numberOfLines: 1 }}>
+                        {[t().tin_display, t().taxpayer_type, rdo(t())].filter(Boolean).join(" · ")}
+                      </Text>
+                    </View>
+                    <Text class={`text-sm ${C.fg3}`}>›</Text>
+                  </View>
+                )}
+              </Each>
+            </View>
+          </If>
+        </View>
+      </View>
+    </Scroll>
+  );
 }
 
 export default function R() {
@@ -3331,15 +3430,14 @@ export default function R() {
       <If
         when={TIN().length >= 9}
         else={
-          <View style={{ flex: 1 }} class="items-center justify-center p-8 gap-2">
-            <If
-              when={!ticket}
-              else={<Text class={`text-sm ${opening() ? C.danger : C.fg2}`}>{opening() || "Opening the taxpayer's forms…"}</Text>}
-            >
-              <Text class={`text-lg font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
-              <Text class={`text-sm ${C.fg2}`}>BIR Forms works on one taxpayer at a time. Ask for a taxpayer's forms in the chat to open it for them.</Text>
-            </If>
-          </View>
+          <If
+            when={ticket && !unknownTicket()}
+            else={<TaxpayerPicker />}
+          >
+            <View style={{ flex: 1 }} class="items-center justify-center p-8 gap-2">
+              <Text class={`text-sm ${opening() ? C.danger : C.fg2}`}>{opening() || "Opening the taxpayer's forms…"}</Text>
+            </View>
+          </If>
         }
       >
         <View style={{ flex: 1, display: view() === "picker" ? "flex" : "none" }}>

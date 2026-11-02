@@ -34,6 +34,14 @@ path = "../../tests/fill_sources.rs"
 name = "new_taxpayer"
 path = "../../tests/new_taxpayer.rs"
 
+[[test]]
+name = "import_legacy"
+path = "../../tests/import_legacy.rs"
+
+[[test]]
+name = "import_legacy_causes"
+path = "../../tests/import_legacy_causes.rs"
+
 [[example]]
 name = "host-seed"
 path = "../../tests/host/seed.rs"
@@ -54,6 +62,9 @@ getrandom = "0.3"
 # runtime of its own
 bir-submit.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+# import-legacy (legacy_import.rs): splits eBIRForms' own profile archive
+# into one archive per taxpayer; the same zip eBIRForms writes it with
+zip = { version = "2", default-features = false, features = ["deflate", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

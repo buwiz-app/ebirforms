@@ -10,6 +10,7 @@ mod answers;
 mod cards;
 mod jcs;
 mod keys;
+pub mod legacy_import;
 pub mod manifest;
 mod new_taxpayer;
 pub mod owner;

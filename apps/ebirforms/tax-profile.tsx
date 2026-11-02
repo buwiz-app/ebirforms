@@ -12,7 +12,7 @@
 //
 // New taxpayer (bir-shell's taxpayer.js openNewTaxpayer / createTaxpayer, as
 // the first mini app's register.tsx had it): from the header, or from the
-// empty state when the app opens on no taxpayer. eBIRForms checks each field
+// picker when the app opens on no taxpayer. eBIRForms checks each field
 // and writes the taxpayer with its 00000 head office
 // (`create_taxpayer`), then answers the new taxpayer's ticket, which this
 // app opens as that taxpayer's profile.
@@ -23,8 +23,8 @@
 // taxpayer scope).
 
 import { signal, computed, resource, effect, cleanup, untracked, Text, View, Scroll } from "nsh";
-import { Input } from "nsh/base";
-import type { Signal, Accessor, JSX } from "nsh";
+import { Input, Radio, RadioGroup } from "nsh/base";
+import type { Signal, Accessor, JSX, InputRef, ScrollRef, ViewRef } from "nsh";
 import { buwiz } from "buwiz";
 
 /** An `<Input>`'s text from its `onChange`: `{ value }` since nsh's events
@@ -34,8 +34,13 @@ const typed = (e: { value: string } | string): string => (typeof e === "string" 
 // ============================================================ host calls
 // Every bir.* call this app makes goes through `bir` and is listed in `api`.
 
-/** `ticket`: the taxpayer or branch; `year`: the tax year to show. */
-type Props = { ticket?: string; year?: number | string };
+/** `ticket`: the taxpayer or branch; `year`: the tax year to show;
+ *  `start: "new"`: open on the New taxpayer form (`/taxprofile create`, or
+ *  an open with no taxpayer), `name` prefilled there; `section`: where the
+ *  taxpayer's profile opens (`/taxprofile edit`: its Taxpayer section in
+ *  edit; `delete`: at its Delete row, which still takes the person's two
+ *  presses). */
+type Props = { ticket?: string; year?: number | string; start?: string; name?: string; section?: string };
 const PROPS: Props = (buwiz.props || {}) as Props;
 /** The ticket every call is held to; BIR moves it with a TIN change. */
 const TICKET = typeof PROPS.ticket === "string" ? PROPS.ticket : "";
@@ -199,7 +204,6 @@ const ADDRESS_FIELDS: [BranchFieldName, string, boolean][] = [
   ["phone", "Phone", false],
   ["email", "Email", true],
 ];
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function errorText(e: unknown): string {
@@ -255,14 +259,71 @@ function initials(name: string): string {
   return ((parts[0] || "?")[0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
 }
 type Option = { value: string; label: string };
-/** What is wrong with an RDO, ZIP code or email as typed, or null. Empty is fine. */
-function factError(field: BranchFieldName, value: string, rdos: Option[]): string | null {
+
+// The rules of a taxpayer's fields. new_taxpayer.rs `check` refuses the same
+// cases with the same rules (its tests hold the same examples): keep the two
+// in step.
+/** A TIN root: 9 digits. */
+const TIN_RE = /^\d{9}$/;
+/** A ZIP code: 4 digits, and one of the ZIP list's. */
+const ZIP_RE = /^\d{4}$/;
+/** An email: `local@domain.tld`, no spaces. The local part is letters,
+ *  digits and `. _ % + -`; the domain is labels of letters, digits and inner
+ *  hyphens joined by dots, ending in a top-level domain of 2 or more letters;
+ *  254 characters at most. */
+const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/;
+const EMAIL_MAX = 254;
+const EMAIL_ERROR = "Type an email like name@example.com, with no spaces.";
+/** What a phone may hold while typed: digits, spaces, dashes, brackets, a leading +. */
+const PHONE_CHARS = /[^0-9 ()+-]/g;
+/** The most digits a phone holds: the longest form, `639` and 9 more (12). */
+const PHONE_DIGITS = 12;
+const PHONE_ERROR =
+  "Type a Philippine number: a mobile 09XXXXXXXXX, +639XXXXXXXXX or 639XXXXXXXXX, or a landline of 7 to 10 digits with an optional area code, like (02) 8123 4567.";
+/** A Philippine phone number. Spaces, dashes and brackets are allowed and
+ *  only the digits count, 12 at most:
+ *  - a mobile: `09` and 9 more digits (11), or `639` and 9 more (12), with
+ *    or without a leading `+`;
+ *  - a landline: 7 or 8 digits not starting with 0, or with its area code
+ *    9 or 10 digits starting with `0` but not `09`.
+ *  A `+` only leads, and only in `+639…`; nothing else is allowed. */
+function phoneOk(text: string): boolean {
+  const v = text.trim();
+  if (!/^\+?[0-9 ()-]+$/.test(v)) return false;
+  const d = v.replace(/\D/g, "");
+  if (v.startsWith("+")) return /^639\d{9}$/.test(d);
+  return /^09\d{9}$/.test(d) || /^639\d{9}$/.test(d) || /^[1-9]\d{6,7}$/.test(d) || /^0[1-8]\d{7,8}$/.test(d);
+}
+function emailOk(text: string): boolean {
+  const v = text.trim();
+  return v.length <= EMAIL_MAX && EMAIL_RE.test(v);
+}
+/** What is wrong with an RDO, ZIP code, phone or email as typed, or null.
+ *  Empty is fine. A `draft` is what an RDO or ZIP input shows with nothing
+ *  picked: text that matches no option, which counts as not chosen. */
+function factError(field: BranchFieldName, value: string, rdos: Option[], draft = ""): string | null {
   const v = value.trim();
+  if (!v && draft.trim() && field === "rdo_code") return "Pick an RDO from the list: what is typed matches none.";
+  if (!v && draft.trim() && field === "zip_code") return "Pick a ZIP code from the list, or leave it empty: what is typed matches none.";
   if (!v) return null;
   if (field === "rdo_code" && rdos.length && !rdos.some((o) => o.value === v)) return "Pick an RDO from the list. Type its code or district to search.";
-  if (field === "zip_code" && !/^\d{4}$/.test(v)) return "ZIP code is 4 digits, like 1226. Type a code or a place to search.";
-  if (field === "email" && !EMAIL_RE.test(v)) return "Type an email like name@example.com.";
+  if (field === "zip_code" && !ZIP_RE.test(v)) return "ZIP code is 4 digits, like 1226. Type a code or a place to search.";
+  if (field === "phone" && !phoneOk(v)) return PHONE_ERROR;
+  if (field === "email" && !emailOk(v)) return EMAIL_ERROR;
   return null;
+}
+/** What an RDO and a ZIP input show with nothing picked (`Combo`'s `draft`). */
+type Drafts = { rdo_code: Signal<string>; zip_code: Signal<string> };
+function draftOf(drafts: Drafts, f: BranchFieldName): string {
+  return f === "rdo_code" || f === "zip_code" ? drafts[f]() : "";
+}
+function clearDrafts(drafts: Drafts): void {
+  drafts.rdo_code.set("");
+  drafts.zip_code.set("");
+}
+/** A TIN root as shown: 000-000-000, grouped as far as it goes. */
+function groupTin(digits: string): string {
+  return [digits.slice(0, 3), digits.slice(3, 6), digits.slice(6, 9)].filter(Boolean).join("-");
 }
 
 // ============================================================ UI kit (Sand theme)
@@ -351,6 +412,29 @@ function Segmented<T extends string | number>(p: { options: { value: T; label: s
   );
 }
 
+/** The taxpayer type, as a radio group: one stop of Tab, at the checked
+ *  type; the arrow keys (Left / Up the previous, Right / Down the next,
+ *  around the ends) move to a type and pick it; a press picks one. */
+function TypePicker(p: { value: TaxpayerType; onChange: (v: TaxpayerType) => void }) {
+  return (
+    <RadioGroup class={`flex-row flex-wrap gap-0.5 p-0.5 rounded-md self-start ${C.inset}`}>
+      <Each of={TAXPAYER_TYPES}>
+        {(t) => (
+          <Radio
+            checked={t() === p.value}
+            onChange={() => p.onChange(t())}
+            accessibilityLabel={t()}
+            activeStyle={{ opacity: 0.7 }}
+            class={`px-3 py-1 rounded-md border ${t() === p.value ? `${C.pane} border-black/10 dark:border-white/10` : "border-transparent"} focus:border-[#1680f3] dark:focus:border-[#1884fc]`}
+          >
+            <Text class={`text-xs font-medium ${t() === p.value ? C.fg : C.fg2}`}>{t()}</Text>
+          </Radio>
+        )}
+      </Each>
+    </RadioGroup>
+  );
+}
+
 function Switch(p: { on: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
     <View onPress={() => p.onChange(!p.on)} activeStyle={{ opacity: 0.7 }} class="flex-row items-center gap-2" accessibilityLabel={p.label}>
@@ -408,26 +492,72 @@ function Field(p: { label: string; value?: string | null; full?: boolean; inheri
   );
 }
 
+/** At most `max` digits of `text`: the digits past them go, the other
+ *  characters stay. */
+function capDigits(text: string, max: number): string {
+  let n = 0;
+  let out = "";
+  for (const ch of text) {
+    if (ch >= "0" && ch <= "9") {
+      if (n >= max) continue;
+      n++;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** A text field. `digits` keeps only digits, that many at most; `strip`
+ *  drops the characters it matches; `maxDigits` drops the digits past that
+ *  many and keeps the rest; `format` is how the clean text shows (`value`
+ *  holds it unformatted). `label` is what screen readers call it. */
 function TextInput(p: {
   value: Signal<string>;
   placeholder?: string;
+  label?: string;
   error?: boolean;
   disabled?: boolean;
   secure?: boolean;
   digits?: number;
+  strip?: RegExp;
+  maxDigits?: number;
+  format?: (clean: string) => string;
+  inputRef?: (r: InputRef) => void;
+  autoFocus?: boolean;
   onEdit?: () => void;
   onBlur?: () => void;
 }) {
+  // A refused keystroke must leave the field: an unchanged `value` is not
+  // sent again, so the field would keep it. The field is given what was
+  // typed, then the clean text a turn later.
+  const raw = signal<string | null>(null);
+  const clean = (v: string) => {
+    if (p.digits) return v.replace(/\D/g, "").slice(0, p.digits);
+    const kept = p.strip ? v.replace(p.strip, "") : v;
+    return p.maxDigits ? capDigits(kept, p.maxDigits) : kept;
+  };
+  const shown = () => {
+    const r = raw();
+    return r !== null ? r : p.format ? p.format(p.value()) : p.value();
+  };
   return (
     <Input
-      value={p.value()}
+      ref={(r: InputRef) => p.inputRef?.(r)}
+      value={shown()}
       onChange={(e) => {
         const v = typed(e);
-        p.value.set(p.digits ? v.replace(/\D/g, "").slice(0, p.digits) : v);
+        const c = clean(v);
+        p.value.set(c);
+        if ((p.format ? p.format(c) : c) !== v) {
+          raw.set(v);
+          queueMicrotask(() => raw.set(null));
+        }
         p.onEdit?.();
       }}
       onBlur={() => p.onBlur?.()}
+      autoFocus={p.autoFocus}
       placeholder={p.placeholder}
+      accessibilityLabel={p.label}
       readonly={p.disabled}
       masked={p.secure}
       keyboardType={p.digits ? "number-pad" : "default"}
@@ -436,66 +566,186 @@ function TextInput(p: {
   );
 }
 
-/** A pick list over a reference list (RDO, ZIP): a search box and the first matches. */
-function Combo(p: { value: Signal<string>; options: Option[]; placeholder: string; error?: boolean; disabled?: boolean; onPick?: () => void }) {
+/** How many matches a `Combo` lists under its input; past them it asks for
+ *  more letters. */
+const COMBO_ROWS = 8;
+
+/** A pick list over a reference list (RDO, ZIP) in one input, its matches
+ *  listed inline under it (not in a popup: a popup list held Tab on the
+ *  Bot's macOS host, and the list rows are never a stop of Tab, so the
+ *  focus only ever moves between inputs): typing filters the options
+ *  (their labels, ignoring case, the first 8 shown), Up and Down move the
+ *  highlight, Return or a press picks one and fills the input with its
+ *  label ("008 - Baguio City"), Escape closes the list, leaving the input
+ *  closes it too. Editing the label (Backspace, select all and delete) or
+ *  the × clears the pick. `value` is only ever a picked option's code;
+ *  with nothing picked the input shows `draft`, what was typed, and
+ *  leaving it on text that is exactly an option's code or label picks that
+ *  option, else it stays not chosen. */
+function Combo(p: {
+  value: Signal<string>;
+  draft: Signal<string>;
+  options: Option[];
+  placeholder: string;
+  error?: boolean;
+  disabled?: boolean;
+  label?: string;
+  /** A draft of digits only keeps this many: a code is no longer. */
+  maxDigits?: number;
+  inputRef?: (r: InputRef) => void;
+  onPick?: () => void;
+  onBlur?: () => void;
+}) {
   const open = signal(false);
-  const query = signal("");
-  const current = computed(() => p.options.find((o) => o.value === p.value()));
-  const matches = computed(() => {
-    const q = query().trim().toLowerCase();
-    return p.options.filter((o) => !q || o.label.toLowerCase().includes(q)).slice(0, 8);
+  /** The highlighted match, by its place in the list shown. */
+  const hi = signal(0);
+  /** A refused keystroke, shown for a turn (as `TextInput`'s `raw`). */
+  const raw = signal<string | null>(null);
+  /** Leaving closes the list a moment later, so a press on a row that took
+   *  the focus away still lands. */
+  let closing: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(closing));
+  /** The option picked, by index: 49 ZIP codes serve several areas, so a
+   *  code alone does not say which label to show. */
+  const pickedAt = signal(-1);
+  const chosenAt = computed(() => {
+    const v = p.value();
+    if (!v) return -1;
+    const at = pickedAt();
+    return at >= 0 && p.options[at]?.value === v ? at : p.options.findIndex((o) => o.value === v);
   });
+  /** The input's text: the picked option's label (a value the list does not
+   *  have shows as itself), else the draft. */
+  const text = () => {
+    const r = raw();
+    if (r !== null) return r;
+    const v = p.value();
+    if (!v) return p.draft();
+    const at = chosenAt();
+    return at >= 0 ? p.options[at].label : v;
+  };
+  /** The options whose label holds the draft: the first `COMBO_ROWS`, and
+   *  whether there are more. */
+  const matches = computed(() => {
+    const q = p.value() ? "" : p.draft().trim().toLowerCase();
+    const rows: number[] = [];
+    let more = false;
+    if (q) {
+      for (let i = 0; i < p.options.length; i++) {
+        if (!p.options[i].label.toLowerCase().includes(q)) continue;
+        if (rows.length === COMBO_ROWS) {
+          more = true;
+          break;
+        }
+        rows.push(i);
+      }
+    }
+    return { rows, more };
+  });
+  const shown = () => open() && !p.disabled && !p.value() && p.draft().trim().length > 0;
+  const pick = (at: number) => {
+    const o = p.options[at];
+    if (!o) return;
+    pickedAt.set(at);
+    p.draft.set("");
+    p.value.set(o.value);
+    open.set(false);
+    p.onPick?.();
+  };
+  const clear = () => {
+    pickedAt.set(-1);
+    p.draft.set("");
+    p.value.set("");
+    open.set(false);
+    p.onPick?.();
+  };
+  const move = (by: number) => {
+    const n = matches().rows.length;
+    if (!shown() || !n) return;
+    hi.set((hi() + by + n) % n);
+  };
+  const border = () => (p.error ? "border-[#d92d20] dark:border-[#ff6961]" : "border-black/10 dark:border-white/10");
   return (
     <View class="gap-1">
-      <View
-        onPress={() => !p.disabled && open.set(!open())}
-        activeStyle={{ opacity: 0.7 }}
-        class={`flex-row items-center justify-between rounded-md px-3 py-2 border ${p.disabled ? `${C.inset} opacity-60` : C.pane} ${p.error ? "border-[#d92d20] dark:border-[#ff6961]" : "border-black/10 dark:border-white/10"}`}
-      >
-        <Text class={`text-sm flex-1 ${current() || p.value() ? C.fg : C.fg3}`} style={{ numberOfLines: 1 }}>
-          {current()?.label || p.value() || p.placeholder}
-        </Text>
-        <Text class={`text-xs ${C.fg3}`}>{open() ? "▴" : "▾"}</Text>
-      </View>
-      <If when={open() && !p.disabled}>
-        <View class={`rounded-md p-2 gap-1 ${C.card} ${C.line}`}>
+      <View class="flex-row items-center gap-1">
+        <View class="flex-1">
           <Input
-            value={query()}
-            onChange={(e) => query.set(typed(e))}
+            ref={(r: InputRef) => p.inputRef?.(r)}
+            value={text()}
+            accessibilityLabel={p.label}
+            onChange={(e) => {
+              let v = typed(e);
+              if (p.maxDigits && /^\d+$/.test(v) && v.length > p.maxDigits) {
+                raw.set(v);
+                queueMicrotask(() => raw.set(null));
+                v = v.slice(0, p.maxDigits);
+              }
+              if (p.value()) {
+                // the label edited: nothing is picked any more
+                pickedAt.set(-1);
+                p.value.set("");
+                p.onPick?.();
+              }
+              p.draft.set(v);
+              hi.set(0);
+              open.set(v.trim().length > 0);
+            }}
+            onKeyPress={(e) => {
+              if (e.key === "ArrowDown") move(1);
+              else if (e.key === "ArrowUp") move(-1);
+              else if (e.key === "Escape") open.set(false);
+            }}
+            submitBehavior="submit"
+            onSubmit={() => {
+              const at = matches().rows[hi()];
+              if (shown() && at !== undefined) pick(at);
+            }}
+            onFocus={() => clearTimeout(closing)}
+            onBlur={() => {
+              clearTimeout(closing);
+              closing = setTimeout(() => open.set(false), 200);
+              const d = p.draft().trim().toLowerCase();
+              if (!p.value() && d) {
+                const at = p.options.findIndex((o) => o.value.toLowerCase() === d || o.label.toLowerCase() === d);
+                if (at >= 0) pick(at);
+              }
+              p.onBlur?.();
+            }}
             placeholder={p.placeholder}
-            autoFocus
-            class={`placeholder:text-[#8e8e93] rounded-md px-3 py-2 text-sm ${C.fg} ${C.pane} border border-black/10 dark:border-white/10`}
+            readonly={p.disabled}
+            autoCorrect={false}
+            class={`placeholder:text-[#8e8e93] rounded-md px-3 py-2 text-sm ${C.fg} ${p.disabled ? `${C.inset} opacity-60` : C.pane} border ${border()}`}
           />
-          <Each of={matches()}>
-            {(o) => (
+        </View>
+        <If when={!p.disabled && (p.value() || p.draft())}>
+          <View onPress={clear} focusable={false} activeStyle={{ opacity: 0.6 }} accessibilityLabel="Clear" role="button" class="px-2 py-1 rounded-md">
+            <Text class={`text-sm ${C.fg3}`}>×</Text>
+          </View>
+        </If>
+      </View>
+      <If when={shown()}>
+        <View class={`rounded-md p-1 ${C.card} ${C.line}`} role="listbox" accessibilityLabel={p.label}>
+          <Each of={matches().rows}>
+            {(at, i) => (
               <View
-                onPress={() => {
-                  p.value.set(o().value);
-                  query.set("");
-                  open.set(false);
-                  p.onPick?.();
-                }}
-                activeStyle={{ opacity: 0.6 }}
-                class={`px-2 py-1 rounded-md ${o().value === p.value() ? C.inset : ""}`}
+                focusable={false}
+                role="option"
+                onPress={() => pick(at())}
+                activeStyle={{ opacity: 0.7 }}
+                class={`px-2 py-1 rounded-md ${i() === hi() ? "bg-black/5 dark:bg-white/10" : ""}`}
               >
-                <Text class={`text-sm ${C.fg}`} style={{ numberOfLines: 1 }}>{o().label}</Text>
+                <Text class={`text-sm ${C.fg}`} style={{ numberOfLines: 1 }}>
+                  {p.options[at()]?.label || ""}
+                </Text>
               </View>
             )}
           </Each>
-          <If when={!matches().length}>
+          <If when={!matches().rows.length}>
             <Text class={`text-xs px-2 py-1 ${C.fg3}`}>{p.options.length ? "No match." : "The list did not load."}</Text>
           </If>
-          <View class="flex-row justify-end">
-            <Button
-              label="Clear"
-              variant="ghost"
-              onPress={() => {
-                p.value.set("");
-                open.set(false);
-                p.onPick?.();
-              }}
-            />
-          </View>
+          <If when={matches().more}>
+            <Text class={`text-xs px-2 py-1 ${C.fg3}`}>More match: type more to narrow them.</Text>
+          </If>
         </View>
       </If>
     </View>
@@ -604,17 +854,19 @@ function LoadError(p: { error: unknown; retry: () => void; what: string }) {
 
 // ============================================================ the app
 
-/** Whether the New taxpayer form shows, over the profile or the empty state
+/** Whether the New taxpayer form shows, over the profile or the picker
  *  (which stays mounted under it, so Cancel finds it as it was). */
-const adding = signal(false);
+const adding = signal(PROPS.start === "new");
+/** The name `/taxprofile create` prefills, for the first form only. */
+let prefillName = typeof PROPS.name === "string" ? PROPS.name.trim() : "";
 
-/** The ticket's taxpayer, or without a ticket a note on how to open one;
- *  New taxpayer over either. */
+/** The ticket's taxpayer, or without a ticket the saved taxpayers to pick
+ *  from; New taxpayer over either. */
 export default function R() {
   return (
     <View class={`flex-1 ${C.pane}`}>
       <View class="flex-1" style={{ display: adding() ? "none" : "flex" }}>
-        {TICKET ? <Opened /> : <NoTaxpayer />}
+        {TICKET ? <Opened /> : <Picker />}
       </View>
       <If when={adding()}>
         <NewTaxpayer onClose={() => adding.set(false)} />
@@ -627,15 +879,22 @@ export default function R() {
 function Opened() {
   const subject = signal<{ tin: string } | null>(null);
   const failed = signal("");
+  /** The ticket names no taxpayer eBIRForms has (deleted, or another app's). */
+  const unknown = signal(false);
   buwiz
     .call!("ebirforms_ticket_subject", { ticket: TICKET })
     .then((r: any) => subject.set(r?.result || null))
-    .catch((e) => failed.set(errorText(e)));
+    .catch((e) => {
+      const why = errorText(e);
+      if (/not one eBIRForms issued|revoked|no longer (saved|available)|not saved/i.test(why)) unknown.set(true);
+      else failed.set(why);
+    });
   return (
     <View class={`flex-1 ${C.pane}`}>
       {() => {
         const s = subject();
         if (s) return untracked(() => <Profile tin={String(s.tin || "")} />);
+        if (unknown()) return untracked(() => <Picker notice={NOT_HERE} />);
         return (
           <View class="flex-1 items-center justify-center p-6" style={{ minHeight: 400 }}>
             <Text class={`text-sm ${failed() ? C.danger : C.fg2}`}>{failed() || "Opening the tax profile…"}</Text>
@@ -646,17 +905,83 @@ function Opened() {
   );
 }
 
-function NoTaxpayer() {
+/** A saved taxpayer as `ebirforms_taxpayers_list` answers it: the same rows
+ *  as the Tax profiles card. */
+interface TaxpayerRow { ticket: string; name: string; tin_display: string; taxpayer_type: string; rdo_code: string; rdo_office: string }
+
+/** Tax Profile opened on no taxpayer: the saved taxpayers to pick from,
+ *  each opening its profile, with New taxpayer at the top; with none saved,
+ *  the New taxpayer form at once. */
+/** What a ticket that does not resolve says. */
+const NOT_HERE = "This taxpayer isn't in eBIRForms. It may have been deleted, or it's from the old BIR app.";
+
+function Picker(p: { notice?: string } = {}) {
+  const rows = signal<TaxpayerRow[] | null>(null);
+  const failed = signal("");
+  const load = () => {
+    failed.set("");
+    buwiz
+      .call!("ebirforms_taxpayers_list", {})
+      .then((r: any) => {
+        const list: TaxpayerRow[] = Array.isArray(r?.result?.taxpayers) ? r.result.taxpayers : [];
+        rows.set(list);
+        // none saved: straight to the form (unless there is a notice to read)
+        if (!list.length && !p.notice) adding.set(true);
+      })
+      .catch((e) => failed.set(errorText(e)));
+  };
+  load();
+  const openFailed = signal("");
+  const open = async (ticket: string) => {
+    openFailed.set("");
+    try {
+      await openProfileApp(ticket);
+    } catch (e) {
+      openFailed.set(errorText(e));
+    }
+  };
+  const list = () => rows() || [];
+  const rdo = (t: TaxpayerRow) => (t.rdo_code ? `RDO ${t.rdo_code}${t.rdo_office ? ` ${t.rdo_office}` : ""}` : "");
   return (
-    <View class={`flex-1 items-center justify-center p-6 ${C.pane}`} style={{ minHeight: 400 }}>
-      <View class={`rounded-2xl p-6 gap-3 items-center ${C.card} ${C.line}`} style={{ maxWidth: 420 }}>
-        <Text class={`text-base font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
-        <Text class={`text-sm text-center ${C.fg2}`}>
-          The tax profile shows one taxpayer. Ask the Bot for a taxpayer's profile, or open it from a taxpayer in BIR. To add a taxpayer, press New taxpayer.
-        </Text>
-        <Button label="New taxpayer" variant="primary" onPress={() => adding.set(true)} />
+    <Scroll class={`flex-1 ${C.pane}`}>
+      <View class="w-full items-center px-6 py-6">
+        <View class="gap-4" style={{ width: "100%", maxWidth: 720 }}>
+          <If when={p.notice}>
+            <View class={`rounded-lg px-3 py-2 ${C.line} bg-[#d92d200d] dark:bg-[#ff69611a]`}>
+              <Text class={`text-sm ${C.danger}`}>{p.notice}</Text>
+            </View>
+          </If>
+          <View class="flex-row flex-wrap items-center gap-3">
+            <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
+              <Text class={`text-xl font-semibold ${C.fg}`}>Tax profiles</Text>
+              <Text class={`text-sm ${C.fg2}`}>
+                {rows() === null ? "Loading the taxpayers…" : list().length ? "Pick a taxpayer to open their profile." : "No tax profiles yet."}
+              </Text>
+            </View>
+            <Button label="New taxpayer" variant="primary" onPress={() => adding.set(true)} />
+          </View>
+          <LoadError error={failed() || null} retry={load} what="the taxpayers" />
+          <ErrorText text={openFailed() ? `Could not open the profile: ${openFailed()}` : null} />
+          <If when={list().length > 0}>
+            <ListGroup>
+              <Each of={list()}>
+                {(t, i) => (
+                  <View onPress={() => void open(t().ticket)} activeStyle={{ opacity: 0.7 }} role="button" accessibilityLabel={`Open ${t().name}'s tax profile`}>
+                    <Row first={i() === 0}>
+                      <NameCell title={t().name} sub={[t().tin_display, t().taxpayer_type, rdo(t())].filter(Boolean).join(" · ")} />
+                      <Text class={`text-sm ${C.fg3}`}>›</Text>
+                    </Row>
+                  </View>
+                )}
+              </Each>
+            </ListGroup>
+          </If>
+          <If when={rows() !== null && !list().length && !failed()}>
+            <Text class={`text-sm ${C.fg2}`}>Press New taxpayer to add one, or type /taxprofile create in the chat.</Text>
+          </If>
+        </View>
       </View>
-    </View>
+    </Scroll>
   );
 }
 
@@ -684,19 +1009,30 @@ function refusalByField(e: unknown): { fields: Partial<Record<NewField, string>>
   return { fields, rest: rest.join(" ") };
 }
 
-/** The New taxpayer form: the 9-digit TIN, the name, type, the head office's
- *  RDO and address facts. Each field says what is wrong once it was left or
- *  Create was pressed; BIR checks them again and refuses a TIN already saved.
- *  Saved, it opens the new taxpayer's profile on its ticket. */
+/** The New taxpayer form: the 9-digit TIN (its head office is branch
+ *  00000), the name, type, the head office's RDO and address facts. Each
+ *  field says what is wrong once it was left; Create with anything wrong
+ *  shows every error and focuses the first bad field, and sends nothing.
+ *  BIR checks them again by the same rules (new_taxpayer.rs `check`) and
+ *  refuses a TIN already saved. Saved, it opens the new taxpayer's profile
+ *  on its ticket. */
 function NewTaxpayer(p: { onClose: () => void }) {
   const tinRoot = signal("");
-  const name = signal("");
+  const name = signal(prefillName);
+  prefillName = "";
   const type = signal<TaxpayerType>("Individual");
   const rdo = signal("");
+  const rdoDraft = signal("");
   const address = signal("");
   const zip = signal("");
+  const zipDraft = signal("");
   const phone = signal("");
   const email = signal("");
+  /** The inputs, to focus the first bad one. */
+  const inputs: Partial<Record<NewField, InputRef>> = {};
+  const ref = (k: NewField) => (r: InputRef) => {
+    inputs[k] = r;
+  };
   const touched = signal<Set<NewField>>(new Set());
   const submitted = signal(false);
   const hostErrors = signal<Partial<Record<NewField, string>>>({});
@@ -720,21 +1056,23 @@ function NewTaxpayer(p: { onClose: () => void }) {
     formError.set(null);
   };
 
-  /** Every problem with the taxpayer as typed, by field. */
+  /** Every problem with the taxpayer as typed, by field: the rules of
+   *  `factError`, which BIR's check shares. */
   const problems = computed(() => {
     const e: Partial<Record<NewField, string>> = {};
-    if (tinRoot().length !== 9) e.tin_root = "TIN is 9 digits, like 123-456-789.";
+    if (!TIN_RE.test(tinRoot())) e.tin_root = "TIN is 9 digits, like 123-456-789.";
+    if (!TAXPAYER_TYPES.includes(type())) e.taxpayer_type = "Pick the taxpayer type.";
     if (!name().trim()) e.name = "Type the registered name.";
-    const r = rdo().trim();
-    if (!r) e.rdo_code = "Pick the RDO the taxpayer is registered with.";
-    else if (rdos().length && !rdos().some((o) => o.value === r)) e.rdo_code = "Pick an RDO from the list. Type its code or district to search.";
-    for (const f of ["zip_code", "email"] as const) {
-      const err = factError(f, f === "zip_code" ? zip() : email(), []);
+    const rdoError = factError("rdo_code", rdo(), rdos(), rdoDraft());
+    if (rdoError) e.rdo_code = rdoError;
+    else if (!rdo().trim()) e.rdo_code = "Pick the RDO the taxpayer is registered with.";
+    const zipError = factError("zip_code", zip(), [], zipDraft());
+    if (zipError) e.zip_code = zipError;
+    else if (zip() && zips().length && !zips().some((o) => o.value === zip())) e.zip_code = "Pick a ZIP code from the list.";
+    for (const f of ["phone", "email"] as const) {
+      const err = factError(f, f === "phone" ? phone() : email(), []);
       if (err) e[f] = err;
     }
-    const ph = phone().trim();
-    const digits = ph.replace(/\D/g, "").length;
-    if (ph && (digits < 7 || digits > 13)) e.phone = "Type a phone number like 09171234567 or 028123 4567.";
     return e;
   });
   /** The errors to show now: touched fields, all after Create, and BIR's. */
@@ -758,7 +1096,12 @@ function NewTaxpayer(p: { onClose: () => void }) {
   const create = async () => {
     submitted.set(true);
     formError.set(null);
-    if (Object.keys(problems()).length || busy()) return;
+    const bad = NEW_FIELDS.find((k) => problems()[k]);
+    if (bad) {
+      inputs[bad]?.focus();
+      return;
+    }
+    if (busy()) return;
     busy.set(true);
     try {
       const made = await api.createTaxpayer({
@@ -786,7 +1129,7 @@ function NewTaxpayer(p: { onClose: () => void }) {
   };
 
   const reset = () => {
-    for (const s of [tinRoot, name, rdo, address, zip, phone, email]) s.set("");
+    for (const s of [tinRoot, name, rdo, rdoDraft, address, zip, zipDraft, phone, email]) s.set("");
     type.set("Individual");
     touched.set(new Set());
     submitted.set(false);
@@ -818,21 +1161,32 @@ function NewTaxpayer(p: { onClose: () => void }) {
         <View class="flex-row flex-wrap gap-4">
           {field(
             "tin_root",
-            "TIN",
-            <TextInput
-              value={tinRoot}
-              digits={9}
-              placeholder="9 digits, like 123456789"
-              error={!!shown().tin_root}
-              onEdit={() => edited("tin_root")}
-              onBlur={() => tinRoot().length && touch("tin_root")}
-            />,
+            "TIN, head office 00000",
+            <View class="flex-row items-center gap-2">
+              <View class="flex-1">
+                <TextInput
+                  value={tinRoot}
+                  digits={9}
+                  format={groupTin}
+                  placeholder="000-000-000"
+                  label="TIN"
+                  autoFocus
+                  error={!!shown().tin_root}
+                  inputRef={ref("tin_root")}
+                  onEdit={() => edited("tin_root")}
+                  onBlur={() => tinRoot().length && touch("tin_root")}
+                />
+              </View>
+              <Text class={`text-sm ${C.fg3}`}>-</Text>
+              <View style={{ width: 72 }} accessibilityLabel="Branch code 00000, the head office">
+                <Input value="00000" readonly focusable={false} class={`rounded-md px-3 py-2 text-sm ${C.fg2} ${C.inset} border border-black/10 dark:border-white/10`} />
+              </View>
+            </View>,
           )}
           {field(
             "taxpayer_type",
             "Taxpayer type",
-            <Segmented
-              options={TAXPAYER_TYPES.map((x) => ({ value: x, label: x }))}
+            <TypePicker
               value={type()}
               onChange={(v) => {
                 type.set(v);
@@ -847,7 +1201,9 @@ function NewTaxpayer(p: { onClose: () => void }) {
             <TextInput
               value={name}
               placeholder={type() === "Individual" ? "The individual's name, as registered with BIR" : "As registered with BIR"}
+              label="Name"
               error={!!shown().name}
+              inputRef={ref("name")}
               onEdit={() => edited("name")}
               onBlur={() => touch("name")}
             />,
@@ -858,19 +1214,26 @@ function NewTaxpayer(p: { onClose: () => void }) {
             "RDO",
             <Combo
               value={rdo}
+              draft={rdoDraft}
               options={rdos()}
+              label="RDO"
               placeholder="Type a code or district, like 050 or Makati"
               error={!!shown().rdo_code}
-              onPick={() => {
-                touch("rdo_code");
-                edited("rdo_code");
-              }}
+              inputRef={ref("rdo_code")}
+              onPick={() => edited("rdo_code")}
+              onBlur={() => (rdo() || rdoDraft()) && touch("rdo_code")}
             />,
           )}
           {field(
             "registered_address",
             "Head-office address (optional)",
-            <TextInput value={address} placeholder="Street, barangay, city" onEdit={() => edited("registered_address")} />,
+            <TextInput
+              value={address}
+              placeholder="Street, barangay, city"
+              label="Head-office address"
+              inputRef={ref("registered_address")}
+              onEdit={() => edited("registered_address")}
+            />,
             true,
           )}
           {field(
@@ -878,24 +1241,44 @@ function NewTaxpayer(p: { onClose: () => void }) {
             "ZIP code",
             <Combo
               value={zip}
+              draft={zipDraft}
               options={zips()}
+              label="ZIP code"
+              maxDigits={4}
               placeholder="Type a code or place, like 1226 or Makati"
               error={!!shown().zip_code}
-              onPick={() => {
-                touch("zip_code");
-                edited("zip_code");
-              }}
+              inputRef={ref("zip_code")}
+              onPick={() => edited("zip_code")}
+              onBlur={() => touch("zip_code")}
             />,
           )}
           {field(
             "phone",
             "Phone",
-            <TextInput value={phone} placeholder="09171234567" error={!!shown().phone} onEdit={() => edited("phone")} onBlur={() => touch("phone")} />,
+            <TextInput
+              value={phone}
+              strip={PHONE_CHARS}
+              maxDigits={PHONE_DIGITS}
+              placeholder="0917 123 4567 or (02) 8123 4567"
+              label="Phone"
+              error={!!shown().phone}
+              inputRef={ref("phone")}
+              onEdit={() => edited("phone")}
+              onBlur={() => touch("phone")}
+            />,
           )}
           {field(
             "email",
             "Email",
-            <TextInput value={email} placeholder="name@example.com" error={!!shown().email} onEdit={() => edited("email")} onBlur={() => touch("email")} />,
+            <TextInput
+              value={email}
+              placeholder="name@example.com"
+              label="Email"
+              error={!!shown().email}
+              inputRef={ref("email")}
+              onEdit={() => edited("email")}
+              onBlur={() => touch("email")}
+            />,
           )}
         </View>
         <LoadError
@@ -940,7 +1323,12 @@ function NewTaxpayer(p: { onClose: () => void }) {
 
 function Profile(p: { tin: string }) {
   const startTin = String(p.tin || "").replace(/\D/g, "");
-  if (startTin.length < 9) return <NoTaxpayer />;
+  if (startTin.length < 9)
+    return (
+      <View class="flex-1 items-center justify-center p-6" style={{ minHeight: 400 }}>
+        <Text class={`text-sm ${C.fg2}`}>This ticket names no taxpayer.</Text>
+      </View>
+    );
 
   // ---------------------------------------------------------------- selection and data
   const root = signal(startTin.slice(0, 9));
@@ -1081,6 +1469,8 @@ function Profile(p: { tin: string }) {
     phone: signal(""),
     email: signal(""),
   };
+  /** What the RDO and ZIP inputs show with nothing picked. */
+  const factDrafts: Drafts = { rdo_code: signal(""), zip_code: signal("") };
   const inherit = signal<Partial<Record<BranchFieldName, boolean>>>({});
   const factErrors = signal<Partial<Record<BranchFieldName, string>>>({});
   const tinError = signal<string | null>(null);
@@ -1092,6 +1482,7 @@ function Profile(p: { tin: string }) {
     editSec.set(sec);
     tinError.set(null);
     factErrors.set({});
+    clearDrafts(factDrafts);
     const inh: Partial<Record<BranchFieldName, boolean>> = {};
     if (sec === "taxpayer") {
       inName.set(t.name);
@@ -1113,6 +1504,7 @@ function Profile(p: { tin: string }) {
   const setInherit = (f: BranchFieldName, on: boolean) => {
     inherit.update((x) => ({ ...x, [f]: on }));
     if (on) facts[f].set(head()?.facts[f] || "");
+    if (on && (f === "rdo_code" || f === "zip_code")) factDrafts[f].set("");
   };
 
   const saveSection = async (sec: "taxpayer" | "branch" | "address") => {
@@ -1123,7 +1515,7 @@ function Profile(p: { tin: string }) {
     const fieldsOf: BranchFieldName[] = sec === "branch" ? ["rdo_code"] : sec === "address" ? ADDRESS_FIELDS.map(([f]) => f) : [];
     for (const f of fieldsOf) {
       if (!b.is_head_office && inherit()[f]) continue;
-      const e = factError(f, facts[f](), rdos());
+      const e = factError(f, facts[f](), rdos(), draftOf(factDrafts, f));
       if (e) errs[f] = e;
     }
     factErrors.set(errs);
@@ -1197,6 +1589,7 @@ function Profile(p: { tin: string }) {
     phone: signal(""),
     email: signal(""),
   };
+  const nbDrafts: Drafts = { rdo_code: signal(""), zip_code: signal("") };
   const nbInherit = signal<Partial<Record<BranchFieldName, boolean>>>({});
   const nbErrors = signal<Record<string, string>>({});
   const nbError = signal<string | null>(null);
@@ -1216,6 +1609,7 @@ function Profile(p: { tin: string }) {
       inh[f] = Boolean(h);
     }
     nbInherit.set(inh);
+    clearDrafts(nbDrafts);
     nbErrors.set({});
     nbError.set(null);
     newBranch.set(true);
@@ -1229,7 +1623,7 @@ function Profile(p: { tin: string }) {
     if (!/^\d{5}$/.test(c)) errs.code = "Branch code is 5 digits, like 00001.";
     if (!name) errs.name = "Type a branch name, like Cebu branch.";
     for (const f of Object.keys(nbFacts) as BranchFieldName[]) {
-      const e = nbInherit()[f] ? null : factError(f, nbFacts[f](), rdos());
+      const e = nbInherit()[f] ? null : factError(f, nbFacts[f](), rdos(), draftOf(nbDrafts, f));
       if (e) errs[f] = e;
     }
     nbErrors.set(errs);
@@ -1363,6 +1757,24 @@ function Profile(p: { tin: string }) {
 
   // ---------------------------------------------------------------- archive / delete
   const deleteArmed = signal(false);
+
+  // `/taxprofile edit` and `delete`: where the profile opens, once it shows
+  let landing = PROPS.section === "edit" || PROPS.section === "delete" ? PROPS.section : "";
+  let scroller: ScrollRef | undefined;
+  let deleteRow: ViewRef | undefined;
+  effect(() => {
+    if (!landing || !tp() || !branch()) return;
+    const at = landing;
+    landing = "";
+    untracked(() => {
+      if (at === "edit") return startEdit("taxpayer");
+      // laid out first: then the Delete row is brought into view, unarmed
+      setTimeout(async () => {
+        const [row, view] = await Promise.all([deleteRow?.measure(), scroller?.measure()]);
+        if (row && view) scroller?.scrollTo({ y: Math.max(0, row.pagePosition.y - view.pagePosition.y - 16), animated: true });
+      }, 0);
+    });
+  });
   const canRemove = computed(() => Boolean(tp()));
 
   // Keep the toast and armed delete from lingering across branch switches.
@@ -1416,13 +1828,43 @@ function Profile(p: { tin: string }) {
     );
   };
 
-  const factInput = (f: BranchFieldName, values: Record<BranchFieldName, Signal<string>>, error: () => string | undefined, disabled: () => boolean) =>
+  const factInput = (
+    f: BranchFieldName,
+    values: Record<BranchFieldName, Signal<string>>,
+    drafts: Drafts,
+    error: () => string | undefined,
+    disabled: () => boolean,
+  ) =>
     f === "rdo_code" ? (
-      <Combo value={values.rdo_code} options={rdos()} placeholder="Type a code or district, like 050 or Makati" error={!!error()} disabled={disabled()} />
+      <Combo
+        value={values.rdo_code}
+        draft={drafts.rdo_code}
+        options={rdos()}
+        label="RDO"
+        placeholder="Type a code or district, like 050 or Makati"
+        error={!!error()}
+        disabled={disabled()}
+      />
     ) : f === "zip_code" ? (
-      <Combo value={values.zip_code} options={zips()} placeholder="Type a code or place, like 1226 or Makati" error={!!error()} disabled={disabled()} />
+      <Combo
+        value={values.zip_code}
+        draft={drafts.zip_code}
+        options={zips()}
+        label="ZIP code"
+        maxDigits={4}
+        placeholder="Type a code or place, like 1226 or Makati"
+        error={!!error()}
+        disabled={disabled()}
+      />
     ) : (
-      <TextInput value={values[f]} error={!!error()} disabled={disabled()} placeholder={f === "email" ? "name@example.com" : undefined} />
+      <TextInput
+        value={values[f]}
+        error={!!error()}
+        disabled={disabled()}
+        strip={f === "phone" ? PHONE_CHARS : undefined}
+        maxDigits={f === "phone" ? PHONE_DIGITS : undefined}
+        placeholder={f === "email" ? "name@example.com" : f === "phone" ? "0917 123 4567 or (02) 8123 4567" : undefined}
+      />
     );
 
   /** One fact of the selected branch: read-only, or its editor with the head-office switch. */
@@ -1439,7 +1881,7 @@ function Profile(p: { tin: string }) {
       >
         {editing() ? (
           <View class="gap-1">
-            {factInput(f, facts, () => factErrors()[f], () => inheritable() && !!inherit()[f])}
+            {factInput(f, facts, factDrafts, () => factErrors()[f], () => inheritable() && !!inherit()[f])}
             <ErrorText text={factErrors()[f]} />
             <If when={inheritable()}>
               <Switch on={!!inherit()[f]} onChange={(v) => setInherit(f, v)} label={`${label}: same as head office`} />
@@ -1476,7 +1918,7 @@ function Profile(p: { tin: string }) {
             </Field>
             <Field label="Taxpayer type" value={tp()?.taxpayer_type} full={editSec() === "taxpayer"}>
               {editSec() === "taxpayer" ? (
-                <Segmented options={TAXPAYER_TYPES.map((x) => ({ value: x, label: x }))} value={inType()} onChange={(v) => inType.set(v)} />
+                <TypePicker value={inType()} onChange={(v) => inType.set(v)} />
               ) : null}
             </Field>
           </View>
@@ -1582,13 +2024,15 @@ function Profile(p: { tin: string }) {
                   {(a) => (
                     <Field label={a()[1]} full={a()[0] === "registered_address" || a()[0] === "email"}>
                       <View class="gap-1">
-                        {factInput(a()[0], nbFacts, () => nbErrors()[a()[0]], () => !!nbInherit()[a()[0]])}
+                        {factInput(a()[0], nbFacts, nbDrafts, () => nbErrors()[a()[0]], () => !!nbInherit()[a()[0]])}
                         <ErrorText text={nbErrors()[a()[0]]} />
                         <Switch
                           on={!!nbInherit()[a()[0]]}
                           onChange={(v) => {
                             nbInherit.update((x) => ({ ...x, [a()[0]]: v }));
                             if (v) nbFacts[a()[0]].set(head()?.facts[a()[0]] || "");
+                            const k = a()[0];
+                            if (v && (k === "rdo_code" || k === "zip_code")) nbDrafts[k].set("");
                           }}
                           label={`${a()[1]}: same as head office`}
                         />
@@ -1604,7 +2048,9 @@ function Profile(p: { tin: string }) {
         </Section>
 
         <If when={canRemove()}>
-          <SectionTitle text="Archive or delete" />
+          <View ref={(r: ViewRef) => (deleteRow = r)}>
+            <SectionTitle text="Archive or delete" />
+          </View>
           <ListGroup>
             <Row first>
               <NameCell
@@ -1971,7 +2417,7 @@ function Profile(p: { tin: string }) {
           <Text class={`text-xs ${C.danger}`}>{handoff()?.url || ""}</Text>
         </View>
       </If>
-      <Scroll class="flex-1">
+      <Scroll class="flex-1" ref={(r: ScrollRef) => (scroller = r)}>
         {/* the Bot's nsh ignores contentContainerClass: the padding and centering live here */}
         <View class="w-full items-center px-6 py-6">
         <View class="gap-5" style={{ width: "100%", maxWidth: 960 }}>
@@ -1989,7 +2435,7 @@ function Profile(p: { tin: string }) {
             <If when={!tp.loading() && !tp.error() && tp() === null}>
               <View class={`rounded-xl p-6 gap-2 ${C.card} ${C.line}`}>
                 <Text class={`text-base font-semibold ${C.fg}`}>{`No taxpayer ${formatTin(root())}`}</Text>
-                <Text class={`text-sm ${C.fg2}`}>It may have been deleted or its TIN changed. Open this from a taxpayer again.</Text>
+                <Text class={`text-sm ${C.fg2}`}>It may have been deleted or its TIN changed. Type /taxprofile list in the chat to pick another.</Text>
                 <View class="flex-row">
                   <Button label="Retry" onPress={tp.refetch} />
                 </View>
