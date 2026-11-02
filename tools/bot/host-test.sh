@@ -3,13 +3,13 @@
 # read-only: a pinned worktree, broker data, trust and file keys live per run.
 # Usage: BUWIZ_BOT_DIR=/path/to/bot tools/bot/host-test.sh
 # Env: EBIRFORMS_HOST_PORT (>=8810, default 8811), KEEP_TMP=1 (keeps test keys),
-#      BUWIZ_BOT_COMMIT (default 224bffa5, buwiz-bot main with #102: protocol 1.0).
+#      BUWIZ_BOT_COMMIT (default 4ab3ded2, buwiz-bot main with #102: protocol 1.0).
 set -euo pipefail
 export TMPDIR="${TMPDIR:-/tmp}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BOT_DIR="${BUWIZ_BOT_DIR:?set BUWIZ_BOT_DIR to the Bot test bench}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd -P)"
-BOT_COMMIT="${BUWIZ_BOT_COMMIT:-224bffa539b910b76e4c02bcfd94a4a33102a672}"
+BOT_COMMIT="${BUWIZ_BOT_COMMIT:-4ab3ded29828048b2819ab38fb9cccfc50d448af}"
 PORT="${EBIRFORMS_HOST_PORT:-8811}"
 KEY_ID="ebirforms-test-01"
 PLUGIN_ID="app.buwiz.ebirforms"

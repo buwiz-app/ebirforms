@@ -21,7 +21,7 @@
 #
 # Usage: tools/bot/conformance.sh [extra buwiz-plugin-test args, e.g. --json]
 # Env:   BUWIZ_BOT_DIR (default /Volumes/goldcoders/Projects/rox): a Buwiz Bot
-#          checkout at protocol 1.0 (buwiz-bot main 224bffa5 or later)
+#          checkout at protocol 1.0 (buwiz-bot main 4ab3ded2 or later)
 #        BUWIZ_BROKER_BIN (a buwiz-broker binary from buwiz-bot; signs in place
 #          of server/src/v1/sign-manifest.mjs)
 #        EBIRFORMS_TEST_KEY_ID (default ebirforms-test-01)
