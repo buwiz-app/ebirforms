@@ -1,27 +1,46 @@
 //! Where each box of a saved return got its value: the `source` (and the
 //! optional `source_ref`) that `ebirforms_form_fill` was given.
 //!
-//! eBIRForms' draft has no room for this, so the mini app keeps it in its own
-//! data folder, in `fill-sources.json` (mode 0600), one entry per stored
-//! return. A return is named by a SHA-256 of its taxpayer, form, year and
-//! stored period, so the file holds no TIN. Each box keeps a SHA-256 of the
-//! value it was filled with, not the value: a box whose value has changed
-//! since (the person typed over it in the Forms app) has no source any more.
+//! eBIRForms' draft has no room for this, and only `BirApp` is a supported
+//! surface, so the mini app keeps it in its own data folder:
+//!
+//! - `fill-sources.json` (0600): one entry per stored return, its boxes'
+//!   `{source, source_ref?, from_card?, value_mac}` and when it was saved;
+//! - `fill-sources.key` (0600, made on first use): 32 random bytes;
+//! - `fill-sources.lock`: held while a save reads and rewrites the file.
+//!
+//! A return is named by an HMAC-SHA-256, under that key, of its taxpayer,
+//! form, year and stored period; each box keeps an HMAC of its value, not the
+//! value. Without the key file, which sits beside the database's own key
+//! with the same protection, neither a TIN nor an amount can be recovered
+//! from the file. A box whose value has changed since it was filled (the
+//! person typed over it in the Forms app) has no source any more.
 //!
 //! Several processes may run at once (the Bot respawns this one back to
-//! back), so a save re-reads the file and replaces only its own return's
-//! entry before writing it back through a temp file and a rename.
+//! back): a save takes the lock, re-reads the file, replaces only its own
+//! return's entry and writes the file back through a temp file and a rename.
+//! A file that cannot be read or parsed is never overwritten: the save fails
+//! and says so. The file keeps the [`MAX_RETURNS`] most recently saved
+//! returns.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write as _;
+use std::fs::{self, File};
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use hmac::{Hmac, Mac};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
-/// The file in the data folder.
+/// The sources file in the data folder.
 pub const FILE: &str = "fill-sources.json";
+/// The key file in the data folder (64 hex digits, mode 0600).
+pub const KEY_FILE: &str = "fill-sources.key";
+/// The lock file in the data folder.
+pub const LOCK_FILE: &str = "fill-sources.lock";
+/// The most returns the file keeps; the least recently saved go first.
+pub const MAX_RETURNS: usize = 1000;
 
 /// The labels `ebirforms_form_fill` takes for `source`.
 pub const LABELS: [&str; 5] = ["profile", "past_return", "document", "ai", "user"];
@@ -34,8 +53,8 @@ pub struct Source {
     pub reference: Option<Map<String, Value>>,
     /// True when the person's answer on a card came through the assistant.
     pub from_card: bool,
-    /// SHA-256 of `key \0 value` as eBIRForms holds the value after the fill.
-    pub value_sha256: String,
+    /// [`Sources::value_mac`] of the value eBIRForms holds after the fill.
+    pub value_mac: String,
 }
 
 impl Source {
@@ -57,7 +76,7 @@ impl Source {
             Value::Object(map) => map,
             _ => Map::new(),
         };
-        out.insert("value_sha256".into(), json!(self.value_sha256));
+        out.insert("value_mac".into(), json!(self.value_mac));
         Value::Object(out)
     }
 
@@ -74,30 +93,60 @@ impl Source {
             label: label.to_string(),
             reference,
             from_card: value.get("from_card").and_then(Value::as_bool) == Some(true),
-            value_sha256: value.get("value_sha256")?.as_str()?.to_string(),
+            value_mac: value.get("value_mac")?.as_str()?.to_string(),
         })
     }
+}
 
-    /// Still the box's source: the box holds the value it was filled with.
-    pub fn holds(&self, key: &str, value: Option<&String>) -> bool {
-        value.is_some_and(|value| value_sha256(key, value) == self.value_sha256)
+/// An amount as a BIR form shows it, in centavos: decimal text with two
+/// places, thousands separators in groups of three (`"1,200,000.00"`) and
+/// whole pesos (`"1,200,000"`) allowed. The same rule as Books'
+/// `money::parse_shown`.
+pub fn shown_amount(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, cents) = body.split_once('.').unwrap_or((body, "00"));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mut groups = whole.split(',');
+    let first = groups.next().unwrap_or_default();
+    let mut plain = first.to_string();
+    let mut grouped = false;
+    for group in groups {
+        if group.len() != 3 || !digits(group) {
+            return None;
+        }
+        grouped = true;
+        plain.push_str(group);
     }
+    if !digits(first)
+        || (first.len() > 1 && first.starts_with('0'))
+        || (grouped && (first.len() > 3 || first.starts_with('0')))
+        || cents.len() != 2
+        || !digits(cents)
+    {
+        return None;
+    }
+    let magnitude = plain
+        .parse::<i64>()
+        .ok()?
+        .checked_mul(100)?
+        .checked_add(cents.parse::<i64>().ok()?)?;
+    if negative && magnitude == 0 {
+        return None;
+    }
+    Some(if negative { -magnitude } else { magnitude })
 }
 
-/// SHA-256 of `key \0 value`, lowercase hex.
-pub fn value_sha256(key: &str, value: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(key.as_bytes());
-    hash.update([0]);
-    hash.update(value.as_bytes());
-    hex::encode(hash.finalize())
-}
-
-/// The name a stored return goes by in the file.
-pub fn return_id(tin: &str, form: &str, year: i64, stored_period: i64) -> String {
-    let mut hash = Sha256::new();
-    hash.update(format!("{tin}\0{form}\0{year}\0{stored_period}").as_bytes());
-    hex::encode(hash.finalize())
+/// The value given and the value eBIRForms holds are the same: as amounts
+/// when both are amounts ([`shown_amount`]), else as text.
+pub fn same_value(given: &str, held: &str) -> bool {
+    match (shown_amount(given), shown_amount(held)) {
+        (Some(given), Some(held)) => given == held,
+        _ => given.trim() == held.trim(),
+    }
 }
 
 /// A `source_ref`: which hand-off in which mini app the values came from.
@@ -145,46 +194,174 @@ pub fn check_reference(value: &Value) -> Result<Map<String, Value>, String> {
     Ok(map.clone())
 }
 
-/// The sources file in a data folder.
+/// The sources of a data folder's returns.
 pub struct Sources {
-    path: PathBuf,
+    dir: PathBuf,
+    key: OnceLock<[u8; 32]>,
 }
 
 impl Sources {
     pub fn in_dir(dir: &Path) -> Self {
         Self {
-            path: dir.join(FILE),
+            dir: dir.to_path_buf(),
+            key: OnceLock::new(),
         }
     }
 
-    fn read_all(&self) -> Map<String, Value> {
-        fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| match value {
-                Value::Object(map) => Some(map),
-                _ => None,
+    /// The folder's key: read, or made (0600) when `make` and there is none.
+    fn key(&self, make: bool) -> std::io::Result<Option<&[u8; 32]>> {
+        if let Some(key) = self.key.get() {
+            return Ok(Some(key));
+        }
+        let path = self.dir.join(KEY_FILE);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound && make => {
+                let mut bytes = [0u8; 32];
+                getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
+                match private_file(&path, true) {
+                    Ok(mut file) => {
+                        file.write_all(hex::encode(bytes).as_bytes())?;
+                        file.sync_all()?;
+                        hex::encode(bytes)
+                    }
+                    // another process made it first
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        fs::read_to_string(&path)?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut key = [0u8; 32];
+        hex::decode_to_slice(text.trim(), &mut key).map_err(|_| {
+            std::io::Error::new(
+                ErrorKind::InvalidData,
+                "the sources key is not 64 hex digits",
+            )
+        })?;
+        Ok(Some(self.key.get_or_init(|| key)))
+    }
+
+    fn mac(key: &[u8; 32], parts: &[&str]) -> String {
+        let mut mac =
+            <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
+        for part in parts {
+            mac.update(part.as_bytes());
+            mac.update(&[0]);
+        }
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    /// The HMAC a box's value goes by; `None` when no key can be had.
+    pub fn value_mac(&self, key: &str, value: &str) -> Option<String> {
+        match self.key(true) {
+            Ok(Some(secret)) => Some(Self::mac(secret, &["value", key, value])),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!("the boxes' sources have no key: {error}");
+                None
+            }
+        }
+    }
+
+    /// The box still holds the value it was filled with.
+    pub fn holds(&self, source: &Source, key: &str, value: Option<&String>) -> bool {
+        value.is_some_and(|value| {
+            self.value_mac(key, value)
+                .is_some_and(|mac| mac == source.value_mac)
+        })
+    }
+
+    /// The name a stored return goes by in the file; `None` without a key.
+    fn return_id(
+        &self,
+        make: bool,
+        tin: &str,
+        form: &str,
+        year: i64,
+        stored_period: i64,
+    ) -> std::io::Result<Option<String>> {
+        let year = year.to_string();
+        let period = stored_period.to_string();
+        Ok(self
+            .key(make)?
+            .map(|secret| Self::mac(secret, &["return", tin, form, &year, &period])))
+    }
+
+    /// The file's entries: none when it does not exist; an error when it
+    /// cannot be read or is not a sources file.
+    fn read_all(&self) -> std::io::Result<Map<String, Value>> {
+        let text = match fs::read_to_string(self.dir.join(FILE)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Map::new()),
+            Err(error) => return Err(error),
+        };
+        match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(map)) => Ok(map),
+            _ => Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("{FILE} is not a sources file; it is left as it is"),
+            )),
+        }
+    }
+
+    /// The boxes' sources a stored return was saved with (none when the
+    /// file or the key cannot be read; that is logged).
+    pub fn load(
+        &self,
+        tin: &str,
+        form: &str,
+        year: i64,
+        stored_period: i64,
+    ) -> BTreeMap<String, Source> {
+        let entry = self
+            .return_id(false, tin, form, year, stored_period)
+            .map(|id| id.map(|id| (id, self.read_all())));
+        let (id, all) = match entry {
+            Ok(Some((id, Ok(all)))) => (id, all),
+            Ok(None) => return BTreeMap::new(),
+            Ok(Some((_, Err(error)))) | Err(error) => {
+                tracing::warn!("the boxes' sources were not read: {error}");
+                return BTreeMap::new();
+            }
+        };
+        all.get(&id)
+            .and_then(|entry| entry.get("boxes"))
+            .and_then(Value::as_object)
+            .map(|boxes| {
+                boxes
+                    .iter()
+                    .filter_map(|(key, value)| Some((key.clone(), Source::from_stored(value)?)))
+                    .collect()
             })
             .unwrap_or_default()
     }
 
-    /// The boxes' sources a stored return was saved with.
-    pub fn load(&self, return_id: &str) -> BTreeMap<String, Source> {
-        let all = self.read_all();
-        let Some(Value::Object(boxes)) = all.get(return_id) else {
-            return BTreeMap::new();
+    /// Replace a stored return's sources (none removes its entry), under the
+    /// folder's lock.
+    pub fn save(
+        &self,
+        tin: &str,
+        form: &str,
+        year: i64,
+        stored_period: i64,
+        sources: &BTreeMap<String, Source>,
+    ) -> std::io::Result<()> {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join(LOCK_FILE))?;
+        lock.lock()?;
+        let Some(id) = self.return_id(true, tin, form, year, stored_period)? else {
+            return Err(std::io::Error::other("no key for the boxes' sources"));
         };
-        boxes
-            .iter()
-            .filter_map(|(key, value)| Some((key.clone(), Source::from_stored(value)?)))
-            .collect()
-    }
-
-    /// Replace a stored return's sources (none removes its entry).
-    pub fn save(&self, return_id: &str, sources: &BTreeMap<String, Source>) -> std::io::Result<()> {
-        let mut all = self.read_all();
+        let mut all = self.read_all()?;
         if sources.is_empty() {
-            if all.remove(return_id).is_none() {
+            if all.remove(&id).is_none() {
                 return Ok(());
             }
         } else {
@@ -192,42 +369,86 @@ impl Sources {
                 .iter()
                 .map(|(key, source)| (key.clone(), source.stored()))
                 .collect();
-            all.insert(return_id.to_string(), Value::Object(boxes));
+            let saved_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            all.insert(id, json!({ "saved_ms": saved_ms, "boxes": boxes }));
         }
+        prune(&mut all, MAX_RETURNS);
         let text = serde_json::to_string(&Value::Object(all))?;
-        let temp = self
-            .path
-            .with_extension(format!("json.{}.tmp", std::process::id()));
-        let mut file = private_file(&temp)?;
+        let path = self.dir.join(FILE);
+        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let mut file = private_file(&temp, false)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temp, &self.path)
+        fs::rename(&temp, &path)
+        // the lock goes with `lock`
     }
 }
 
+/// Keep the `max` most recently saved returns.
+fn prune(all: &mut Map<String, Value>, max: usize) {
+    if all.len() <= max {
+        return;
+    }
+    let mut by_age: Vec<(u64, String)> = all
+        .iter()
+        .map(|(id, entry)| (entry["saved_ms"].as_u64().unwrap_or(0), id.clone()))
+        .collect();
+    by_age.sort();
+    let extra = all.len() - max;
+    for (_, id) in by_age.into_iter().take(extra) {
+        all.remove(&id);
+    }
+}
+
+/// A file only its owner reads (0600): new only, or replaced.
 #[cfg(unix)]
-fn private_file(path: &Path) -> std::io::Result<fs::File> {
+fn private_file(path: &Path, new_only: bool) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).mode(0o600);
+    if new_only {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
+    options.open(path)
 }
 
 #[cfg(not(unix))]
-fn private_file(path: &Path) -> std::io::Result<fs::File> {
-    fs::File::create(path)
+fn private_file(path: &Path, new_only: bool) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if new_only {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
+    options.open(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const TIN: &str = "00012345300000";
+
     fn reference() -> Value {
         json!({ "plugin": "app.buwiz.books", "handoff": "1", "inputs_hash": "a".repeat(64) })
+    }
+
+    fn boxes(sources: &Sources, value: &str) -> BTreeMap<String, Source> {
+        BTreeMap::from([(
+            "txtATCAmt1".to_string(),
+            Source {
+                label: "document".into(),
+                reference: Some(check_reference(&reference()).unwrap()),
+                from_card: false,
+                value_mac: sources.value_mac("txtATCAmt1", value).unwrap(),
+            },
+        )])
     }
 
     #[test]
@@ -249,46 +470,136 @@ mod tests {
     }
 
     #[test]
-    fn sources_round_trip_and_a_changed_value_has_none() {
+    fn amounts_compare_as_a_form_shows_them() {
+        for (given, held) in [
+            ("290000.00", "290,000.00"),
+            ("10000.00", "10,000"),
+            ("0.00", "0"),
+            ("1", "1"),
+        ] {
+            assert!(same_value(given, held), "{given} {held}");
+        }
+        for (given, held) in [
+            ("10000.50", "10,000"),
+            ("1", "2"),
+            ("1,20,000.00", "120000.00"),
+            ("true", "false"),
+        ] {
+            assert!(!same_value(given, held), "{given} {held}");
+        }
+        assert_eq!(shown_amount("1,200,000"), Some(120_000_000));
+        assert_eq!(shown_amount("-2,808.40"), Some(-280_840));
+        for bad in ["01/15/2026", "12,0000.00", "0,100", "1.5", "", "-0", "007"] {
+            assert_eq!(shown_amount(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn sources_round_trip_keyed_and_a_changed_value_has_none() {
         let dir = tempfile::tempdir().unwrap();
         let sources = Sources::in_dir(dir.path());
-        let id = return_id("00012345300000", "2551Q", 2026, 3);
-        let mut boxes = BTreeMap::new();
-        boxes.insert(
-            "txtATCAmt1".to_string(),
-            Source {
-                label: "document".into(),
-                reference: Some(check_reference(&reference()).unwrap()),
-                from_card: false,
-                value_sha256: value_sha256("txtATCAmt1", "290,000.00"),
-            },
-        );
-        sources.save(&id, &boxes).unwrap();
-        let text = fs::read_to_string(dir.path().join(FILE)).unwrap();
         assert!(
-            !text.contains("000123453") && !text.contains("290"),
-            "{text}"
+            sources.load(TIN, "2551Q", 2026, 3).is_empty(),
+            "no key yet, no sources"
         );
-        let loaded = sources.load(&id);
-        assert_eq!(loaded, boxes);
+        let kept = boxes(&sources, "290,000.00");
+        sources.save(TIN, "2551Q", 2026, 3, &kept).unwrap();
+        // a new process: the same key from the file
+        let again = Sources::in_dir(dir.path());
+        let loaded = again.load(TIN, "2551Q", 2026, 3);
+        assert_eq!(loaded, kept);
         let source = &loaded["txtATCAmt1"];
-        assert!(source.holds("txtATCAmt1", Some(&"290,000.00".to_string())));
-        assert!(!source.holds("txtATCAmt1", Some(&"1.00".to_string())));
-        assert!(!source.holds("txtATCAmt1", None));
+        assert!(again.holds(source, "txtATCAmt1", Some(&"290,000.00".to_string())));
+        assert!(!again.holds(source, "txtATCAmt1", Some(&"1.00".to_string())));
+        assert!(!again.holds(source, "txtATCAmt1", None));
+        // nothing in the file names the return or the value without the key
+        let text = fs::read_to_string(dir.path().join(FILE)).unwrap();
+        let plain = |parts: &[&str]| {
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(parts.join("\0").as_bytes()))
+        };
+        for leak in [
+            "000123453",
+            "290",
+            &plain(&[TIN, "2551Q", "2026", "3"]),
+            &plain(&["txtATCAmt1", "290,000.00"]),
+        ] {
+            assert!(!text.contains(leak), "{leak} in {text}");
+        }
+        // another key, another name: the file is useless without its key
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = Sources::in_dir(other_dir.path());
+        assert_ne!(
+            other.value_mac("txtATCAmt1", "290,000.00"),
+            sources.value_mac("txtATCAmt1", "290,000.00")
+        );
         // another return's entry is kept; an empty save removes this one
-        let other = return_id("00012345300000", "2551Q", 2026, 2);
-        sources.save(&other, &boxes).unwrap();
-        sources.save(&id, &BTreeMap::new()).unwrap();
-        assert!(sources.load(&id).is_empty());
-        assert_eq!(sources.load(&other).len(), 1);
+        again.save(TIN, "2551Q", 2026, 2, &kept).unwrap();
+        again.save(TIN, "2551Q", 2026, 3, &BTreeMap::new()).unwrap();
+        assert!(again.load(TIN, "2551Q", 2026, 3).is_empty());
+        assert_eq!(again.load(TIN, "2551Q", 2026, 2).len(), 1);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = fs::metadata(dir.path().join(FILE))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
+            for file in [FILE, KEY_FILE] {
+                let mode = fs::metadata(dir.path().join(file))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "{file}");
+            }
         }
+    }
+
+    #[test]
+    fn an_unreadable_file_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = Sources::in_dir(dir.path());
+        let kept = boxes(&sources, "1.00");
+        fs::write(dir.path().join(FILE), "{not json").unwrap();
+        assert!(sources.save(TIN, "2551Q", 2026, 3, &kept).is_err());
+        assert_eq!(
+            fs::read_to_string(dir.path().join(FILE)).unwrap(),
+            "{not json"
+        );
+        assert!(sources.load(TIN, "2551Q", 2026, 3).is_empty());
+    }
+
+    #[test]
+    fn concurrent_saves_keep_every_return() {
+        let dir = tempfile::tempdir().unwrap();
+        // one key for all, as the processes would read it
+        let first = Sources::in_dir(dir.path());
+        let kept = boxes(&first, "1.00");
+        let threads: Vec<_> = (1..=8)
+            .map(|period| {
+                let dir = dir.path().to_path_buf();
+                let kept = kept.clone();
+                std::thread::spawn(move || {
+                    let sources = Sources::in_dir(&dir);
+                    for _ in 0..10 {
+                        sources.save(TIN, "1601C", 2026, period, &kept).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        for period in 1..=8 {
+            assert_eq!(first.load(TIN, "1601C", 2026, period).len(), 1, "{period}");
+        }
+    }
+
+    #[test]
+    fn the_file_keeps_the_most_recent_returns() {
+        let mut all = Map::new();
+        for (id, saved_ms) in [("a", 30), ("b", 10), ("c", 20), ("d", 40)] {
+            all.insert(id.into(), json!({ "saved_ms": saved_ms, "boxes": {} }));
+        }
+        prune(&mut all, 2);
+        assert_eq!(all.keys().collect::<Vec<_>>(), ["a", "d"]);
+        prune(&mut all, 5);
+        assert_eq!(all.len(), 2);
     }
 }

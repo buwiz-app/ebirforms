@@ -131,6 +131,9 @@ to Buwiz in the Sign-in app (ebirforms_app_open `register`); it is then sent to 
 with a receipt. Tools whose description starts with \"Mini apps only\" and ebirforms_resolve belong \
 to the mini apps and to the Bot: do not call them.";
 
+/// What a save answers when the boxes' sources were not kept.
+const SOURCES_LOST: &str = "The return is saved, but where its boxes' values came from was not kept: tell the person, and fill again before saving if they need the link.";
+
 /// The return the assistant has open.
 struct OpenForm {
     tin: String,
@@ -141,6 +144,8 @@ struct OpenForm {
     /// Each filled box's source ([`crate::sources`]), loaded with a saved
     /// return and kept with it on save.
     sources: BTreeMap<String, Source>,
+    /// A filled box's source could not be kept (no key for the sources file).
+    sources_lost: bool,
 }
 
 pub struct Server {
@@ -596,15 +601,15 @@ impl Server {
         let sources = if opened.sample {
             BTreeMap::new()
         } else {
-            let id = sources::return_id(
+            let mut sources = self.sources.load(
                 &tin,
                 form,
                 opened.year,
                 opened.stored_period.unwrap_or(opened.period),
             );
-            let mut sources = self.sources.load(&id);
             sources.retain(|key, source| {
-                source.holds(key, held_value(form, key, &opened.values).as_ref())
+                self.sources
+                    .holds(source, key, held_value(form, key, &opened.values).as_ref())
             });
             sources
         };
@@ -614,6 +619,7 @@ impl Server {
             opened,
             dirty: false,
             sources,
+            sources_lost: false,
         });
         Ok(summary)
     }
@@ -645,7 +651,7 @@ impl Server {
             "editable": opened.editable,
             "values": pick(&with_group_values(&form.form, &opened.values)),
             "sources": form.sources.iter()
-                .filter(|(key, source)| keys.as_ref().is_none_or(|keys| keys.contains(key)) && source.holds(key, held_value(&form.form, key, &opened.values).as_ref()))
+                .filter(|(key, source)| keys.as_ref().is_none_or(|keys| keys.contains(key)) && self.sources.holds(source, key, held_value(&form.form, key, &opened.values).as_ref()))
                 .map(|(key, source)| (key.clone(), source.shown()))
                 .collect::<Map<String, Value>>(),
             "locked": pick(&opened.locks),
@@ -731,16 +737,26 @@ impl Server {
                     form.sources.remove(key);
                     filled_keys.push(key);
                 }
-                (Some(given), Some(held)) if same_value(&given, &held) => {
-                    form.sources.insert(
-                        key.clone(),
-                        Source {
-                            label: source.clone(),
-                            reference: reference.clone(),
-                            from_card: from_card && source == "user",
-                            value_sha256: sources::value_sha256(key, &held),
-                        },
-                    );
+                (Some(given), Some(held)) if sources::same_value(&given, &held) => {
+                    // without a key for the sources file the box is filled
+                    // but has no source; save_draft then says sources_kept: false
+                    match self.sources.value_mac(key, &held) {
+                        Some(value_mac) => {
+                            form.sources.insert(
+                                key.clone(),
+                                Source {
+                                    label: source.clone(),
+                                    reference: reference.clone(),
+                                    from_card: from_card && source == "user",
+                                    value_mac,
+                                },
+                            );
+                        }
+                        None => {
+                            form.sources.remove(key);
+                            form.sources_lost = true;
+                        }
+                    }
                     filled_keys.push(key);
                 }
                 (Some(_), held) => {
@@ -806,10 +822,11 @@ impl Server {
         // the boxes' sources go with the saved return
         let opened = &form.opened;
         let code = form.form.as_str();
+        let store = &self.sources;
         form.sources.retain(|key, source| {
-            source.holds(key, held_value(code, key, &opened.values).as_ref())
+            store.holds(source, key, held_value(code, key, &opened.values).as_ref())
         });
-        let id = sources::return_id(
+        let saved_sources = store.save(
             &form.tin,
             &form.form,
             opened.year,
@@ -817,17 +834,20 @@ impl Server {
                 .stored_period
                 .or(opened.stored_period)
                 .unwrap_or(opened.period),
+            &form.sources,
         );
-        let sources_kept = match self.sources.save(&id, &form.sources) {
-            Ok(()) => true,
+        let sources_kept = match saved_sources {
+            Ok(()) => !form.sources_lost,
             Err(error) => {
                 tracing::warn!("the boxes' sources were not kept: {error}");
                 false
             }
         };
-        Ok(
-            json!({ "saved": true, "id": saved.id, "status": form.opened.status, "sources_kept": sources_kept }),
-        )
+        let mut answer = json!({ "saved": true, "id": saved.id, "status": form.opened.status, "sources_kept": sources_kept });
+        if !sources_kept {
+            answer["sources_note"] = json!(SOURCES_LOST);
+        }
+        Ok(answer)
     }
 
     fn form_dismiss(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
@@ -929,26 +949,6 @@ fn with_group_values(form: &str, values: &BTreeMap<String, String>) -> BTreeMap<
         }
     }
     out
-}
-
-/// The value given and the value eBIRForms holds are the same: amounts
-/// compare without thousands separators or trailing decimal zeros
-/// (`"290000.00"` and `"290,000.00"`, `"0"` and `"0.00"`).
-fn same_value(given: &str, held: &str) -> bool {
-    fn plain(text: &str) -> String {
-        let text: String = text.trim().chars().filter(|c| *c != ',').collect();
-        if text.contains('.')
-            && text
-                .trim_start_matches('-')
-                .bytes()
-                .all(|b| b.is_ascii_digit() || b == b'.')
-        {
-            text.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            text
-        }
-    }
-    plain(given) == plain(held)
 }
 
 fn no_arguments(arguments: &Map<String, Value>) -> Result<(), String> {
@@ -2341,7 +2341,7 @@ fn tool_list() -> Value {
         ),
         tool(
             FORM_SAVE,
-            "Save the open return as a draft in the eBIRForms mini app. It never queues or files anything.",
+            "Save the open return as a draft in the eBIRForms mini app. It never queues or files anything. The boxes' sources are saved with it; `sources_kept: false` means the return is saved without them (say so, as `sources_note` does).",
             empty_schema(),
             false,
         ),

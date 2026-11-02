@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bir_app_core::{BirApp, BranchFacts, FieldValue, NewTaxpayer, OpenReturn};
-use ebirforms_mini_app::{ManifestSource, Server};
+use ebirforms_mini_app::{ManifestSource, Server, same_value, shown_amount};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -179,22 +179,6 @@ fn open_args(handoff: &Value, ticket: &str) -> Value {
     args
 }
 
-/// A box read back as Books writes it: an amount without thousands
-/// separators and with two decimals (some forms show whole pesos); any other
-/// value as it is.
-fn read_back(value: &Value, given: &str) -> String {
-    let text = value.as_str().unwrap_or_default();
-    if !given.contains('.') {
-        return text.to_string();
-    }
-    let text = text.replace(',', "");
-    if text.contains('.') {
-        text
-    } else {
-        format!("{text}.00")
-    }
-}
-
 #[test]
 fn filled_boxes_keep_their_source_and_books_hand_offs_fill_as_they_are() {
     // SAFETY: set before any thread of this test reads them (one test per process).
@@ -293,12 +277,11 @@ fn filled_boxes_keep_their_source_and_books_hand_offs_fill_as_they_are() {
         assert_eq!(filled["filled"], json!(keys), "{name}: {filled}");
         let fields = bot.agent("ebirforms_form_fields", json!({ "keys": keys }));
         for key in &keys {
-            assert_eq!(
-                read_back(
-                    &fields["values"][key],
-                    fill["fields"][key].as_str().unwrap()
+            assert!(
+                same_value(
+                    fill["fields"][key].as_str().unwrap(),
+                    fields["values"][key].as_str().unwrap_or_default()
                 ),
-                fill["fields"][key].as_str().unwrap(),
                 "{name} {key}: {fields}"
             );
             assert_eq!(
@@ -412,12 +395,14 @@ fn filled_boxes_keep_their_source_and_books_hand_offs_fill_as_they_are() {
     bot.agent("ebirforms_form_open", open_args(&q3, &ticket));
     let fields = bot.agent("ebirforms_form_fields", json!({ "keys": ["txtATCAmt1"] }));
     assert_eq!(
-        read_back(&fields["values"]["txtATCAmt1"], "292000.00"),
-        "292000.00"
+        shown_amount(fields["values"]["txtATCAmt1"].as_str().unwrap()),
+        Some(29_200_000)
     );
     assert_eq!(fields["sources"], json!({}), "{fields}");
 
-    // the sources file holds no TIN and no amount
+    // the sources file holds no TIN and no amount (its names are keyed by
+    // fill-sources.key; sources.rs tests that unkeyed hashes don't match)
+    assert!(dir.path().join("fill-sources.key").is_file());
     let text = std::fs::read_to_string(dir.path().join("fill-sources.json")).unwrap();
     assert!(
         !text.contains(ROOT) && !text.contains("290000") && !text.contains("290,000"),

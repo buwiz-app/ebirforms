@@ -19,7 +19,8 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 
 1. **Its own data.** The mini app keeps its own database in its own folder (`EBIRFORMS_DATA_DIR`, else the platform
    data folder `app.buwiz.ebirforms`): `ebirforms.db`, a 0600 key file `ebirforms.key`, the Buwiz sign-in's tokens
-   and device key as 0600 files (`buwiz_submit_*.txt`), and `logs/`. It never reads a keychain
+   and device key as 0600 files (`buwiz_submit_*.txt`), the boxes' sources (`fill-sources.json` and its key
+   `fill-sources.key`, both 0600, and `fill-sources.lock`), and `logs/`. It never reads a keychain
    (`BUWIZ_NO_KEYCHAIN=1`) and never opens either eBIRForms desktop app's database. Old data comes in by export.
 2. **Only the person sends, from an app.** Queueing a return is an app-only tool (`Access::Queue` in `scope.rs`):
    the agent, resolve and routine callers are refused it, and it needs a Buwiz sign-in (the Sign-in app,
@@ -36,9 +37,11 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    receipt or return into one, even with the TIN changed (a real MyEG receipt in a `legacy/` test forced a history
    rewrite before this repo went public).
 6. **One protocol version: 1.0.** No compatibility shims for older protocol versions or names.
-7. **Each filled box keeps its source.** `ebirforms_form_fill`'s `source` (and `source_ref`) is kept per box in
-   `fill-sources.json` in the data folder (`sources.rs`: no TIN, no amount), shown by `ebirforms_form_fields`, saved
-   with the return, and dropped once the box holds another value. `user` is only a card answer (`from_card`).
+7. **Each filled box keeps its source.** `ebirforms_form_fill`'s `source` (and `source_ref`) is kept per box
+   (`sources.rs`), shown by `ebirforms_form_fields`, saved with the return, and dropped once the box holds another
+   value. Returns and values are named only by HMACs under `fill-sources.key`, so the file alone gives no TIN and no
+   amount; saves hold `fill-sources.lock`, and an unreadable file is never overwritten. `user` is only a card answer
+   (`from_card`).
 8. **Books' hand-off is a contract.** `tests/fixtures/books-handoff/` is the same files as Books'
    `tests/fixtures/handoff/` (one `books_handoff_get` payload per form and the two form tools' input schemas), pinned
    by one hash in both repos (`tests/fill_sources.rs`). A change to `form_open` or `form_fill`'s schema changes it.

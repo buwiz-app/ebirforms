@@ -23,6 +23,7 @@ use std::io::{BufRead, Write};
 
 pub use manifest::{ManifestSource, PLUGIN_ID};
 pub use server::Server;
+pub use sources::{same_value, shown_amount};
 
 /// One line in, one line out, until stdin closes. Sends started on the way
 /// are waited for before this returns.
