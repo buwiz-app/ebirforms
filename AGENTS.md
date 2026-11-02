@@ -19,7 +19,8 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 
 1. **Its own data.** The mini app keeps its own database in its own folder (`EBIRFORMS_DATA_DIR`, else the platform
    data folder `app.buwiz.ebirforms`): `ebirforms.db`, a 0600 key file `ebirforms.key`, the Buwiz sign-in's tokens
-   and device key as 0600 files (`buwiz_submit_*.txt`), and `logs/`. It never reads a keychain
+   and device key as 0600 files (`buwiz_submit_*.txt`), the boxes' sources (`fill-sources.json` and its key
+   `fill-sources.key`, both 0600, and `fill-sources.lock`), and `logs/`. It never reads a keychain
    (`BUWIZ_NO_KEYCHAIN=1`) and never opens either eBIRForms desktop app's database. Old data comes in by export.
 2. **Only the person sends, from an app.** Queueing a return is an app-only tool (`Access::Queue` in `scope.rs`):
    the agent, resolve and routine callers are refused it, and it needs a Buwiz sign-in (the Sign-in app,
@@ -28,7 +29,8 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    not known and never suggest resending. Nothing is paid from here. Tests and benches send only to a local dry-run
    server (`EBIRFORMS_ACCOUNT_URL` on loopback): never a real return, never a real taxpayer.
 3. **Only `owner::prepare` is unsafe** (it sets the process environment before any thread starts). The workspace
-   denies `unsafe_code`.
+   denies `unsafe_code`; a test that needs the environment calls `owner::prepare` as `main` does, one test per process
+   (`mcp_contract` still sets two variables itself).
 4. **eBIRForms' crates by commit.** `bir-app-core` is pinned by SHA in the root `Cargo.toml`. Only its `BirApp`
    facade is a supported surface; `bir-core` internals change without notice.
 5. **TINs never leave as TINs.** Taxpayers reach the assistant and the apps as tickets (`tkt_…`). Never put a TIN, a
@@ -36,6 +38,16 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    receipt or return into one, even with the TIN changed (a real MyEG receipt in a `legacy/` test forced a history
    rewrite before this repo went public).
 6. **One protocol version: 1.0.** No compatibility shims for older protocol versions or names.
+7. **Each filled box keeps its source.** `ebirforms_form_fill`'s `source` (and `source_ref`) is kept per box
+   (`sources.rs`), shown by `ebirforms_form_fields`, saved with the return, and dropped once the box holds another
+   value. Returns and values are named only by HMACs under `fill-sources.key`, so the file alone gives no TIN and no
+   amount; saves hold `fill-sources.lock`, and an unreadable file is never overwritten. `user` needs `from_card: true`,
+   which is the assistant's word: eBIRForms has no record of card answers to check it against, so it labels a box
+   and proves nothing.
+8. **Books' hand-off is a contract.** `tests/fixtures/books-handoff/` is the same files as Books'
+   `tests/fixtures/handoff/` (one `books_handoff_get` payload per form, the two form tools' input schemas and the shared
+   amount vectors `amounts.json`, which `shown_amount` must read as Books' `money::parse_shown` does), pinned
+   by one hash in both repos (`tests/fill_sources.rs`). A change to `form_open` or `form_fill`'s schema changes it.
 
 ## Gates
 

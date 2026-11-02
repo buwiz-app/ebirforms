@@ -1,4 +1,6 @@
 //! One synthetic taxpayer, via BirApp only, in the host test's scratch database.
+//! `EBIRFORMS_SEED_TIN_ROOT` names its nine-digit root (a caller that checks
+//! the root never leaks, such as Books' live Slice B); else it is random.
 
 use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
 use ebirforms_mini_app::owner;
@@ -10,7 +12,15 @@ fn main() {
     }
 }
 
+/// `EBIRFORMS_SEED_TIN_ROOT` (nine digits) when a caller needs to know the
+/// synthetic root to check that it never leaks; else a random one.
 fn synthetic_root() -> Result<String, getrandom::Error> {
+    if let Ok(root) = std::env::var("EBIRFORMS_SEED_TIN_ROOT")
+        && root.len() == 9
+        && root.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Ok(root);
+    }
     let mut entropy = [0u8; 4];
     getrandom::fill(&mut entropy)?;
     let value = u32::from_le_bytes(entropy) % (10u32.pow(9) - 1) + 1;

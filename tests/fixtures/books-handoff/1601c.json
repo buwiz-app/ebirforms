@@ -1,0 +1,24 @@
+{
+  "form_fill": {
+    "fields": {
+      "frm1601c:TaxWithheld": "1",
+      "frm1601c:txtTax14": "42000.00",
+      "frm1601c:txtTax15": "0.00",
+      "frm1601c:txtTax17": "0.00",
+      "frm1601c:txtTax18": "2000.00",
+      "frm1601c:txtTax19": "2000.00",
+      "frm1601c:txtTax25": "2808.40"
+    },
+    "source": "document",
+    "source_ref": {
+      "handoff": "2",
+      "inputs_hash": "af3764e282fc616748eb943eea9b42659a864e3b44a6602847130564d17ca46a",
+      "plugin": "app.buwiz.books"
+    }
+  },
+  "form_open": {
+    "code": "1601C",
+    "period": 9,
+    "year": 2026
+  }
+}

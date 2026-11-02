@@ -1,0 +1,18 @@
+{
+  "form_fill": {
+    "fields": {
+      "frm1701MS:txtSalesReturnsNo6a": "10000.00",
+      "frm1701MS:txtSalesRevenueNo5a": "1200000.00"
+    },
+    "source": "document",
+    "source_ref": {
+      "handoff": "3",
+      "inputs_hash": "d79e08453883af4c6890fb17b9e0c41bbce56f1aacb76070c5c1ef7a2e2cbb5f",
+      "plugin": "app.buwiz.books"
+    }
+  },
+  "form_open": {
+    "code": "1701MS",
+    "year": 2026
+  }
+}

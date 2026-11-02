@@ -1,0 +1,88 @@
+{
+  "ebirforms_form_fill": {
+    "additionalProperties": false,
+    "properties": {
+      "fields": {
+        "additionalProperties": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "minProperties": 1,
+        "type": "object"
+      },
+      "from_card": {
+        "type": "boolean"
+      },
+      "source": {
+        "enum": [
+          "profile",
+          "past_return",
+          "document",
+          "ai",
+          "user"
+        ],
+        "type": "string"
+      },
+      "source_ref": {
+        "additionalProperties": false,
+        "properties": {
+          "handoff": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "inputs_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "plugin": {
+            "maxLength": 64,
+            "minLength": 3,
+            "type": "string"
+          }
+        },
+        "required": [
+          "plugin",
+          "handoff",
+          "inputs_hash"
+        ],
+        "type": "object"
+      }
+    },
+    "required": [
+      "fields"
+    ],
+    "type": "object"
+  },
+  "ebirforms_form_open": {
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "type": "string"
+      },
+      "period": {
+        "type": [
+          "integer",
+          "string"
+        ]
+      },
+      "tin": {
+        "description": "The taxpayer's ticket (tkt_...) from ebirforms_profiles_list or an @ebirforms:taxprofile token.",
+        "type": "string"
+      },
+      "year": {
+        "maximum": 2100,
+        "minimum": 2000,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "code"
+    ],
+    "type": "object"
+  }
+}

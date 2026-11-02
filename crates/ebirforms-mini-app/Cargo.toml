@@ -26,6 +26,10 @@ path = "../../tests/mcp_contract.rs"
 name = "own_data"
 path = "../../tests/own_data.rs"
 
+[[test]]
+name = "fill_sources"
+path = "../../tests/fill_sources.rs"
+
 [[example]]
 name = "host-seed"
 path = "../../tests/host/seed.rs"
@@ -39,6 +43,7 @@ regex.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 hex = "0.4.3"
+hmac = "0.12"
 ed25519-dalek = "2"
 getrandom = "0.3"
 # Buwiz sign-in and sending (account.rs): eBIRForms' submission client on a
