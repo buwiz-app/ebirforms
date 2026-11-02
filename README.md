@@ -73,3 +73,7 @@ All four `ebirforms_account_*` tools are hidden from and refused to the assistan
 ## Next
 
 - Port the remaining apps and cards from `legacy/` (calendar, deadlines, register, tax profile, the cards).
+
+## License
+
+MIT (see `LICENSE`), as is eBIRForms, whose crates it builds on.
