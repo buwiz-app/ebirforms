@@ -54,7 +54,7 @@ On Linux with Node 22, Rust (see `rust-toolchain.toml`), and `lsof`:
 
 ```sh
 git clone https://github.com/buwiz-bot/buwiz-bot bot
-git -C bot checkout --detach 224bffa539b910b76e4c02bcfd94a4a33102a672   # buwiz-bot main with protocol 1.0 (#102)
+git -C bot checkout --detach 4ab3ded29828048b2819ab38fb9cccfc50d448af   # buwiz-bot main with protocol 1.0 (#102)
 (cd bot/server && npm ci)
 BUWIZ_BOT_DIR="$PWD/bot" tools/check-all.sh
 ```
