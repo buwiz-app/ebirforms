@@ -26,6 +26,10 @@ path = "../../tests/mcp_contract.rs"
 name = "own_data"
 path = "../../tests/own_data.rs"
 
+[[test]]
+name = "fill_sources"
+path = "../../tests/fill_sources.rs"
+
 [[example]]
 name = "host-seed"
 path = "../../tests/host/seed.rs"

@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bir_app_core::bir_core::forms::agent::AgentFormKind;
 use bir_app_core::bir_core::forms::taxform::{self, TaxPeriod};
 use bir_app_core::{BirApp, FieldValue, OpenReturn, OpenedReturn, ReturnFilter};
 use chrono::NaiveDate;
@@ -36,6 +37,7 @@ use crate::owner;
 use crate::protocol::{self, Caller, Host, Origin};
 use crate::scope::{self, Access, Rule};
 use crate::scrub::{self, Scrubber};
+use crate::sources::{self, Source, Sources};
 use crate::tickets::{self, Subject};
 
 pub(crate) const SERVER_NAME: &str = "ebirforms-mini-app";
@@ -136,6 +138,9 @@ struct OpenForm {
     opened: OpenedReturn,
     /// Edits since the last save.
     dirty: bool,
+    /// Each filled box's source ([`crate::sources`]), loaded with a saved
+    /// return and kept with it on save.
+    sources: BTreeMap<String, Source>,
 }
 
 pub struct Server {
@@ -144,6 +149,7 @@ pub struct Server {
     host: Host,
     form: Option<OpenForm>,
     account: Account,
+    sources: Sources,
 }
 
 impl Server {
@@ -197,6 +203,7 @@ impl Server {
             manifest,
             host: Host::new(require_provision),
             form: None,
+            sources: Sources::in_dir(&dir),
             account: Account::in_dir(dir),
         }
     }
@@ -586,11 +593,27 @@ impl Server {
             "boxes": opened.values.len(),
             "errors": opened.errors.len(),
         });
+        let sources = if opened.sample {
+            BTreeMap::new()
+        } else {
+            let id = sources::return_id(
+                &tin,
+                form,
+                opened.year,
+                opened.stored_period.unwrap_or(opened.period),
+            );
+            let mut sources = self.sources.load(&id);
+            sources.retain(|key, source| {
+                source.holds(key, held_value(form, key, &opened.values).as_ref())
+            });
+            sources
+        };
         self.form = Some(OpenForm {
             tin,
             form: form.to_string(),
             opened,
             dirty: false,
+            sources,
         });
         Ok(summary)
     }
@@ -620,7 +643,11 @@ impl Server {
             "form": form.form,
             "status": opened.status,
             "editable": opened.editable,
-            "values": pick(&opened.values),
+            "values": pick(&with_group_values(&form.form, &opened.values)),
+            "sources": form.sources.iter()
+                .filter(|(key, source)| keys.as_ref().is_none_or(|keys| keys.contains(key)) && source.holds(key, held_value(&form.form, key, &opened.values).as_ref()))
+                .map(|(key, source)| (key.clone(), source.shown()))
+                .collect::<Map<String, Value>>(),
             "locked": pick(&opened.locks),
             "off": pick(&opened.off),
             "options": opened.options.iter()
@@ -631,16 +658,28 @@ impl Server {
     }
 
     fn form_fill(&mut self, app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
-        reject_unknown(arguments, &["fields", "source", "from_card"])?;
+        reject_unknown(arguments, &["fields", "source", "source_ref", "from_card"])?;
         let fields = arguments
             .get("fields")
             .and_then(Value::as_object)
             .filter(|fields| !fields.is_empty())
             .ok_or("`fields` must map box keys to values")?;
         let source = text_arg(arguments, "source")?.unwrap_or_else(|| "ai".into());
-        if !["profile", "past_return", "document", "ai", "user"].contains(&source.as_str()) {
+        if !sources::LABELS.contains(&source.as_str()) {
             return Err("`source` must be profile, past_return, document, ai or user".into());
         }
+        let from_card = match arguments.get("from_card") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(from_card)) => *from_card,
+            Some(_) => return Err("`from_card` must be true or false".into()),
+        };
+        if source == "user" && !from_card {
+            return Err("`source: user` is only for the person's own answer on a card (with `from_card: true`); a value you worked out or read is `ai`, `document`, `profile` or `past_return`".into());
+        }
+        let reference = match arguments.get("source_ref") {
+            None | Some(Value::Null) => None,
+            Some(reference) => Some(sources::check_reference(reference)?),
+        };
         let mut edits = BTreeMap::new();
         for (key, value) in fields {
             let edit = match value {
@@ -672,11 +711,53 @@ impl Server {
         form.opened.draft = filled.draft;
         form.opened.values.extend(filled.values);
         form.dirty = true;
-        let filled_keys: Vec<&String> = edits
-            .keys()
-            .filter(|key| !filled.rejected.contains_key(*key))
-            .collect();
-        Ok(json!({ "filled": filled_keys, "rejected": filled.rejected, "source": source }))
+        // a box is filled when eBIRForms took it and holds the value given;
+        // one it took but holds otherwise (a box another answer switches off
+        // or recomputes) is `not_kept`, with what it holds, and no source
+        let mut filled_keys: Vec<&String> = Vec::new();
+        let mut not_kept = Map::new();
+        for (key, edit) in edits
+            .iter()
+            .filter(|(key, _)| !filled.rejected.contains_key(*key))
+        {
+            let held = held_value(&form.form, key, &form.opened.values);
+            let given = match edit {
+                FieldValue::Text(text) => Some(text.clone()),
+                FieldValue::Tick(tick) => Some(tick.to_string()),
+                FieldValue::Clear => None,
+            };
+            match (given, held) {
+                (None, _) => {
+                    form.sources.remove(key);
+                    filled_keys.push(key);
+                }
+                (Some(given), Some(held)) if same_value(&given, &held) => {
+                    form.sources.insert(
+                        key.clone(),
+                        Source {
+                            label: source.clone(),
+                            reference: reference.clone(),
+                            from_card: from_card && source == "user",
+                            value_sha256: sources::value_sha256(key, &held),
+                        },
+                    );
+                    filled_keys.push(key);
+                }
+                (Some(_), held) => {
+                    form.sources.remove(key);
+                    not_kept.insert(key.clone(), json!(held.unwrap_or_default()));
+                }
+            }
+        }
+        let mut answer =
+            json!({ "filled": filled_keys, "rejected": filled.rejected, "source": source });
+        if !not_kept.is_empty() {
+            answer["not_kept"] = Value::Object(not_kept);
+        }
+        if let Some(reference) = reference {
+            answer["source_ref"] = Value::Object(reference);
+        }
+        Ok(answer)
     }
 
     fn form_validate(&mut self, app: &BirApp) -> Result<Value, String> {
@@ -722,7 +803,31 @@ impl Server {
             form.opened.status = status.clone();
         }
         form.dirty = false;
-        Ok(json!({ "saved": true, "id": saved.id, "status": form.opened.status }))
+        // the boxes' sources go with the saved return
+        let opened = &form.opened;
+        let code = form.form.as_str();
+        form.sources.retain(|key, source| {
+            source.holds(key, held_value(code, key, &opened.values).as_ref())
+        });
+        let id = sources::return_id(
+            &form.tin,
+            &form.form,
+            opened.year,
+            saved
+                .stored_period
+                .or(opened.stored_period)
+                .unwrap_or(opened.period),
+        );
+        let sources_kept = match self.sources.save(&id, &form.sources) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!("the boxes' sources were not kept: {error}");
+                false
+            }
+        };
+        Ok(
+            json!({ "saved": true, "id": saved.id, "status": form.opened.status, "sources_kept": sources_kept }),
+        )
     }
 
     fn form_dismiss(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
@@ -787,6 +892,63 @@ fn reject_unknown(arguments: &Map<String, Value>, allowed: &[&str]) -> Result<()
         )),
         None => Ok(()),
     }
+}
+
+/// A box's value as the open return holds it. A radio item's group box
+/// (`frm1601c:TaxWithheld`, filled with an option such as `"1"`) has no value
+/// of its own: eBIRForms keeps only its radios, so it reads as the option of
+/// the radio that is ticked, from the form's agent definition.
+fn held_value(form: &str, key: &str, values: &BTreeMap<String, String>) -> Option<String> {
+    if let Some(value) = values.get(key) {
+        return Some(value.clone());
+    }
+    let group = AgentFormKind::from_code(form)?
+        .definition()
+        .boxes
+        .iter()
+        .find(|b| b.key == key && b.radio_group)?;
+    group
+        .members
+        .iter()
+        .zip(&group.options)
+        .find(|(member, _)| values.get(*member).map(String::as_str) == Some("true"))
+        .map(|(_, option)| option.value.clone())
+}
+
+/// The open return's values with each radio item's group box as the option
+/// its ticked radio stands for, so a fill by group box reads back the same.
+fn with_group_values(form: &str, values: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut out = values.clone();
+    if let Some(kind) = AgentFormKind::from_code(form) {
+        for group in kind.definition().boxes.iter().filter(|b| b.radio_group) {
+            if !out.contains_key(&group.key)
+                && let Some(value) = held_value(form, &group.key, values)
+            {
+                out.insert(group.key.clone(), value);
+            }
+        }
+    }
+    out
+}
+
+/// The value given and the value eBIRForms holds are the same: amounts
+/// compare without thousands separators or trailing decimal zeros
+/// (`"290000.00"` and `"290,000.00"`, `"0"` and `"0.00"`).
+fn same_value(given: &str, held: &str) -> bool {
+    fn plain(text: &str) -> String {
+        let text: String = text.trim().chars().filter(|c| *c != ',').collect();
+        if text.contains('.')
+            && text
+                .trim_start_matches('-')
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'.')
+        {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            text
+        }
+    }
+    plain(given) == plain(held)
 }
 
 fn no_arguments(arguments: &Map<String, Value>) -> Result<(), String> {
@@ -2013,7 +2175,7 @@ fn empty_schema() -> Value {
 }
 
 fn tool_list() -> Value {
-    let ticket = json!({ "type": "string", "description": "The taxpayer's ticket (tkt_...) from ebirforms_profiles_list or an @bir:taxprofile token." });
+    let ticket = json!({ "type": "string", "description": "The taxpayer's ticket (tkt_...) from ebirforms_profiles_list or an @ebirforms:taxprofile token." });
     let mut tools = vec![
         tool(
             STATUS,
@@ -2138,7 +2300,7 @@ fn tool_list() -> Value {
         ),
         tool(
             FORM_FIELDS,
-            "Read the open return's boxes: values by official key, the locked boxes (with why), boxes switched off by another answer, and each drop-down's options. `keys` limits it to some boxes.",
+            "Read the open return's boxes: values by official key, each filled box's `sources` ({source, source_ref?}, kept while the box holds the value it was filled with), the locked boxes (with why), boxes switched off by another answer, and each drop-down's options. `keys` limits it to some boxes.",
             json!({
                 "type": "object",
                 "properties": { "keys": { "type": "array", "items": { "type": "string" } } },
@@ -2148,12 +2310,22 @@ fn tool_list() -> Value {
         ),
         tool(
             FORM_FILL,
-            "Fill boxes of the open return: `fields` maps official box keys (from ebirforms_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why. `source`: profile, past_return, document, ai (default) or user. Nothing is saved.",
+            "Fill boxes of the open return: `fields` maps official box keys (from ebirforms_form_fields) to values (amounts like \"1234.50\", dates MM/DD/YYYY, checkboxes true/false, null clears). eBIRForms recomputes the return; refused boxes come back in `rejected` with why, and boxes it took but holds otherwise (switched off or recomputed by another answer) in `not_kept` with what they hold. `source`: where the values came from: profile, past_return, document, ai (default), or user (only the person's answer on a card, with `from_card: true`). `source_ref`: for values handed over by another mini app (Books' `form_fill`), pass its {plugin, handoff, inputs_hash} as given. Each filled box keeps its source, shown by ebirforms_form_fields and saved with the return. Nothing is saved until ebirforms_form_save_draft.",
             json!({
                 "type": "object",
                 "properties": {
                     "fields": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean", "null"] }, "minProperties": 1 },
                     "source": { "type": "string", "enum": ["profile", "past_return", "document", "ai", "user"] },
+                    "source_ref": {
+                        "type": "object",
+                        "properties": {
+                            "plugin": { "type": "string", "minLength": 3, "maxLength": 64 },
+                            "handoff": { "type": "string", "minLength": 1, "maxLength": 64 },
+                            "inputs_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                        },
+                        "required": ["plugin", "handoff", "inputs_hash"],
+                        "additionalProperties": false
+                    },
                     "from_card": { "type": "boolean" }
                 },
                 "required": ["fields"],

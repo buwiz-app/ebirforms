@@ -1,0 +1,19 @@
+{
+  "form_fill": {
+    "fields": {
+      "frm2551Qv2018:txt15": "0.00",
+      "txtATCAmt1": "290000.00"
+    },
+    "source": "document",
+    "source_ref": {
+      "handoff": "1",
+      "inputs_hash": "eb11a510694c00d90471f9c92ce2a1eb4d97691599b10aac628d62761d0ceafc",
+      "plugin": "app.buwiz.books"
+    }
+  },
+  "form_open": {
+    "code": "2551Q",
+    "period": 3,
+    "year": 2026
+  }
+}

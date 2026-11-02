@@ -36,6 +36,12 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    receipt or return into one, even with the TIN changed (a real MyEG receipt in a `legacy/` test forced a history
    rewrite before this repo went public).
 6. **One protocol version: 1.0.** No compatibility shims for older protocol versions or names.
+7. **Each filled box keeps its source.** `ebirforms_form_fill`'s `source` (and `source_ref`) is kept per box in
+   `fill-sources.json` in the data folder (`sources.rs`: no TIN, no amount), shown by `ebirforms_form_fields`, saved
+   with the return, and dropped once the box holds another value. `user` is only a card answer (`from_card`).
+8. **Books' hand-off is a contract.** `tests/fixtures/books-handoff/` is the same files as Books'
+   `tests/fixtures/handoff/` (one `books_handoff_get` payload per form and the two form tools' input schemas), pinned
+   by one hash in both repos (`tests/fill_sources.rs`). A change to `form_open` or `form_fill`'s schema changes it.
 
 ## Gates
 

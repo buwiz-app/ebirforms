@@ -16,6 +16,7 @@ mod protocol;
 mod scope;
 mod scrub;
 mod server;
+mod sources;
 mod tickets;
 
 use std::io::{BufRead, Write};
