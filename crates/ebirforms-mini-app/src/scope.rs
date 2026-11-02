@@ -4,9 +4,11 @@
 //!
 //! One rule per function, read off its declaration in bir-app-core. A call
 //! whose arguments name another root is refused before it runs; a list that
-//! spans taxpayers is filtered after it runs. A function with no rule is not
-//! callable at all, so a new function stays closed until it is classified
-//! here.
+//! spans taxpayers is filtered after it runs. A new taxpayer
+//! (`create_taxpayer`) names no saved root, so it is the one call about a
+//! taxpayer that needs no ticket; its answer is the new taxpayer's ticket. A
+//! function with no rule is not callable at all, so a new function stays
+//! closed until it is classified here.
 
 use bir_app_core::bir_core::forms::agent::{self, AgentFormKind};
 use serde_json::Value;
@@ -27,6 +29,12 @@ pub(crate) enum Rule {
     OpenedDraft,
     /// The answer is a list across taxpayers; rows outside the scope go.
     Rows,
+    /// Argument 0 is a taxpayer not saved yet (`create_taxpayer`, from the
+    /// Tax Profile app's New taxpayer form). It reaches no saved taxpayer's
+    /// data, so it needs no ticket and is held to none; it is checked field by
+    /// field first, and answers the new taxpayer's ticket and title, never its
+    /// TIN (`crate::new_taxpayer`).
+    New,
 }
 
 /// How a call touches the database: only a read runs for a resolve or routine call.
@@ -108,6 +116,7 @@ pub(crate) static FUNCTIONS: &[(&str, Rule, Access)] = &[
     ("list_rdos", Rule::Free, Access::Read),
     ("list_zip_codes", Rule::Free, Access::Read),
     ("get_taxpayer", Rule::Tin(0), Access::Read),
+    ("create_taxpayer", Rule::New, Access::Write),
     ("update_taxpayer", Rule::Tin(0), Access::Write),
     ("set_taxpayer_archived", Rule::Tin(0), Access::Write),
     ("delete_taxpayer", Rule::Tin(0), Access::Write),
@@ -163,6 +172,7 @@ pub(crate) static TAX_PROFILE: &[&str] = &[
     "as_needed_forms",
     "cancel_queued",
     "create_branch",
+    "create_taxpayer",
     "create_template_from_latest",
     "deadlines_between",
     "delete_form_template",
@@ -268,7 +278,7 @@ pub(crate) fn check_args(
     scope: &str,
 ) -> Result<(), String> {
     let root = match rule {
-        Rule::Free | Rule::Rows | Rule::OpenedDraft => return Ok(()),
+        Rule::Free | Rule::Rows | Rule::OpenedDraft | Rule::New => return Ok(()),
         Rule::Tin(index) => args.get(index).and_then(root_of).ok_or_else(|| {
             format!(
                 "`{function}`: argument {index} is not a TIN, so it cannot be held to scope {scope}"
@@ -369,6 +379,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_new_taxpayer_is_a_tax_profile_write_held_to_no_ticket() {
+        assert_eq!(
+            find("create_taxpayer"),
+            Some(("create_taxpayer", Rule::New, Access::Write))
+        );
+        assert!(TAX_PROFILE.contains(&"create_taxpayer"));
+        assert!(!FORMS.contains(&"create_taxpayer"));
+        assert!(!CALENDAR.contains(&"create_taxpayer"));
+        assert!(!needs_ticket(Rule::New));
+        // it names no saved taxpayer, so a profile open on another may add one
+        let scope = "000123453";
+        let new = [json!({ "tin_root": "000987654" })];
+        assert!(check_args("create_taxpayer", Rule::New, &new, scope).is_ok());
+        let answer = json!({ "ticket": "tkt_0", "title": "Synthetic" });
+        assert_eq!(
+            filter_result("create_taxpayer", Rule::New, &new, answer.clone(), scope).unwrap(),
+            answer
+        );
     }
 
     #[test]

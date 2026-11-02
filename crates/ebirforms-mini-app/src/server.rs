@@ -33,6 +33,7 @@ use crate::account::Account;
 use crate::answers;
 use crate::cards;
 use crate::manifest::{self, ManifestSource};
+use crate::new_taxpayer;
 use crate::owner;
 use crate::protocol::{self, Caller, Host, Origin};
 use crate::scope::{self, Access, Rule};
@@ -124,12 +125,17 @@ from the calendar; for an ATC, ebirforms_atc_lookup; for an RDO, ebirforms_rdo_l
 waiting to be sent, ebirforms_queue_list. Each shows the user a card. To let the user work visually, call ebirforms_app_open \
 with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` to open one \
 return), `app: \"tax-profile\"` for a taxpayer's registration, `app: \"calendar\"` for the \
-filing calendar, or `app: \"deadlines\"` for the next returns due as a card in the chat. You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
+filing calendar, or `app: \"deadlines\"` for the next returns due as a card in the chat. \
+You cannot add a taxpayer: the user does, with New taxpayer in the Tax Profile app \
+(ebirforms_app_open `tax-profile`, without `tin` when none is saved yet). You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
 `source`), ebirforms_form_validate, ebirforms_form_save_draft, ebirforms_form_dismiss; one return is open at a time. \
 You never queue or send a return: the user does that in the Forms app (Queue), once signed in \
 to Buwiz in the Sign-in app (ebirforms_app_open `register`); it is then sent to the BIR and comes back \
 with a receipt. Tools whose description starts with \"Mini apps only\" and ebirforms_resolve belong \
 to the mini apps and to the Bot: do not call them.";
+
+/// What `/taxprofile` and `/taxform` say with no taxpayer saved: how to add one.
+const NO_TAXPAYER: &str = "No taxpayer is saved in eBIRForms yet. To add one, open BIR Tax Profile (ask the Bot to open it) and press New taxpayer.";
 
 /// What a save answers when the boxes' sources were not kept.
 const SOURCES_LOST: &str = "The return is saved, but where its boxes' values came from was not kept: tell the person, and fill again before saving if they need the link.";
@@ -429,6 +435,10 @@ impl Server {
         }
         if access == Access::Queue && !self.account.signed_in() {
             return Err(owner::SIGN_IN_FIRST.to_string());
+        }
+        // the New taxpayer form: checked by field, answered by ticket
+        if rule == Rule::New {
+            return new_taxpayer::create(app, &args, taxform::today());
         }
         let value = app
             .call(function, args.clone())
@@ -1718,8 +1728,9 @@ struct ReturnAsk {
     draft_id: Option<i64>,
 }
 
-/// An open request (spec 6.6) for a taxpayer app: `tax-profile` needs the
-/// taxpayer; `calendar` and `deadlines` without one show every taxpayer.
+/// An open request (spec 6.6) for a taxpayer app: `tax-profile` without a
+/// taxpayer opens empty, on its New taxpayer button; `calendar` and
+/// `deadlines` without one show every taxpayer.
 fn app_request(
     app: &BirApp,
     target: &str,
@@ -1728,11 +1739,7 @@ fn app_request(
 ) -> Result<Value, String> {
     let entry = manifest::app(target).ok_or_else(|| format!("{target} is not an app"))?;
     let (ticket, title) = match subject {
-        None if target == manifest::TAX_PROFILE_ID => {
-            return Err(format!(
-                "`tin` is required: the taxpayer's ticket from {PROFILES_LIST}"
-            ));
-        }
+        // Tax Profile without a taxpayer: its empty state and New taxpayer
         None => (None, entry.title.to_string()),
         Some(subject) => {
             let name = subject.title(app, today).ok_or_else(|| {
@@ -2063,7 +2070,7 @@ fn command_taxprofile(app: &BirApp, ask: &Ask) -> Result<Value, String> {
             Some(found[0].0.clone())
         } else if found.is_empty() && !ask.complete {
             return Err(if ask.value.is_empty() {
-                "No taxpayer is saved in eBIRForms yet".to_string()
+                NO_TAXPAYER.to_string()
             } else {
                 format!(
                     "No taxpayer in eBIRForms matches “{}”",
@@ -2130,7 +2137,7 @@ fn command_taxform(app: &BirApp, ask: &Ask) -> Result<Value, String> {
             // which taxpayer: the choice keeps the form and period typed
             let found = find_taxpayers(app, "", false)?;
             if found.is_empty() {
-                return Err("No taxpayer is saved in eBIRForms yet".into());
+                return Err(NO_TAXPAYER.into());
             }
             return choices_of(app, &found, rest);
         }
@@ -2329,7 +2336,7 @@ fn tool_list() -> Value {
         ),
         tool(
             APP_OPEN,
-            "Ask the Bot to open one of eBIRForms's apps for the user: `forms` (the taxpayer's ticket as `tin`, and `form` + `period`, `action` view|file|submit, `draft_id` to open one return), `tax-profile` (needs `tin`), `calendar`, `deadlines` (the next returns due, as a card in the chat; `tin` for one taxpayer) or `register` (the Buwiz Sign-in screen, where the user signs in themselves).",
+            "Ask the Bot to open one of eBIRForms's apps for the user: `forms` (the taxpayer's ticket as `tin`, and `form` + `period`, `action` view|file|submit, `draft_id` to open one return), `tax-profile` (the taxpayer's ticket as `tin`; without one it opens empty, with the New taxpayer button the user adds a taxpayer with), `calendar`, `deadlines` (the next returns due, as a card in the chat; `tin` for one taxpayer) or `register` (the Buwiz Sign-in screen, where the user signs in themselves).",
             json!({
                 "type": "object",
                 "properties": {
@@ -2494,10 +2501,17 @@ fn tool_list() -> Value {
     ] {
         tools.push(app_only(name, description, empty_schema(), read_only));
     }
-    for (function, _, access) in scope::FUNCTIONS {
+    for (function, rule, access) in scope::FUNCTIONS {
+        let description = if *rule == Rule::New {
+            format!(
+                "eBIRForms's `{function}`: the Tax Profile app's New taxpayer form, as the person pressed Create; answers the new taxpayer's ticket."
+            )
+        } else {
+            format!("eBIRForms's `{function}`, held to the taxpayer of the app's ticket.")
+        };
         tools.push(app_only(
             &app_tool_name(function),
-            &format!("eBIRForms's `{function}`, held to the taxpayer of the app's ticket."),
+            &description,
             json!({
                 "type": "object",
                 "properties": {

@@ -179,6 +179,33 @@ async function main() {
     const state = JSON.parse(agentStatus.content);
     check("assistant status answers from the scratch database with sending off", agentStatus.is_error === false
       && state.taxpayers === 1 && state.sending === false && state.signed_in === false);
+    // New taxpayer: a signed Tax Profile write, checked by field, answered by
+    // ticket; the root is synthetic, and the host's answers never carry it
+    const profile = await openApp(sessions, signed, "tax-profile");
+    check("Tax Profile opens with a verified certificate", certificate(profile));
+    const NEW_ROOT = "000111222";
+    const newTaxpayer = (root, rdo) => ({ args_json: JSON.stringify([{ tin_root: root, name: "Synthetic New Taxpayer", taxpayer_type: "Individual",
+      head_office: { rdo_code: rdo, registered_address: "Synthetic address", zip_code: "1600", phone: "", email: "new@example.invalid" } }]) });
+    const CREATE = "ebirforms_app_create_taxpayer";
+    const badTin = await post("/v1/host/call", envelope(profile, CREATE, newTaxpayer("0001112", "043")));
+    check("signed New taxpayer with a bad TIN is refused by field", refused(badTin, "tool_error") && /tin_root: /.test(badTin.json.message ?? ""));
+    const noRdo = await post("/v1/host/call", envelope(profile, CREATE, newTaxpayer(NEW_ROOT, "")));
+    check("signed New taxpayer without an RDO is refused by field", refused(noRdo, "tool_error") && /rdo_code: /.test(noRdo.json.message ?? ""));
+    const made = await post("/v1/host/call", envelope(profile, CREATE, newTaxpayer(NEW_ROOT, "043")));
+    const madeTicket = value(made)?.ticket ?? "";
+    check("signed New taxpayer saves and answers a ticket, not the TIN", made.status === 200 && made.json.ok === true
+      && /^tkt_/.test(madeTicket) && value(made)?.title === "Synthetic New Taxpayer" && !JSON.stringify(made.json).includes(NEW_ROOT));
+    const again = await post("/v1/host/call", envelope(profile, CREATE, newTaxpayer(NEW_ROOT, "043")));
+    check("the same TIN again is refused without naming it", refused(again, "tool_error")
+      && /already saved/.test(again.json.message ?? "") && !JSON.stringify(again.json).includes(NEW_ROOT));
+    const newTitle = await post("/v1/host/tickets/title", { plugin: PLUGIN, ticket: madeTicket });
+    check("the new taxpayer's ticket resolves to its name", newTitle.status === 200 && newTitle.json.valid === true
+      && newTitle.json.title === "Synthetic New Taxpayer");
+    const formsCreate = await post("/v1/host/call", envelope(forms, CREATE, newTaxpayer("000555666", "043")));
+    check("New taxpayer is outside Forms permissions", refused(formsCreate, "permission_denied"));
+    const agentCreate = await broker("direct-agent", CREATE);
+    check("New taxpayer refuses origin agent inside the plugin", agentCreate.isError === true
+      && agentCreate.structuredContent?.code === "permission_denied");
     const notGranted = await post("/v1/host/call", envelope(deadlines, "ebirforms_resolve", {}));
     check("a tool outside Deadlines permissions is refused", refused(notGranted, "permission_denied"));
     const forged = await post("/v1/host/call", envelope(forms, "ebirforms_app_screen_forms_index", { args: [] }, {}, generate().seed));
@@ -186,6 +213,7 @@ async function main() {
     const names = await broker("surface");
     const accountTools = ["status", "sign_in_start", "sign_in_poll", "sign_out"].map((s) => `ebirforms_account_${s}`);
     check("all four account tools are absent from the assistant surface", accountTools.every((t) => !names.includes(t)));
+    check("New taxpayer is absent from the assistant surface", !names.includes("ebirforms_app_create_taxpayer"));
     for (const tool of accountTools) {
       const agent = await broker("agent", tool);
       check(`${tool} is refused by the assistant surface`, agent.is_error === true);
@@ -195,7 +223,7 @@ async function main() {
     }
     check("no account credentials were created", !existsSync(`${RUN}/ebirforms-data/buwiz-account.json`));
     check("plugin key is in the scratch file keystore with mode 0600", (statSync(`${RUN}/keys/${PLUGIN}.key`).mode & 0o777) === 0o600);
-    for (const open of [forms, deadlines]) {
+    for (const open of [forms, deadlines, profile]) {
       const closed = await post("/v1/host/sessions/close", { open_id: open.open_id });
       check(`${open.app} session closes cleanly`, closed.status === 200 && closed.json.ok === true);
     }

@@ -30,6 +30,10 @@ path = "../../tests/own_data.rs"
 name = "fill_sources"
 path = "../../tests/fill_sources.rs"
 
+[[test]]
+name = "new_taxpayer"
+path = "../../tests/new_taxpayer.rs"
+
 [[example]]
 name = "host-seed"
 path = "../../tests/host/seed.rs"
