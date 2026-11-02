@@ -25,10 +25,16 @@ a keychain:
 
 - the folder: `EBIRFORMS_DATA_DIR`, else the platform data folder `app.buwiz.ebirforms`
   (`~/Library/Application Support/app.buwiz.ebirforms` on macOS);
-- `ebirforms.db`, its key `ebirforms.key` (64 hex digits, 0600, made on first run), and `logs/`.
+- `ebirforms.db`, its key `ebirforms.key` (64 hex digits, 0600, made on first run), and `logs/`;
+- once you sign in to Buwiz (the Sign-in app), its tokens and this computer's device key, as 0600 files.
 
-Old desktop data comes in by export, later. Sending returns to BIR is off: a return can be saved, but nothing is
-queued or sent (sending would need the desktop's keychain entries).
+Old desktop data comes in by export, later.
+
+## Sending
+
+You send a return from the Forms app, signed in to Buwiz: it is queued, sealed to Buwiz's Sender and sent through
+the relay, and comes back with a signed receipt. The assistant can read the queue and each return's state, but it
+cannot queue or send. Nothing is paid from here.
 
 ## Run
 
@@ -48,7 +54,7 @@ On Linux with Node 22, Rust (see `rust-toolchain.toml`), and `lsof`:
 
 ```sh
 git clone https://github.com/buwiz-bot/buwiz-bot bot
-git -C bot checkout --detach 2f93df804520738d32137668424427de70ee85ee
+git -C bot checkout --detach 224bffa539b910b76e4c02bcfd94a4a33102a672   # buwiz-bot main with protocol 1.0 (#102)
 (cd bot/server && npm ci)
 BUWIZ_BOT_DIR="$PWD/bot" tools/check-all.sh
 ```
