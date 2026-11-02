@@ -88,7 +88,7 @@ pub(crate) mod tests {
     pub(crate) fn provision_args(seed: [u8; 32]) -> Map<String, Value> {
         let public = b64url(SigningKey::from_bytes(&seed).verifying_key().as_bytes());
         json!({
-            "protocol": "2.0.0",
+            "protocol": "1.0.0",
             "plugin": crate::manifest::PLUGIN_ID,
             "key": {"alg": "ed25519", "seed": b64url(&seed)},
             "pub": public,

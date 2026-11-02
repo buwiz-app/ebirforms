@@ -1,6 +1,6 @@
-//! Mini App Protocol 2.0's reserved `buwiz.*` tools and the caller of a
-//! `tools/call` (`_meta["buwiz/caller"]`): what Buwiz Bot (the protocol's
-//! host) asks of a plugin before and around its own tools.
+//! Mini App Protocol 1.0's reserved `buwiz.*` tools (section 10) and the
+//! caller of a `tools/call` (`_meta["buwiz/caller"]`): what Buwiz Bot (the
+//! protocol's host) asks of a plugin before and around its own tools.
 //!
 //! - `buwiz.provision`: the plugin key, on every spawn, kept in memory only;
 //!   nothing else runs before it.
@@ -8,6 +8,11 @@
 //!   app open, signed with that key.
 //! - `buwiz.ticket.resolve`: a ticket's title (never its subject).
 //! - `buwiz.uninstall`: every ticket forgotten.
+//!
+//! Any other `buwiz.*` name is JSON-RPC -32601 (10.1), `buwiz.account.set`
+//! and `buwiz.account.clear` included: eBIRForms declares no accounts (it
+//! signs in to Buwiz itself, account.rs), so it leaves them out, as 10.1
+//! allows.
 
 use std::collections::HashMap;
 
@@ -64,8 +69,18 @@ impl Caller {
     }
 }
 
-// Result shapes and the reserved-tool list are the SDK's, byte for byte.
-pub(crate) use buwiz_plugin::{RESERVED, fail, ok};
+// Result shapes are the SDK's, byte for byte.
+pub(crate) use buwiz_plugin::{fail, ok};
+
+/// The reserved tools eBIRForms answers: a subset of the SDK's
+/// `buwiz_plugin::RESERVED`, which also names the account tools.
+pub(crate) const RESERVED: [&str; 5] = [
+    "buwiz.provision",
+    "buwiz.session.open",
+    "buwiz.session.close",
+    "buwiz.ticket.resolve",
+    "buwiz.uninstall",
+];
 
 /// What `buwiz.*` keeps between requests: the plugin key (memory only, P4)
 /// and the opens it certified.
@@ -127,7 +142,7 @@ impl Host {
                 ok(json!({ "ok": true }))
             }
             "buwiz.ticket.resolve" => ticket_resolve(app.ok(), arguments),
-            _ => {
+            "buwiz.uninstall" => {
                 self.sessions.clear();
                 match app.and_then(|app| {
                     tickets::forget_all(app).map_err(|_| "the tickets were not forgotten")
@@ -136,6 +151,7 @@ impl Host {
                     Err(message) => fail("internal", message),
                 }
             }
+            _ => return None,
         }))
     }
 
@@ -144,7 +160,7 @@ impl Host {
             return fail("invalid_args", "this is app.buwiz.ebirforms");
         }
         // no check of `protocol` here: the Bot decides compatibility from
-        // the manifest's `protocol` (2.0.0)
+        // the manifest's `protocol` (1.0.0)
         let key = match PluginKey::from_provision(arguments) {
             Ok(key) => key,
             Err(message) => return fail("invalid_args", &message),

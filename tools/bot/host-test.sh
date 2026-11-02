@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Ported from Books' protocol-2.0 host test (cd3d8cf). The Bot checkout is
+# Ported from Books' host test (cd3d8cf), now at protocol 1.0. The Bot checkout is
 # read-only: a pinned worktree, broker data, trust and file keys live per run.
 # Usage: BUWIZ_BOT_DIR=/path/to/bot tools/bot/host-test.sh
-# Env: EBIRFORMS_HOST_PORT (>=8810, default 8811), KEEP_TMP=1 (keeps test keys).
+# Env: EBIRFORMS_HOST_PORT (>=8810, default 8811), KEEP_TMP=1 (keeps test keys),
+#      BUWIZ_BOT_COMMIT (default 0827b12b, buwiz-bot #102: protocol 1.0).
 set -euo pipefail
 export TMPDIR="${TMPDIR:-/tmp}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BOT_DIR="${BUWIZ_BOT_DIR:?set BUWIZ_BOT_DIR to the Bot test bench}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd -P)"
-BOT_COMMIT="2f93df804520738d32137668424427de70ee85ee"
+BOT_COMMIT="${BUWIZ_BOT_COMMIT:-0827b12ba2fb71fa2546af81451c321adac97f43}"
 PORT="${EBIRFORMS_HOST_PORT:-8811}"
 KEY_ID="ebirforms-test-01"
 PLUGIN_ID="app.buwiz.ebirforms"

@@ -6,7 +6,7 @@
 # It prints one line per gate and a summary, keeps each gate's output in a
 # temp folder, and exits non-zero when any gate fails.
 #
-# Env: BUWIZ_BOT_DIR  a Buwiz Bot checkout at protocol 2.0 for the conformance runner
+# Env: BUWIZ_BOT_DIR  a Buwiz Bot checkout at protocol 1.0 for the conformance runner
 #      SKIP_BOT=1     skip both Bot gates (no Bot checkout at hand); the
 #                     summary says so, and the run cannot pass
 set -uo pipefail

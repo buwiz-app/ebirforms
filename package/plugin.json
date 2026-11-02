@@ -1,0 +1,24 @@
+{
+  "name": "buwiz-ebirforms",
+  "version": "0.3.0",
+  "description": "Philippine BIR returns in Buwiz Bot: taxpayer profiles, the filing calendar and forms checked with the official rules, kept on this computer.",
+  "author": { "name": "Buwiz" },
+  "homepage": "https://github.com/buwiz-app/ebirforms",
+  "mcpServers": {
+    "ebirforms": {
+      "command": "${PLUGIN_ROOT}/bin/ebirforms-mini-app",
+      "args": ["mcp"],
+      "env": { "EBIRFORMS_MANIFEST": "${PLUGIN_ROOT}/bin/app.buwiz.ebirforms.manifest.json" }
+    }
+  },
+  "buwiz": {
+    "protocol": "1.0.0",
+    "id": "app.buwiz.ebirforms",
+    "short": "ebirforms",
+    "version": "0.3.0",
+    "server": "ebirforms",
+    "files": {},
+    "binaries": {},
+    "publisher": { "id": "app.buwiz", "key_id": "gc-2026-01" }
+  }
+}

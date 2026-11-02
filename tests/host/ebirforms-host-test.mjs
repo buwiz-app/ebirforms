@@ -125,7 +125,7 @@ async function main() {
     const inspect = await post("/v1/host/plugins/inspect", spec);
     check("inspect verifies the signed eBIRForms manifest under the test key", inspect.status === 200
       && inspect.json.ok === true && inspect.json.manifest?.id === PLUGIN
-      && inspect.json.manifest?.protocol === "2.0.0"
+      && inspect.json.manifest?.protocol === "1.0.0"
       && inspect.json.manifest?.publisher?.key_id === "ebirforms-test-01"
       && /^[0-9a-f]{64}$/.test(inspect.json.manifest_sha256));
     const install = await post("/v1/host/plugins/install", { ...spec, manifest_sha256: inspect.json.manifest_sha256 });

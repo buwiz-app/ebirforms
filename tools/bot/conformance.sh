@@ -9,7 +9,7 @@
 #   4. a per-run trust file mapping a TEST key id to that key, approving
 #      app.buwiz.ebirforms under it (never gc-2026-01);
 #   5. the manifest generated under the test key id and signed with the test
-#      key file (--key-file, never --keychain) by `rox-broker sign-manifest`
+#      key file (--key-file, never --keychain) by `buwiz-broker sign-manifest`
 #      when BUWIZ_BROKER_BIN names a broker build, else by the Bot's
 #      server/src/v1/sign-manifest.mjs (same arguments, byte-identical output);
 #   then buwiz-plugin-test --manifest <signed> --key-file <test key>, whose
@@ -21,8 +21,8 @@
 #
 # Usage: tools/bot/conformance.sh [extra buwiz-plugin-test args, e.g. --json]
 # Env:   BUWIZ_BOT_DIR (default /Volumes/goldcoders/Projects/rox): a Buwiz Bot
-#          checkout at protocol 2.0 (main ca7a1dd1 or later)
-#        BUWIZ_BROKER_BIN (a rox-broker binary from buwiz-bot main; signs in place
+#          checkout at protocol 1.0 (buwiz-bot #102 or later)
+#        BUWIZ_BROKER_BIN (a buwiz-broker binary from buwiz-bot; signs in place
 #          of server/src/v1/sign-manifest.mjs)
 #        EBIRFORMS_TEST_KEY_ID (default ebirforms-test-01)
 #        KEEP_TMP=1 keeps the temp dir (it holds a test key; delete it after)
@@ -47,7 +47,7 @@ if [ "$KEY_ID" = "gc-2026-01" ]; then
   exit 2
 fi
 for f in "$RUNNER" ${SIGNER:+"$SIGNER"}; do
-  [ -f "$f" ] || { echo "conformance: $f not found (set BUWIZ_BOT_DIR to a Bot checkout at protocol 2.0, or BUWIZ_BROKER_BIN for the signer)" >&2; exit 2; }
+  [ -f "$f" ] || { echo "conformance: $f not found (set BUWIZ_BOT_DIR to a Bot checkout at protocol 1.0, or BUWIZ_BROKER_BIN for the signer)" >&2; exit 2; }
 done
 command -v node >/dev/null || { echo "conformance: node is needed to run the Bot's tools" >&2; exit 2; }
 [ -d "$BOT_DIR/server/node_modules/@modelcontextprotocol/sdk" ] && [ -d "$BOT_DIR/server/node_modules/esbuild" ] || {

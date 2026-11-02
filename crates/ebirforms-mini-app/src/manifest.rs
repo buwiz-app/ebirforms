@@ -29,11 +29,12 @@ use crate::server::{
     PAYMENTS_LIST, PRINT_PREVIEW, RESOLVE, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
-pub(crate) const PROTOCOL: &str = "2.0.0";
+/// The protocol this plugin speaks: the SDK's (1.0.0).
+pub(crate) const PROTOCOL: &str = buwiz_plugin::manifest::PROTOCOL;
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
-/// The first version under the plugin id `app.buwiz.ebirforms`.
-pub(crate) const VERSION: &str = "0.2.0";
+/// The first protocol 1.0 release of `app.buwiz.ebirforms`.
+pub(crate) const VERSION: &str = "0.3.0";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -431,6 +432,33 @@ pub(crate) fn permissions_digest(app: &Value) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// package/plugin.json is the release template `ebirforms-mini-app
+    /// package` fills; the SDK refuses one that disagrees with the signed
+    /// manifest, so a version bump has to touch both.
+    #[test]
+    fn the_package_template_matches_the_manifest() {
+        let plugin: Value =
+            serde_json::from_str(include_str!("../../../package/plugin.json")).unwrap();
+        let m = unsigned();
+        let block = &plugin["buwiz"];
+        assert_eq!(block["protocol"], "1.0.0");
+        for key in ["protocol", "id", "short", "version"] {
+            assert_eq!(block[key], m[key], "buwiz.{key}");
+        }
+        assert_eq!(block["publisher"]["key_id"], RELEASE_KEY_ID);
+        assert_eq!(plugin["version"], m["version"]);
+        let server = block["server"].as_str().unwrap();
+        let entry = &plugin["mcpServers"][server];
+        assert_eq!(entry["command"], "${PLUGIN_ROOT}/bin/ebirforms-mini-app");
+        assert_eq!(entry["args"], json!(["mcp"]));
+        assert_eq!(
+            entry["env"][MANIFEST_ENV],
+            format!("${{PLUGIN_ROOT}}/bin/{MANIFEST_FILE}")
+        );
+        assert_eq!(block["files"], json!({}));
+        assert_eq!(block["binaries"], json!({}));
+    }
 
     #[test]
     fn the_manifest_keeps_the_plugin_id_and_lists_every_app() {
