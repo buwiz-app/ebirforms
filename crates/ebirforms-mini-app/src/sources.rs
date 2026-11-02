@@ -299,11 +299,15 @@ impl Sources {
     }
 
     /// The box still holds the value it was filled with.
-    pub fn holds(&self, source: &Source, key: &str, value: Option<&String>) -> bool {
-        value.is_some_and(|value| {
-            self.value_mac(key, value)
-                .is_some_and(|mac| mac == source.value_mac)
-        })
+    /// `Some(true)` the box still holds the value it was filled with,
+    /// `Some(false)` it holds another (or none), `None` it can't be told (no
+    /// key for the sources file).
+    pub fn holds(&self, source: &Source, key: &str, value: Option<&String>) -> Option<bool> {
+        let Some(value) = value else {
+            return Some(false);
+        };
+        self.value_mac(key, value)
+            .map(|mac| mac == source.value_mac)
     }
 
     /// The name a stored return goes by in the file.
@@ -337,15 +341,16 @@ impl Sources {
         }
     }
 
-    /// The boxes' sources a stored return was saved with (none when the
-    /// file or the key cannot be read; that is logged).
+    /// The boxes' sources a stored return was saved with: none when it has
+    /// none (or the folder has no key yet), an error when the file or the key
+    /// can't be read.
     pub fn load(
         &self,
         tin: &str,
         form: &str,
         year: i64,
         stored_period: i64,
-    ) -> BTreeMap<String, Source> {
+    ) -> std::io::Result<BTreeMap<String, Source>> {
         let entry = self.key(false).map(|key| {
             key.map(|key| {
                 (
@@ -354,15 +359,12 @@ impl Sources {
                 )
             })
         });
-        let (id, all) = match entry {
-            Ok(Some((id, Ok(all)))) => (id, all),
-            Ok(None) => return BTreeMap::new(),
-            Ok(Some((_, Err(error)))) | Err(error) => {
-                tracing::warn!("the boxes' sources were not read: {error}");
-                return BTreeMap::new();
-            }
+        let (id, all) = match entry? {
+            Some((id, all)) => (id, all?),
+            None => return Ok(BTreeMap::new()),
         };
-        all.get(&id)
+        Ok(all
+            .get(&id)
             .and_then(|entry| entry.get("boxes"))
             .and_then(Value::as_object)
             .map(|boxes| {
@@ -371,7 +373,7 @@ impl Sources {
                     .filter_map(|(key, value)| Some((key.clone(), Source::from_stored(value)?)))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Replace a stored return's sources (none removes its entry), under the
@@ -548,19 +550,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sources = Sources::in_dir(dir.path());
         assert!(
-            sources.load(TIN, "2551Q", 2026, 3).is_empty(),
+            sources.load(TIN, "2551Q", 2026, 3).unwrap().is_empty(),
             "no key yet, no sources"
         );
         let kept = boxes(&sources, "290,000.00");
         sources.save(TIN, "2551Q", 2026, 3, &kept).unwrap();
         // a new process: the same key from the file
         let again = Sources::in_dir(dir.path());
-        let loaded = again.load(TIN, "2551Q", 2026, 3);
+        let loaded = again.load(TIN, "2551Q", 2026, 3).unwrap();
         assert_eq!(loaded, kept);
         let source = &loaded["txtATCAmt1"];
-        assert!(again.holds(source, "txtATCAmt1", Some(&"290,000.00".to_string())));
-        assert!(!again.holds(source, "txtATCAmt1", Some(&"1.00".to_string())));
-        assert!(!again.holds(source, "txtATCAmt1", None));
+        assert_eq!(
+            again.holds(source, "txtATCAmt1", Some(&"290,000.00".to_string())),
+            Some(true)
+        );
+        assert_eq!(
+            again.holds(source, "txtATCAmt1", Some(&"1.00".to_string())),
+            Some(false)
+        );
+        assert_eq!(again.holds(source, "txtATCAmt1", None), Some(false));
         // nothing in the file names the return or the value without the key
         let text = fs::read_to_string(dir.path().join(FILE)).unwrap();
         let plain = |parts: &[&str]| {
@@ -585,8 +593,8 @@ mod tests {
         // another return's entry is kept; an empty save removes this one
         again.save(TIN, "2551Q", 2026, 2, &kept).unwrap();
         again.save(TIN, "2551Q", 2026, 3, &BTreeMap::new()).unwrap();
-        assert!(again.load(TIN, "2551Q", 2026, 3).is_empty());
-        assert_eq!(again.load(TIN, "2551Q", 2026, 2).len(), 1);
+        assert!(again.load(TIN, "2551Q", 2026, 3).unwrap().is_empty());
+        assert_eq!(again.load(TIN, "2551Q", 2026, 2).unwrap().len(), 1);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -605,13 +613,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(KEY_FILE), "").unwrap();
         let sources = Sources::in_dir(dir.path());
-        assert!(sources.load(TIN, "2551Q", 2026, 3).is_empty());
+        assert!(sources.load(TIN, "2551Q", 2026, 3).unwrap().is_empty());
         let kept = boxes(&sources, "1.00");
         sources.save(TIN, "2551Q", 2026, 3, &kept).unwrap();
         let key = fs::read_to_string(dir.path().join(KEY_FILE)).unwrap();
         assert_eq!(key.trim().len(), 64);
         assert_eq!(
-            Sources::in_dir(dir.path()).load(TIN, "2551Q", 2026, 3),
+            Sources::in_dir(dir.path())
+                .load(TIN, "2551Q", 2026, 3)
+                .unwrap(),
             kept
         );
     }
@@ -638,6 +648,7 @@ mod tests {
         assert!(
             Sources::in_dir(dir.path())
                 .load(TIN, "2551Q", 2026, 3)
+                .unwrap()
                 .is_empty()
         );
         fs::remove_dir(&temp).unwrap();
@@ -654,7 +665,10 @@ mod tests {
             fs::read_to_string(dir.path().join(FILE)).unwrap(),
             "{not json"
         );
-        assert!(sources.load(TIN, "2551Q", 2026, 3).is_empty());
+        assert!(
+            sources.load(TIN, "2551Q", 2026, 3).is_err(),
+            "an unreadable file is an error, not none"
+        );
     }
 
     #[test]
@@ -679,7 +693,11 @@ mod tests {
             thread.join().unwrap();
         }
         for period in 1..=8 {
-            assert_eq!(first.load(TIN, "1601C", 2026, period).len(), 1, "{period}");
+            assert_eq!(
+                first.load(TIN, "1601C", 2026, period).unwrap().len(),
+                1,
+                "{period}"
+            );
         }
     }
 

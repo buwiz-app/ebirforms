@@ -19,7 +19,7 @@
 //! runs. eBIRForms shares the database with this mini app's other processes
 //! ([`crate::owner`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -144,9 +144,12 @@ struct OpenForm {
     /// Each filled box's source ([`crate::sources`]), loaded with a saved
     /// return and kept with it on save.
     sources: BTreeMap<String, Source>,
-    /// A box filled since the last save got no source (no key for the
-    /// sources file); the next save answers `sources_kept: false`.
-    sources_lost: bool,
+    /// The boxes the assistant filled on this open return and that still
+    /// hold that value: each must have a source for a save to say
+    /// `sources_kept: true`.
+    filled: BTreeSet<String>,
+    /// The saved sources could not be read when the return opened.
+    unread: bool,
 }
 
 pub struct Server {
@@ -599,20 +602,10 @@ impl Server {
             "boxes": opened.values.len(),
             "errors": opened.errors.len(),
         });
-        let sources = if opened.sample {
-            BTreeMap::new()
+        let (sources, unread) = if opened.sample {
+            (BTreeMap::new(), false)
         } else {
-            let mut sources = self.sources.load(
-                &tin,
-                form,
-                opened.year,
-                opened.stored_period.unwrap_or(opened.period),
-            );
-            sources.retain(|key, source| {
-                self.sources
-                    .holds(source, key, held_value(form, key, &opened.values).as_ref())
-            });
-            sources
+            self.saved_sources(&tin, form, &opened)
         };
         self.form = Some(OpenForm {
             tin,
@@ -620,9 +613,35 @@ impl Server {
             opened,
             dirty: false,
             sources,
-            sources_lost: false,
+            filled: BTreeSet::new(),
+            unread,
         });
         Ok(summary)
+    }
+
+    /// A saved return's boxes' sources that still hold, and whether they
+    /// could not be read.
+    fn saved_sources(
+        &self,
+        tin: &str,
+        form: &str,
+        opened: &OpenedReturn,
+    ) -> (BTreeMap<String, Source>, bool) {
+        let stored_period = opened.stored_period.unwrap_or(opened.period);
+        match self.sources.load(tin, form, opened.year, stored_period) {
+            Ok(mut sources) => {
+                sources.retain(|key, source| {
+                    self.sources
+                        .holds(source, key, held_value(form, key, &opened.values).as_ref())
+                        == Some(true)
+                });
+                (sources, false)
+            }
+            Err(error) => {
+                tracing::warn!("the boxes' sources were not read: {error}");
+                (BTreeMap::new(), true)
+            }
+        }
     }
 
     fn form_fields(&self, arguments: &Map<String, Value>) -> Result<Value, String> {
@@ -652,7 +671,7 @@ impl Server {
             "editable": opened.editable,
             "values": pick(&with_group_values(&form.form, &opened.values)),
             "sources": form.sources.iter()
-                .filter(|(key, source)| keys.as_ref().is_none_or(|keys| keys.contains(key)) && self.sources.holds(source, key, held_value(&form.form, key, &opened.values).as_ref()))
+                .filter(|(key, source)| keys.as_ref().is_none_or(|keys| keys.contains(key)) && self.sources.holds(source, key, held_value(&form.form, key, &opened.values).as_ref()) == Some(true))
                 .map(|(key, source)| (key.clone(), source.shown()))
                 .collect::<Map<String, Value>>(),
             "locked": pick(&opened.locks),
@@ -736,11 +755,13 @@ impl Server {
             match (given, held) {
                 (None, _) => {
                     form.sources.remove(key);
+                    form.filled.remove(key);
                     filled_keys.push(key);
                 }
                 (Some(given), Some(held)) if sources::same_value(&given, &held) => {
                     // without a key for the sources file the box is filled
                     // but has no source; save_draft then says sources_kept: false
+                    form.filled.insert(key.clone());
                     match self.sources.value_mac(key, &held) {
                         Some(value_mac) => {
                             form.sources.insert(
@@ -755,13 +776,13 @@ impl Server {
                         }
                         None => {
                             form.sources.remove(key);
-                            form.sources_lost = true;
                         }
                     }
                     filled_keys.push(key);
                 }
                 (Some(_), held) => {
                     form.sources.remove(key);
+                    form.filled.remove(key);
                     not_kept.insert(key.clone(), json!(held.unwrap_or_default()));
                 }
             }
@@ -820,32 +841,71 @@ impl Server {
             form.opened.status = status.clone();
         }
         form.dirty = false;
-        // the boxes' sources go with the saved return
+        // the boxes' sources go with the saved return. A save keeps them
+        // when every box the assistant filled still has its source, the saved
+        // ones could be read, and the file took the write.
+        if form.unread {
+            // read them now, or leave the file as it is
+            let opened = &form.opened;
+            let store = &self.sources;
+            match store.load(
+                &form.tin,
+                &form.form,
+                opened.year,
+                opened.stored_period.unwrap_or(opened.period),
+            ) {
+                Ok(saved) => {
+                    // a box filled on this open answers for itself
+                    for (key, source) in saved {
+                        if !form.filled.contains(&key) {
+                            form.sources.entry(key).or_insert(source);
+                        }
+                    }
+                    form.unread = false;
+                }
+                Err(error) => tracing::warn!("the boxes' sources were not read: {error}"),
+            }
+        }
         let opened = &form.opened;
         let code = form.form.as_str();
         let store = &self.sources;
+        let filled = &mut form.filled;
         form.sources.retain(|key, source| {
-            store.holds(source, key, held_value(code, key, &opened.values).as_ref())
+            match store.holds(source, key, held_value(code, key, &opened.values).as_ref()) {
+                Some(true) => true,
+                // another value now: it was not this fill's any more
+                Some(false) => {
+                    filled.remove(key);
+                    false
+                }
+                // can't be told: the box stays filled without a source
+                None => false,
+            }
         });
-        let saved_sources = store.save(
-            &form.tin,
-            &form.form,
-            opened.year,
-            saved
-                .stored_period
-                .or(opened.stored_period)
-                .unwrap_or(opened.period),
-            &form.sources,
-        );
-        let sources_kept = match saved_sources {
-            Ok(()) => !form.sources_lost,
+        let written = if form.unread {
+            Err(std::io::Error::other(
+                "the saved sources could not be read; the file is left as it is",
+            ))
+        } else {
+            store.save(
+                &form.tin,
+                &form.form,
+                opened.year,
+                saved
+                    .stored_period
+                    .or(opened.stored_period)
+                    .unwrap_or(opened.period),
+                &form.sources,
+            )
+        };
+        let all_held = form.filled.iter().all(|key| form.sources.contains_key(key));
+        let sources_kept = match written {
+            Ok(()) => all_held,
             Err(error) => {
                 tracing::warn!("the boxes' sources were not kept: {error}");
                 false
             }
         };
-        // a later save answers for the fills after this one
-        form.sources_lost = false;
         let mut answer = json!({ "saved": true, "id": saved.id, "status": form.opened.status, "sources_kept": sources_kept });
         if !sources_kept {
             answer["sources_note"] = json!(SOURCES_LOST);

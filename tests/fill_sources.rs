@@ -398,6 +398,47 @@ fn filled_boxes_keep_their_source_and_books_hand_offs_fill_as_they_are() {
     );
     assert_eq!(fields["sources"], json!({}), "{fields}");
 
+    // a box filled while the key can't be read has no source, and every
+    // save says so until it is filled again
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        bot.agent("ebirforms_form_dismiss", json!({}));
+        let key_file = dir.path().join("fill-sources.key");
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut bot = Bot::start(&app, &path);
+        let ticket = bot.taxpayer();
+        bot.agent("ebirforms_form_open", open_args(&q3, &ticket));
+        let filled = bot.agent(
+            "ebirforms_form_fill",
+            json!({ "fields": { "txtATCAmt1": "293000.00" }, "source": "ai" }),
+        );
+        assert_eq!(filled["filled"], json!(["txtATCAmt1"]), "{filled}");
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for save in 1..=2 {
+            let saved = bot.agent("ebirforms_form_save_draft", json!({}));
+            assert_eq!(saved["sources_kept"], false, "save {save}: {saved}");
+            assert!(saved["sources_note"].is_string(), "save {save}: {saved}");
+        }
+        // the card answer saved earlier came back with the re-read
+        let fields = bot.agent(
+            "ebirforms_form_fields",
+            json!({ "keys": ["txtATCAmt1", "frm2551Qv2018:txt15"] }),
+        );
+        assert_eq!(
+            fields["sources"],
+            json!({ "frm2551Qv2018:txt15": { "source": "user", "from_card": true } }),
+            "{fields}"
+        );
+        bot.agent(
+            "ebirforms_form_fill",
+            json!({ "fields": { "txtATCAmt1": "293000.00" }, "source": "ai" }),
+        );
+        let saved = bot.agent("ebirforms_form_save_draft", json!({}));
+        assert_eq!(saved["sources_kept"], true, "{saved}");
+        bot.agent("ebirforms_form_dismiss", json!({}));
+    }
+
     // the sources file holds no TIN and no amount (its names are keyed by
     // fill-sources.key; sources.rs tests that unkeyed hashes don't match)
     assert!(dir.path().join("fill-sources.key").is_file());
