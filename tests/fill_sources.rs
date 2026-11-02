@@ -11,30 +11,30 @@
 //!   `BOOKS_DIR` set, the files are also compared with the Books checkout's.
 //!   `EBIRFORMS_WRITE_HANDOFF_SCHEMA=1` rewrites the schema file.
 //!
-//! One test: the database handle and the key are process-wide.
-
-#![allow(unsafe_code)] // the test sets the process env, as main does
+//! One test: the database handle and the key are process-wide, set up by
+//! `owner::prepare` as `main` does.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bir_app_core::{BirApp, BranchFacts, FieldValue, NewTaxpayer, OpenReturn};
-use ebirforms_mini_app::{ManifestSource, Server, same_value, shown_amount};
+use ebirforms_mini_app::{ManifestSource, Server, owner, same_value, shown_amount};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const TEST_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const ROOT: &str = "000123453";
 
 /// The hand-offs, in Books' order.
 const FIXTURES: [&str; 3] = ["2551q.json", "1601c.json", "1701ms.json"];
 const SCHEMA_FILE: &str = "form-tools.schema.json";
+/// Amounts as a form shows them; `sources.rs` tests `shown_amount` against it.
+const AMOUNTS_FILE: &str = "amounts.json";
 
-/// SHA-256 over the four files (names sorted, each `name\0bytes\0`). The same
+/// SHA-256 over the five files (names sorted, each `name\0bytes\0`). The same
 /// constant is in Books' `tests/handoff_contract.rs`.
-const CONTRACT_SHA256: &str = "101d25a3f8197376de3368122ce23de1accfb394df444356317da7cbda74be77";
+const CONTRACT_SHA256: &str = "f5bdd660adf30fc98d65f7e5b950fca059afef5fbb483d1a0a8e6da003e721bd";
 
 struct Bot {
     server: Server,
@@ -133,6 +133,7 @@ fn fixture(name: &str) -> Value {
 fn contract_sha256(dir: &Path) -> String {
     let mut names: Vec<&str> = FIXTURES.to_vec();
     names.push(SCHEMA_FILE);
+    names.push(AMOUNTS_FILE);
     names.sort_unstable();
     let mut hash = Sha256::new();
     for name in names {
@@ -180,14 +181,11 @@ fn open_args(handoff: &Value, ticket: &str) -> Value {
 }
 
 #[test]
+#[allow(unsafe_code)] // owner::prepare sets the process env, as main does
 fn filled_boxes_keep_their_source_and_books_hand_offs_fill_as_they_are() {
-    // SAFETY: set before any thread of this test reads them (one test per process).
-    unsafe {
-        std::env::set_var("BUWIZ_DB_KEY", TEST_KEY);
-        std::env::set_var("BUWIZ_NO_KEYCHAIN", "1");
-    }
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ebirforms.db");
+    // SAFETY: the only test in this process, before any thread reads the env.
+    let path = unsafe { owner::prepare(dir.path()) }.unwrap();
     let app = Arc::new(BirApp::open_at(&path).unwrap());
     let tin = app
         .create_taxpayer(&NewTaxpayer {

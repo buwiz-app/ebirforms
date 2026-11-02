@@ -51,7 +51,8 @@ pub struct Source {
     pub label: String,
     /// The `source_ref` the fill carried, already checked.
     pub reference: Option<Map<String, Value>>,
-    /// True when the person's answer on a card came through the assistant.
+    /// The assistant said this is the person's answer on a card. Trusted as
+    /// stated: eBIRForms has no record of card answers to check it against.
     pub from_card: bool,
     /// [`Sources::value_mac`] of the value eBIRForms holds after the fill.
     pub value_mac: String,
@@ -208,30 +209,22 @@ impl Sources {
         }
     }
 
-    /// The folder's key: read, or made (0600) when `make` and there is none.
-    fn key(&self, make: bool) -> std::io::Result<Option<&[u8; 32]>> {
-        if let Some(key) = self.key.get() {
-            return Ok(Some(key));
-        }
-        let path = self.dir.join(KEY_FILE);
-        let text = match fs::read_to_string(&path) {
+    /// The folder's lock, held until the file it answers is dropped.
+    fn lock(&self) -> std::io::Result<File> {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join(LOCK_FILE))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    /// The key file's key: none when it is missing or empty.
+    fn read_key(&self) -> std::io::Result<Option<[u8; 32]>> {
+        let text = match fs::read_to_string(self.dir.join(KEY_FILE)) {
+            Ok(text) if text.trim().is_empty() => return Ok(None),
             Ok(text) => text,
-            Err(error) if error.kind() == ErrorKind::NotFound && make => {
-                let mut bytes = [0u8; 32];
-                getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
-                match private_file(&path, true) {
-                    Ok(mut file) => {
-                        file.write_all(hex::encode(bytes).as_bytes())?;
-                        file.sync_all()?;
-                        hex::encode(bytes)
-                    }
-                    // another process made it first
-                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                        fs::read_to_string(&path)?
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
@@ -242,7 +235,45 @@ impl Sources {
                 "the sources key is not 64 hex digits",
             )
         })?;
-        Ok(Some(self.key.get_or_init(|| key)))
+        Ok(Some(key))
+    }
+
+    /// The folder's key: read, or, when `make` and there is none, made under
+    /// the lock.
+    fn key(&self, make: bool) -> std::io::Result<Option<&[u8; 32]>> {
+        if let Some(key) = self.key.get() {
+            return Ok(Some(key));
+        }
+        if let Some(key) = self.read_key()? {
+            return Ok(Some(self.key.get_or_init(|| key)));
+        }
+        if !make {
+            return Ok(None);
+        }
+        let _lock = self.lock()?;
+        self.key_locked().map(Some)
+    }
+
+    /// With the lock held: the key, made when there is none. A new key is
+    /// written to a temp file and renamed into place, so no reader sees it
+    /// half written; a key file left empty is made again.
+    fn key_locked(&self) -> std::io::Result<&[u8; 32]> {
+        if let Some(key) = self.key.get() {
+            return Ok(key);
+        }
+        if let Some(key) = self.read_key()? {
+            return Ok(self.key.get_or_init(|| key));
+        }
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).map_err(std::io::Error::other)?;
+        let path = self.dir.join(KEY_FILE);
+        let temp = path.with_extension(format!("key.{}.tmp", std::process::id()));
+        let mut file = private_file(&temp, false)?;
+        file.write_all(hex::encode(key).as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, &path)?;
+        Ok(self.key.get_or_init(|| key))
     }
 
     fn mac(key: &[u8; 32], parts: &[&str]) -> String {
@@ -275,20 +306,18 @@ impl Sources {
         })
     }
 
-    /// The name a stored return goes by in the file; `None` without a key.
-    fn return_id(
-        &self,
-        make: bool,
-        tin: &str,
-        form: &str,
-        year: i64,
-        stored_period: i64,
-    ) -> std::io::Result<Option<String>> {
-        let year = year.to_string();
-        let period = stored_period.to_string();
-        Ok(self
-            .key(make)?
-            .map(|secret| Self::mac(secret, &["return", tin, form, &year, &period])))
+    /// The name a stored return goes by in the file.
+    fn return_id(key: &[u8; 32], tin: &str, form: &str, year: i64, stored_period: i64) -> String {
+        Self::mac(
+            key,
+            &[
+                "return",
+                tin,
+                form,
+                &year.to_string(),
+                &stored_period.to_string(),
+            ],
+        )
     }
 
     /// The file's entries: none when it does not exist; an error when it
@@ -317,9 +346,14 @@ impl Sources {
         year: i64,
         stored_period: i64,
     ) -> BTreeMap<String, Source> {
-        let entry = self
-            .return_id(false, tin, form, year, stored_period)
-            .map(|id| id.map(|id| (id, self.read_all())));
+        let entry = self.key(false).map(|key| {
+            key.map(|key| {
+                (
+                    Self::return_id(key, tin, form, year, stored_period),
+                    self.read_all(),
+                )
+            })
+        });
         let (id, all) = match entry {
             Ok(Some((id, Ok(all)))) => (id, all),
             Ok(None) => return BTreeMap::new(),
@@ -341,7 +375,9 @@ impl Sources {
     }
 
     /// Replace a stored return's sources (none removes its entry), under the
-    /// folder's lock.
+    /// folder's lock. The old entry is removed first, in a write of its own:
+    /// if writing the new one then fails, no older source comes back on
+    /// reopen.
     pub fn save(
         &self,
         tin: &str,
@@ -350,40 +386,38 @@ impl Sources {
         stored_period: i64,
         sources: &BTreeMap<String, Source>,
     ) -> std::io::Result<()> {
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.dir.join(LOCK_FILE))?;
-        lock.lock()?;
-        let Some(id) = self.return_id(true, tin, form, year, stored_period)? else {
-            return Err(std::io::Error::other("no key for the boxes' sources"));
-        };
+        let _lock = self.lock()?;
+        let id = Self::return_id(self.key_locked()?, tin, form, year, stored_period);
         let mut all = self.read_all()?;
-        if sources.is_empty() {
-            if all.remove(&id).is_none() {
-                return Ok(());
-            }
-        } else {
-            let boxes: Map<String, Value> = sources
-                .iter()
-                .map(|(key, source)| (key.clone(), source.stored()))
-                .collect();
-            let saved_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
-            all.insert(id, json!({ "saved_ms": saved_ms, "boxes": boxes }));
+        if all.remove(&id).is_some() {
+            self.write_all(&all, "clear")?;
         }
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let boxes: Map<String, Value> = sources
+            .iter()
+            .map(|(key, source)| (key.clone(), source.stored()))
+            .collect();
+        let saved_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        all.insert(id, json!({ "saved_ms": saved_ms, "boxes": boxes }));
         prune(&mut all, MAX_RETURNS);
-        let text = serde_json::to_string(&Value::Object(all))?;
+        self.write_all(&all, "save")
+    }
+
+    /// With the lock held: the file, through a temp file (named for the
+    /// `step`) and a rename.
+    fn write_all(&self, all: &Map<String, Value>, step: &str) -> std::io::Result<()> {
+        let text = serde_json::to_string(all)?;
         let path = self.dir.join(FILE);
-        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let temp = path.with_extension(format!("json.{}.{step}.tmp", std::process::id()));
         let mut file = private_file(&temp, false)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temp, &path)
-        // the lock goes with `lock`
     }
 }
 
@@ -470,6 +504,21 @@ mod tests {
     }
 
     #[test]
+    fn amounts_read_as_the_shared_vectors_say() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/books-handoff/amounts.json"
+        );
+        let vectors: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let vectors = vectors["vectors"].as_array().unwrap();
+        assert!(vectors.len() > 20);
+        for v in vectors {
+            let shown = v["shown"].as_str().unwrap();
+            assert_eq!(shown_amount(shown), v["centavos"].as_i64(), "{shown:?}");
+        }
+    }
+
+    #[test]
     fn amounts_compare_as_a_form_shows_them() {
         for (given, held) in [
             ("290000.00", "290,000.00"),
@@ -549,6 +598,49 @@ mod tests {
                 assert_eq!(mode & 0o777, 0o600, "{file}");
             }
         }
+    }
+
+    #[test]
+    fn an_empty_key_file_is_made_again() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(KEY_FILE), "").unwrap();
+        let sources = Sources::in_dir(dir.path());
+        assert!(sources.load(TIN, "2551Q", 2026, 3).is_empty());
+        let kept = boxes(&sources, "1.00");
+        sources.save(TIN, "2551Q", 2026, 3, &kept).unwrap();
+        let key = fs::read_to_string(dir.path().join(KEY_FILE)).unwrap();
+        assert_eq!(key.trim().len(), 64);
+        assert_eq!(
+            Sources::in_dir(dir.path()).load(TIN, "2551Q", 2026, 3),
+            kept
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_leaves_no_old_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = Sources::in_dir(dir.path());
+        let kept = boxes(&sources, "1.00");
+        sources.save(TIN, "2551Q", 2026, 3, &kept).unwrap();
+        // writing the new entry fails (its temp file can't be made)
+        let temp = dir
+            .path()
+            .join(FILE)
+            .with_extension(format!("json.{}.save.tmp", std::process::id()));
+        fs::create_dir(&temp).unwrap();
+        assert!(
+            sources
+                .save(TIN, "2551Q", 2026, 3, &boxes(&sources, "2.00"))
+                .is_err()
+        );
+        // the old entry went first, so nothing older comes back on reopen
+        assert!(
+            Sources::in_dir(dir.path())
+                .load(TIN, "2551Q", 2026, 3)
+                .is_empty()
+        );
+        fs::remove_dir(&temp).unwrap();
     }
 
     #[test]

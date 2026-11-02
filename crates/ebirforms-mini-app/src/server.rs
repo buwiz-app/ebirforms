@@ -144,7 +144,8 @@ struct OpenForm {
     /// Each filled box's source ([`crate::sources`]), loaded with a saved
     /// return and kept with it on save.
     sources: BTreeMap<String, Source>,
-    /// A filled box's source could not be kept (no key for the sources file).
+    /// A box filled since the last save got no source (no key for the
+    /// sources file); the next save answers `sources_kept: false`.
     sources_lost: bool,
 }
 
@@ -843,6 +844,8 @@ impl Server {
                 false
             }
         };
+        // a later save answers for the fills after this one
+        form.sources_lost = false;
         let mut answer = json!({ "saved": true, "id": saved.id, "status": form.opened.status, "sources_kept": sources_kept });
         if !sources_kept {
             answer["sources_note"] = json!(SOURCES_LOST);

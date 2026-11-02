@@ -29,7 +29,8 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    not known and never suggest resending. Nothing is paid from here. Tests and benches send only to a local dry-run
    server (`EBIRFORMS_ACCOUNT_URL` on loopback): never a real return, never a real taxpayer.
 3. **Only `owner::prepare` is unsafe** (it sets the process environment before any thread starts). The workspace
-   denies `unsafe_code`.
+   denies `unsafe_code`; a test that needs the environment calls `owner::prepare` as `main` does, one test per process
+   (`mcp_contract` still sets two variables itself).
 4. **eBIRForms' crates by commit.** `bir-app-core` is pinned by SHA in the root `Cargo.toml`. Only its `BirApp`
    facade is a supported surface; `bir-core` internals change without notice.
 5. **TINs never leave as TINs.** Taxpayers reach the assistant and the apps as tickets (`tkt_…`). Never put a TIN, a
@@ -40,10 +41,12 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 7. **Each filled box keeps its source.** `ebirforms_form_fill`'s `source` (and `source_ref`) is kept per box
    (`sources.rs`), shown by `ebirforms_form_fields`, saved with the return, and dropped once the box holds another
    value. Returns and values are named only by HMACs under `fill-sources.key`, so the file alone gives no TIN and no
-   amount; saves hold `fill-sources.lock`, and an unreadable file is never overwritten. `user` is only a card answer
-   (`from_card`).
+   amount; saves hold `fill-sources.lock`, and an unreadable file is never overwritten. `user` needs `from_card: true`,
+   which is the assistant's word: eBIRForms has no record of card answers to check it against, so it labels a box
+   and proves nothing.
 8. **Books' hand-off is a contract.** `tests/fixtures/books-handoff/` is the same files as Books'
-   `tests/fixtures/handoff/` (one `books_handoff_get` payload per form and the two form tools' input schemas), pinned
+   `tests/fixtures/handoff/` (one `books_handoff_get` payload per form, the two form tools' input schemas and the shared
+   amount vectors `amounts.json`, which `shown_amount` must read as Books' `money::parse_shown` does), pinned
    by one hash in both repos (`tests/fill_sources.rs`). A change to `form_open` or `form_fill`'s schema changes it.
 
 ## Gates

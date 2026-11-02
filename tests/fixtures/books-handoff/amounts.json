@@ -1,0 +1,141 @@
+{
+  "about": "Amounts as a BIR form shows them, and what each is in centavos (null: not an amount). Books' money::parse_shown and eBIRForms' shown_amount must both give these.",
+  "vectors": [
+    {
+      "shown": "290000.00",
+      "centavos": 29000000
+    },
+    {
+      "shown": "290,000.00",
+      "centavos": 29000000
+    },
+    {
+      "shown": "1,200,000",
+      "centavos": 120000000
+    },
+    {
+      "shown": "1,200,000.00",
+      "centavos": 120000000
+    },
+    {
+      "shown": "10,000",
+      "centavos": 1000000
+    },
+    {
+      "shown": "999",
+      "centavos": 99900
+    },
+    {
+      "shown": "1",
+      "centavos": 100
+    },
+    {
+      "shown": "0",
+      "centavos": 0
+    },
+    {
+      "shown": "0.00",
+      "centavos": 0
+    },
+    {
+      "shown": "0.05",
+      "centavos": 5
+    },
+    {
+      "shown": "-2,808.40",
+      "centavos": -280840
+    },
+    {
+      "shown": "-0.05",
+      "centavos": -5
+    },
+    {
+      "shown": " 42,000 ",
+      "centavos": 4200000
+    },
+    {
+      "shown": "123,456,789.01",
+      "centavos": 12345678901
+    },
+    {
+      "shown": "",
+      "centavos": null
+    },
+    {
+      "shown": "true",
+      "centavos": null
+    },
+    {
+      "shown": "01/15/2026",
+      "centavos": null
+    },
+    {
+      "shown": "1,20,000",
+      "centavos": null
+    },
+    {
+      "shown": "12,0000.00",
+      "centavos": null
+    },
+    {
+      "shown": "0,100",
+      "centavos": null
+    },
+    {
+      "shown": "1.5",
+      "centavos": null
+    },
+    {
+      "shown": "1.505",
+      "centavos": null
+    },
+    {
+      "shown": "-0",
+      "centavos": null
+    },
+    {
+      "shown": "-0.00",
+      "centavos": null
+    },
+    {
+      "shown": ",100",
+      "centavos": null
+    },
+    {
+      "shown": "100,",
+      "centavos": null
+    },
+    {
+      "shown": "007",
+      "centavos": null
+    },
+    {
+      "shown": "1 000",
+      "centavos": null
+    },
+    {
+      "shown": "1_000",
+      "centavos": null
+    },
+    {
+      "shown": "+100",
+      "centavos": null
+    },
+    {
+      "shown": "1e3",
+      "centavos": null
+    },
+    {
+      "shown": "1,000.5",
+      "centavos": null
+    },
+    {
+      "shown": "--1",
+      "centavos": null
+    },
+    {
+      "shown": ".50",
+      "centavos": null
+    }
+  ]
+}
