@@ -18,17 +18,23 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 ## Invariants
 
 1. **Its own data.** The mini app keeps its own database in its own folder (`EBIRFORMS_DATA_DIR`, else the platform
-   data folder `app.buwiz.ebirforms`): `ebirforms.db`, a 0600 key file `ebirforms.key`, and `logs/`. It never reads
-   a keychain (`BUWIZ_NO_KEYCHAIN=1`) and never opens either eBIRForms desktop app's database. Old data comes in by
-   export.
-2. **No sending.** Nothing is queued, sent, filed or paid from here. Sending would need the desktop's keychain
-   entries.
+   data folder `app.buwiz.ebirforms`): `ebirforms.db`, a 0600 key file `ebirforms.key`, the Buwiz sign-in's tokens
+   and device key as 0600 files (`buwiz_submit_*.txt`), and `logs/`. It never reads a keychain
+   (`BUWIZ_NO_KEYCHAIN=1`) and never opens either eBIRForms desktop app's database. Old data comes in by export.
+2. **Only the person sends, from an app.** Queueing a return is an app-only tool (`Access::Queue` in `scope.rs`):
+   the agent, resolve and routine callers are refused it, and it needs a Buwiz sign-in (the Sign-in app,
+   `account.rs`). The queue sends through Buwiz's relay with eBIRForms' submission client (`buwiz-ebirforms`) and
+   keeps the signed receipt. Whether a return was a dry run is known only from its receipt; without one, say it is
+   not known and never suggest resending. Nothing is paid from here. Tests and benches send only to a local dry-run
+   server (`EBIRFORMS_ACCOUNT_URL` on loopback): never a real return, never a real taxpayer.
 3. **Only `owner::prepare` is unsafe** (it sets the process environment before any thread starts). The workspace
    denies `unsafe_code`.
 4. **eBIRForms' crates by commit.** `bir-app-core` is pinned by SHA in the root `Cargo.toml`. Only its `BirApp`
    facade is a supported surface; `bir-core` internals change without notice.
 5. **TINs never leave as TINs.** Taxpayers reach the assistant and the apps as tickets (`tkt_…`). Never put a TIN, a
-   ticket value or a key in a log, a title, a doc or a fixture.
+   ticket value or a key in a log, a title, a doc or a fixture. Fixtures are synthetic: never paste a real email,
+   receipt or return into one, even with the TIN changed (a real MyEG receipt in a `legacy/` test forced a history
+   rewrite before this repo went public).
 6. **One protocol version: 1.0.** No compatibility shims for older protocol versions or names.
 
 ## Gates
