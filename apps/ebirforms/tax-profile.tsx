@@ -10,12 +10,20 @@
 // switcher. Opening a return hands off to the BIR Forms mini app, on a ticket
 // for that branch (`ebirforms_ticket_issue`).
 //
+// New taxpayer (bir-shell's taxpayer.js openNewTaxpayer / createTaxpayer, as
+// the first mini app's register.tsx had it): from the header, or from the
+// empty state when the app opens on no taxpayer. eBIRForms checks each field
+// and writes the taxpayer with its 00000 head office
+// (`create_taxpayer`), then answers the new taxpayer's ticket, which this
+// app opens as that taxpayer's profile.
+//
 // Desktop-only pieces left out: profile export (host save dialog), the
 // right-panel quick edit (the section editors cover it), Recent, and "Use as
 // template" on a filed return (create_template_from_return is refused under a
 // taxpayer scope).
 
-import { signal, computed, resource, effect, cleanup, untracked, Text, View, Scroll, Input } from "nsh";
+import { signal, computed, resource, effect, cleanup, untracked, Text, View, Scroll } from "nsh";
+import { Input } from "nsh/base";
 import type { Signal, Accessor, JSX } from "nsh";
 import { buwiz } from "buwiz";
 
@@ -35,7 +43,7 @@ const TICKET = typeof PROPS.ticket === "string" ? PROPS.ticket : "";
 /** One BIR host function through its named tool (`ebirforms_app_<fn>`). */
 async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
   // a signed call carries whole numbers only: the arguments go as JSON text
-  const r: any = await buwiz.call(`ebirforms_app_${fn}`, TICKET ? { args_json: JSON.stringify(args), ticket: TICKET } : { args_json: JSON.stringify(args) });
+  const r: any = await buwiz.call!(`ebirforms_app_${fn}`, TICKET ? { args_json: JSON.stringify(args), ticket: TICKET } : { args_json: JSON.stringify(args) });
   return r?.result as T;
 }
 
@@ -63,6 +71,15 @@ interface Taxpayer {
   branches: Branch[];
 }
 type FieldUpdate = Partial<Record<BranchFieldName, string | null>>;
+/** The New taxpayer form, as `create_taxpayer` takes it. */
+interface NewTaxpayerInput {
+  tin_root: string;
+  name: string;
+  taxpayer_type: TaxpayerType;
+  head_office: BranchFacts;
+}
+/** What `create_taxpayer` answers: the new taxpayer's ticket, never its TIN. */
+interface CreatedTaxpayer { ticket: string; title: string }
 interface TaxYearBounds { min: number; max: number }
 interface AddedTaxYear { year: number; copied_from: number | null; forms: string[] }
 interface YearlyFormsChange { added: string[]; removed: string[]; forms: string[] }
@@ -122,6 +139,7 @@ interface ReturnRow {
 
 const api = {
   getTaxpayer: (root: string) => bir<Taxpayer | null>("get_taxpayer", root),
+  createTaxpayer: (input: NewTaxpayerInput) => bir<CreatedTaxpayer>("create_taxpayer", input),
   updateTaxpayer: (root: string, update: { name?: string; taxpayer_type?: TaxpayerType }) => bir<Taxpayer>("update_taxpayer", root, update),
   moveTaxpayerTin: (oldRoot: string, newRoot: string) => bir<Taxpayer>("move_taxpayer_tin", oldRoot, newRoot),
   createBranch: (root: string, input: { branch_code: string; name: string; fields?: FieldUpdate }) => bir<Branch>("create_branch", root, input),
@@ -159,11 +177,16 @@ interface FormsTarget {
 /** Opens the BIR Forms mini app on one branch (a ticket BIR issues for
  *  it), optionally on one return. */
 async function openFormsApp(tin: string, target: FormsTarget = {}): Promise<void> {
-  const issued: any = await buwiz.call("ebirforms_ticket_issue", { ticket: TICKET, tin });
+  const issued: any = await buwiz.call!("ebirforms_ticket_issue", { ticket: TICKET, tin });
   const ticket = String(issued?.result?.ticket || "");
   const props: Record<string, string | number> = { ticket };
   for (const [k, v] of Object.entries(target)) if (v !== null && v !== undefined) props[k] = v;
-  await buwiz.open({ app: "forms", ticket, props });
+  await buwiz.open!({ app: "forms", ticket, props });
+}
+
+/** Opens a taxpayer's own profile in this app, on the ticket BIR issued. */
+async function openProfileApp(ticket: string): Promise<void> {
+  await buwiz.open!({ app: "tax-profile", ticket, props: { ticket } });
 }
 
 // ============================================================ helpers
@@ -392,6 +415,8 @@ function TextInput(p: {
   disabled?: boolean;
   secure?: boolean;
   digits?: number;
+  onEdit?: () => void;
+  onBlur?: () => void;
 }) {
   return (
     <Input
@@ -399,7 +424,9 @@ function TextInput(p: {
       onChange={(e) => {
         const v = typed(e);
         p.value.set(p.digits ? v.replace(/\D/g, "").slice(0, p.digits) : v);
+        p.onEdit?.();
       }}
+      onBlur={() => p.onBlur?.()}
       placeholder={p.placeholder}
       readonly={p.disabled}
       masked={p.secure}
@@ -410,7 +437,7 @@ function TextInput(p: {
 }
 
 /** A pick list over a reference list (RDO, ZIP): a search box and the first matches. */
-function Combo(p: { value: Signal<string>; options: Option[]; placeholder: string; error?: boolean; disabled?: boolean }) {
+function Combo(p: { value: Signal<string>; options: Option[]; placeholder: string; error?: boolean; disabled?: boolean; onPick?: () => void }) {
   const open = signal(false);
   const query = signal("");
   const current = computed(() => p.options.find((o) => o.value === p.value()));
@@ -425,7 +452,7 @@ function Combo(p: { value: Signal<string>; options: Option[]; placeholder: strin
         activeStyle={{ opacity: 0.7 }}
         class={`flex-row items-center justify-between rounded-md px-3 py-2 border ${p.disabled ? `${C.inset} opacity-60` : C.pane} ${p.error ? "border-[#d92d20] dark:border-[#ff6961]" : "border-black/10 dark:border-white/10"}`}
       >
-        <Text class={`text-sm flex-1 ${current() || p.value() ? C.fg : C.fg3}`} numberOfLines={1}>
+        <Text class={`text-sm flex-1 ${current() || p.value() ? C.fg : C.fg3}`} style={{ numberOfLines: 1 }}>
           {current()?.label || p.value() || p.placeholder}
         </Text>
         <Text class={`text-xs ${C.fg3}`}>{open() ? "▴" : "▾"}</Text>
@@ -446,11 +473,12 @@ function Combo(p: { value: Signal<string>; options: Option[]; placeholder: strin
                   p.value.set(o().value);
                   query.set("");
                   open.set(false);
+                  p.onPick?.();
                 }}
                 activeStyle={{ opacity: 0.6 }}
                 class={`px-2 py-1 rounded-md ${o().value === p.value() ? C.inset : ""}`}
               >
-                <Text class={`text-sm ${C.fg}`} numberOfLines={1}>{o().label}</Text>
+                <Text class={`text-sm ${C.fg}`} style={{ numberOfLines: 1 }}>{o().label}</Text>
               </View>
             )}
           </Each>
@@ -464,6 +492,7 @@ function Combo(p: { value: Signal<string>; options: Option[]; placeholder: strin
               onPress={() => {
                 p.value.set("");
                 open.set(false);
+                p.onPick?.();
               }}
             />
           </View>
@@ -489,7 +518,7 @@ function Section(p: {
         <Text class={`text-xs ${C.fg3}`}>{p.open ? "▾" : "▸"}</Text>
         <View class="flex-1 gap-0.5">
           <Text class={`text-sm font-semibold ${C.fg}`}>{p.title}</Text>
-          <Text class={`text-xs ${C.fg2}`} numberOfLines={1}>{p.meta}</Text>
+          <Text class={`text-xs ${C.fg2}`} style={{ numberOfLines: 1 }}>{p.meta}</Text>
         </View>
         <If when={p.onEdit && !p.editing}>
           <Button
@@ -536,9 +565,9 @@ function Row(p: { children?: JSX.Element; first?: boolean }) {
 function NameCell(p: { title: string; sub?: string; dim?: boolean }) {
   return (
     <View class="flex-1 gap-0.5" style={{ minWidth: 0 }}>
-      <Text class={`text-sm ${p.dim ? C.fg3 : C.fg}`} numberOfLines={1}>{p.title}</Text>
+      <Text class={`text-sm ${p.dim ? C.fg3 : C.fg}`} style={{ numberOfLines: 1 }}>{p.title}</Text>
       <If when={p.sub}>
-        <Text class={`text-xs ${C.fg2}`} numberOfLines={1}>{p.sub}</Text>
+        <Text class={`text-xs ${C.fg2}`} style={{ numberOfLines: 1 }}>{p.sub}</Text>
       </If>
     </View>
   );
@@ -575,14 +604,31 @@ function LoadError(p: { error: unknown; retry: () => void; what: string }) {
 
 // ============================================================ the app
 
-/** The ticket's branch, from BIR, then the profile; without a ticket, a
- *  note on how to open it. */
+/** Whether the New taxpayer form shows, over the profile or the empty state
+ *  (which stays mounted under it, so Cancel finds it as it was). */
+const adding = signal(false);
+
+/** The ticket's taxpayer, or without a ticket a note on how to open one;
+ *  New taxpayer over either. */
 export default function R() {
-  if (!TICKET) return <NoTaxpayer />;
+  return (
+    <View class={`flex-1 ${C.pane}`}>
+      <View class="flex-1" style={{ display: adding() ? "none" : "flex" }}>
+        {TICKET ? <Opened /> : <NoTaxpayer />}
+      </View>
+      <If when={adding()}>
+        <NewTaxpayer onClose={() => adding.set(false)} />
+      </If>
+    </View>
+  );
+}
+
+/** The ticket's branch, from BIR, then the profile. */
+function Opened() {
   const subject = signal<{ tin: string } | null>(null);
   const failed = signal("");
   buwiz
-    .call("ebirforms_ticket_subject", { ticket: TICKET })
+    .call!("ebirforms_ticket_subject", { ticket: TICKET })
     .then((r: any) => subject.set(r?.result || null))
     .catch((e) => failed.set(errorText(e)));
   return (
@@ -603,30 +649,298 @@ export default function R() {
 function NoTaxpayer() {
   return (
     <View class={`flex-1 items-center justify-center p-6 ${C.pane}`} style={{ minHeight: 400 }}>
-      <View class={`rounded-2xl p-6 gap-2 items-center ${C.card} ${C.line}`} style={{ maxWidth: 420 }}>
+      <View class={`rounded-2xl p-6 gap-3 items-center ${C.card} ${C.line}`} style={{ maxWidth: 420 }}>
         <Text class={`text-base font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
         <Text class={`text-sm text-center ${C.fg2}`}>
-          The tax profile shows one taxpayer. Ask the Bot for a taxpayer's profile, or open it from a taxpayer in BIR.
+          The tax profile shows one taxpayer. Ask the Bot for a taxpayer's profile, or open it from a taxpayer in BIR. To add a taxpayer, press New taxpayer.
         </Text>
+        <Button label="New taxpayer" variant="primary" onPress={() => adding.set(true)} />
       </View>
     </View>
   );
 }
 
-function Profile(p: { tin: string }) {
-  const startTin = String(p.tin || "").replace(/\D/g, "");
-  if (startTin.length < 9) {
-    return (
-      <View class={`flex-1 items-center justify-center p-6 ${C.pane}`} style={{ minHeight: 400 }}>
-        <View class={`rounded-2xl p-6 gap-2 items-center ${C.card} ${C.line}`} style={{ maxWidth: 420 }}>
-          <Text class={`text-base font-semibold ${C.fg}`}>Open this from a taxpayer</Text>
-          <Text class={`text-sm text-center ${C.fg2}`}>
-            The tax profile shows one taxpayer. Ask the Bot for a taxpayer's profile, or open it from a taxpayer in BIR.
-          </Text>
+// ============================================================ new taxpayer
+
+type NewField = "tin_root" | "name" | "taxpayer_type" | "rdo_code" | "registered_address" | "zip_code" | "phone" | "email";
+const NEW_FIELDS: NewField[] = ["tin_root", "name", "taxpayer_type", "rdo_code", "registered_address", "zip_code", "phone", "email"];
+
+/** BIR's refusal, by field: it answers one `<field>: <what to fix>` line per
+ *  field (after the tool's name); anything else is for the whole form. */
+function refusalByField(e: unknown): { fields: Partial<Record<NewField, string>>; rest: string } {
+  const fields: Partial<Record<NewField, string>> = {};
+  const rest: string[] = [];
+  const text = String(e && (e as any).message ? (e as any).message : e);
+  // a line may come after the host's and the tool's names (`…create_taxpayer: tin_root: …`)
+  const byField = new RegExp(`(?:^|[\\s:])(${NEW_FIELDS.join("|")}):\\s+(.+)$`);
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const m = byField.exec(line);
+    if (m) {
+      const said = m[2].replace(/\.?$/, ".");
+      fields[m[1] as NewField] = said.charAt(0).toUpperCase() + said.slice(1);
+    } else if (line) rest.push(line.replace(/^Error:\s*/, ""));
+  }
+  return { fields, rest: rest.join(" ") };
+}
+
+/** The New taxpayer form: the 9-digit TIN, the name, type, the head office's
+ *  RDO and address facts. Each field says what is wrong once it was left or
+ *  Create was pressed; BIR checks them again and refuses a TIN already saved.
+ *  Saved, it opens the new taxpayer's profile on its ticket. */
+function NewTaxpayer(p: { onClose: () => void }) {
+  const tinRoot = signal("");
+  const name = signal("");
+  const type = signal<TaxpayerType>("Individual");
+  const rdo = signal("");
+  const address = signal("");
+  const zip = signal("");
+  const phone = signal("");
+  const email = signal("");
+  const touched = signal<Set<NewField>>(new Set());
+  const submitted = signal(false);
+  const hostErrors = signal<Partial<Record<NewField, string>>>({});
+  const formError = signal<string | null>(null);
+  const busy = signal(false);
+  const created = signal<CreatedTaxpayer | null>(null);
+  const openError = signal<string | null>(null);
+
+  const rdos = resource(async () => (await api.listRdos()).map((r) => ({ value: r.code, label: `${r.code} - ${r.description}` })), {
+    initialValue: [] as Option[],
+  });
+  const zips = resource(async () => (await api.listZipCodes()).map((z) => ({ value: z.split(" - ")[0].trim(), label: z })), {
+    initialValue: [] as Option[],
+  });
+
+  const touch = (k: NewField) => touched.update((t) => new Set(t).add(k));
+  const edited = (k: NewField) => {
+    const h = { ...hostErrors() };
+    delete h[k];
+    hostErrors.set(h);
+    formError.set(null);
+  };
+
+  /** Every problem with the taxpayer as typed, by field. */
+  const problems = computed(() => {
+    const e: Partial<Record<NewField, string>> = {};
+    if (tinRoot().length !== 9) e.tin_root = "TIN is 9 digits, like 123-456-789.";
+    if (!name().trim()) e.name = "Type the registered name.";
+    const r = rdo().trim();
+    if (!r) e.rdo_code = "Pick the RDO the taxpayer is registered with.";
+    else if (rdos().length && !rdos().some((o) => o.value === r)) e.rdo_code = "Pick an RDO from the list. Type its code or district to search.";
+    for (const f of ["zip_code", "email"] as const) {
+      const err = factError(f, f === "zip_code" ? zip() : email(), []);
+      if (err) e[f] = err;
+    }
+    const ph = phone().trim();
+    const digits = ph.replace(/\D/g, "").length;
+    if (ph && (digits < 7 || digits > 13)) e.phone = "Type a phone number like 09171234567 or 028123 4567.";
+    return e;
+  });
+  /** The errors to show now: touched fields, all after Create, and BIR's. */
+  const shown = computed(() => {
+    const out: Partial<Record<NewField, string>> = { ...hostErrors() };
+    for (const [k, v] of Object.entries(problems()) as [NewField, string][]) {
+      if (submitted() || touched().has(k)) out[k] = out[k] || v;
+    }
+    return out;
+  });
+
+  const openProfile = async (made: CreatedTaxpayer) => {
+    openError.set(null);
+    try {
+      await openProfileApp(made.ticket);
+    } catch (e) {
+      openError.set(errorText(e));
+    }
+  };
+
+  const create = async () => {
+    submitted.set(true);
+    formError.set(null);
+    if (Object.keys(problems()).length || busy()) return;
+    busy.set(true);
+    try {
+      const made = await api.createTaxpayer({
+        tin_root: tinRoot(),
+        name: name().trim(),
+        taxpayer_type: type(),
+        head_office: {
+          rdo_code: rdo().trim(),
+          registered_address: address().trim(),
+          zip_code: zip().trim(),
+          phone: phone().trim(),
+          email: email().trim(),
+        },
+      });
+      if (!made?.ticket) throw new Error("BIR saved no taxpayer.");
+      created.set(made);
+      await openProfile(made);
+    } catch (e) {
+      const { fields, rest } = refusalByField(e);
+      hostErrors.set(fields);
+      formError.set(rest || (Object.keys(fields).length ? null : "The taxpayer was not saved."));
+    } finally {
+      busy.set(false);
+    }
+  };
+
+  const reset = () => {
+    for (const s of [tinRoot, name, rdo, address, zip, phone, email]) s.set("");
+    type.set("Individual");
+    touched.set(new Set());
+    submitted.set(false);
+    hostErrors.set({});
+    formError.set(null);
+    created.set(null);
+    openError.set(null);
+  };
+
+  /** One field and what is wrong with it; a label that follows the type is a function. */
+  const field = (k: NewField, label: string | (() => string), control: JSX.Element, full?: boolean) => (
+    <Field label={typeof label === "function" ? label() : label} full={full}>
+      <View class="gap-1">
+        {control}
+        <ErrorText text={shown()[k]} />
+      </View>
+    </Field>
+  );
+
+  const formView = () => (
+    <View class="gap-5">
+      <View class="gap-1">
+        <Text class={`text-xl font-semibold ${C.fg}`}>New taxpayer</Text>
+        <Text class={`text-sm ${C.fg2}`}>
+          The 9-digit TIN, the name and the RDO. The head office's address is optional; branches inherit it unless you change it.
+        </Text>
+      </View>
+      <View class={`rounded-2xl p-5 gap-4 ${C.pane} ${C.line}`}>
+        <View class="flex-row flex-wrap gap-4">
+          {field(
+            "tin_root",
+            "TIN",
+            <TextInput
+              value={tinRoot}
+              digits={9}
+              placeholder="9 digits, like 123456789"
+              error={!!shown().tin_root}
+              onEdit={() => edited("tin_root")}
+              onBlur={() => tinRoot().length && touch("tin_root")}
+            />,
+          )}
+          {field(
+            "taxpayer_type",
+            "Taxpayer type",
+            <Segmented
+              options={TAXPAYER_TYPES.map((x) => ({ value: x, label: x }))}
+              value={type()}
+              onChange={(v) => {
+                type.set(v);
+                edited("taxpayer_type");
+              }}
+            />,
+            true,
+          )}
+          {field(
+            "name",
+            () => (type() === "Individual" ? "Name (as registered)" : "Registered name"),
+            <TextInput
+              value={name}
+              placeholder={type() === "Individual" ? "The individual's name, as registered with BIR" : "As registered with BIR"}
+              error={!!shown().name}
+              onEdit={() => edited("name")}
+              onBlur={() => touch("name")}
+            />,
+            true,
+          )}
+          {field(
+            "rdo_code",
+            "RDO",
+            <Combo
+              value={rdo}
+              options={rdos()}
+              placeholder="Type a code or district, like 050 or Makati"
+              error={!!shown().rdo_code}
+              onPick={() => {
+                touch("rdo_code");
+                edited("rdo_code");
+              }}
+            />,
+          )}
+          {field(
+            "registered_address",
+            "Head-office address (optional)",
+            <TextInput value={address} placeholder="Street, barangay, city" onEdit={() => edited("registered_address")} />,
+            true,
+          )}
+          {field(
+            "zip_code",
+            "ZIP code",
+            <Combo
+              value={zip}
+              options={zips()}
+              placeholder="Type a code or place, like 1226 or Makati"
+              error={!!shown().zip_code}
+              onPick={() => {
+                touch("zip_code");
+                edited("zip_code");
+              }}
+            />,
+          )}
+          {field(
+            "phone",
+            "Phone",
+            <TextInput value={phone} placeholder="09171234567" error={!!shown().phone} onEdit={() => edited("phone")} onBlur={() => touch("phone")} />,
+          )}
+          {field(
+            "email",
+            "Email",
+            <TextInput value={email} placeholder="name@example.com" error={!!shown().email} onEdit={() => edited("email")} onBlur={() => touch("email")} />,
+          )}
+        </View>
+        <LoadError
+          error={rdos.error() || zips.error()}
+          retry={() => {
+            rdos.refetch();
+            zips.refetch();
+          }}
+          what="the RDO and ZIP lists"
+        />
+        <ErrorText text={formError()} />
+        <FormActions onCancel={p.onClose} onSave={create} saveLabel="Create" busy={busy()} />
+      </View>
+    </View>
+  );
+
+  const doneView = () => (
+    <View class={`rounded-2xl p-6 gap-3 ${C.card} ${C.line}`}>
+      <Text class={`text-base font-semibold ${C.fg}`}>{`${created()?.title || "The taxpayer"} is saved.`}</Text>
+      <Text class={`text-sm ${C.fg2}`}>Their profile opens next: add branches, tax years and the forms they file there.</Text>
+      <ErrorText text={openError() ? `Could not open the profile: ${openError()}` : null} />
+      <View class="flex-row flex-wrap gap-2">
+        <Button label="Open profile" variant="primary" onPress={() => void openProfile(created() as CreatedTaxpayer)} />
+        <Button label="Add another" onPress={reset} />
+        <Button label="Close" variant="ghost" onPress={p.onClose} />
+      </View>
+    </View>
+  );
+
+  return (
+    <Scroll class={`flex-1 ${C.pane}`}>
+      <View class="w-full items-center px-6 py-6">
+        <View style={{ width: "100%", maxWidth: 720 }}>
+          <If when={created()} else={formView()}>
+            {doneView()}
+          </If>
         </View>
       </View>
-    );
-  }
+    </Scroll>
+  );
+}
+
+function Profile(p: { tin: string }) {
+  const startTin = String(p.tin || "").replace(/\D/g, "");
+  if (startTin.length < 9) return <NoTaxpayer />;
 
   // ---------------------------------------------------------------- selection and data
   const root = signal(startTin.slice(0, 9));
@@ -1069,14 +1383,15 @@ function Profile(p: { tin: string }) {
           </View>
           <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
             <Text class={`text-xl font-semibold ${C.fg}`}>{tp()?.name || ""}</Text>
-            <Text class={`text-xs ${C.fg2}`} selectable>
+            <Text class={`text-xs ${C.fg2}`} style={{ userSelect: "text" }}>
               {`${fullTin()} · ${branch()?.name || ""} · ${tp()?.taxpayer_type || ""}${tp()?.archived ? " · Archived" : ""}`}
             </Text>
           </View>
+          <Button label="New taxpayer" onPress={() => adding.set(true)} />
           <Button
             label="Copy TIN"
             onPress={() => {
-              void buwiz.copy(fullTin());
+              void buwiz.copy!(fullTin());
               say(`Copied ${fullTin()}`);
             }}
           />

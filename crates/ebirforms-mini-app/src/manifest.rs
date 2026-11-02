@@ -33,8 +33,8 @@ use crate::server::{
 pub(crate) const PROTOCOL: &str = buwiz_plugin::manifest::PROTOCOL;
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
-/// The first protocol 1.0 release of `app.buwiz.ebirforms`.
-pub(crate) const VERSION: &str = "0.3.0";
+/// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0 release).
+pub(crate) const VERSION: &str = "0.3.1";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -90,7 +90,7 @@ pub(crate) const APPS: [App; 7] = [
     App {
         id: TAX_PROFILE_ID,
         title: "BIR Tax Profile",
-        description: "View and edit a taxpayer's registration: name, TIN and branches, RDO and address, and the forms they file each year.",
+        description: "View and edit a taxpayer's registration: name, TIN and branches, RDO and address, and the forms they file each year. New taxpayer adds one.",
         source: TAX_PROFILE_SOURCE,
     },
     App {
@@ -232,7 +232,8 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
                 }),
                 json!(["full"]),
                 None,
-                json!({ "tools": tools, "open": { "apps": [FORMS_ID] }, "copy": true }),
+                // BIR Forms, and a new taxpayer's own profile (New taxpayer)
+                json!({ "tools": tools, "open": { "apps": [FORMS_ID, TAX_PROFILE_ID] }, "copy": true }),
             )
         }
         CALENDAR_ID => {

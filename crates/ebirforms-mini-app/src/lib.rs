@@ -11,6 +11,7 @@ mod cards;
 mod jcs;
 mod keys;
 pub mod manifest;
+mod new_taxpayer;
 pub mod owner;
 mod protocol;
 mod scope;
