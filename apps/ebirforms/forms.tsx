@@ -52,47 +52,6 @@ async function bir<T = any>(fn: string, ...args: unknown[]): Promise<T> {
   return r?.result as T;
 }
 
-/** One of the BIR server's own tools: the payments. `tin` there is the branch's ticket. */
-async function tool<T = any>(name: string, args: Record<string, unknown>): Promise<T> {
-  const r: any = await buwiz.call(name, args);
-  return r?.result as T;
-}
-
-/** base64 of bytes, 3 at a time (the bridge carries JSON only). */
-function base64(bytes: Uint8Array): string {
-  const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
-    out += A[(n >> 18) & 63] + A[(n >> 12) & 63] + (i + 1 < bytes.length ? A[(n >> 6) & 63] : "=") + (i + 2 < bytes.length ? A[n & 63] : "=");
-  }
-  return out;
-}
-
-/** A receipt's extensions, as the manifest's `pick_file` grants them. */
-const RECEIPTS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
-/** Bytes per upload call: base64 of this stays under the bridge's 256 KiB argument cap. */
-const CHUNK = 180 * 1024;
-
-/**
- * The Bot's file picker: the receipt the user chose, sent to BIR in chunks (`ebirforms_app_upload`).
- * `null` when cancelled. The app never sees a path.
- */
-async function pickReceipt(): Promise<{ upload: string; name: string } | null> {
-  const files = await buwiz.pickFile({ extensions: RECEIPTS, multiple: false });
-  const file = files[0];
-  if (!file) return null;
-  const bytes = await file.read();
-  let upload = "";
-  let at = 0;
-  do {
-    const r: any = await buwiz.call("ebirforms_app_upload", { ...(upload ? { upload } : {}), data: base64(bytes.subarray(at, at + CHUNK)) });
-    upload = String(r?.result?.upload || "");
-    at += CHUNK;
-  } while (at < bytes.length);
-  return { upload, name: file.name };
-}
-
 /** Attaches a return to the chat the Bot opened this app from (the assistant reads it there). */
 const attachReturn = (s: FS) => buwiz.attach("taxform", `${BRANCH}/${s.code}-${tokenPeriod(s)}`);
 
@@ -127,16 +86,6 @@ const H = {
   cancelQueue: (code: string, draft: any) => bir<null>("screen_form_cancel_queue", code, draft),
   queuePeriod: (tin: string, code: string, year: number, quarter: number | null) => bir<number>("queue_form_draft", tin, code, year, quarter),
   cancelQueued: (tin: string, code: string, year: number, quarter: number | null) => bir<null>("cancel_queued", tin, code, year, quarter),
-  // payments and the printable filing record (the server's own tools)
-  payments: (form: string, period: string) => tool<{ payments: Payment[] }>("ebirforms_payments_list", { tin: BRANCH, form, period }),
-  recordPayment: (form: string, period: string, d: { paid_at: string; amount: string; channel: string; reference: string }) =>
-    tool<{ payment: Payment }>("ebirforms_record_payment", {
-      tin: BRANCH, form, period, channel: d.channel, amount: d.amount, paid_at: d.paid_at,
-      ...(d.reference.trim() ? { reference: d.reference.trim() } : {}),
-    }),
-  removePayment: (form: string, period: string, id: string) => tool<{ removed: boolean }>("ebirforms_card_remove_payment", { tin: BRANCH, form, period, id }),
-  markPaid: (form: string, period: string, proof?: { upload: string; name: string }) =>
-    tool<{ payment: Payment }>("ebirforms_mark_paid", proof ? { tin: BRANCH, form, period, proof_upload: proof.upload, proof_name: proof.name } : { tin: BRANCH, form, period }),
 };
 
 // =====================================================================
@@ -158,13 +107,6 @@ type DateSpec = { single?: Field; month?: Field; day?: Field | null; year?: Fiel
 type Pen = { keys: string[]; edited: boolean; kept?: boolean; applies: boolean };
 type Err = { field: string; message: string; keys?: string[]; dismiss?: string; dismiss_label?: string };
 type PeriodPart = { key: string; part: string; quarter: number | null };
-/** A recorded payment (ebirforms_payments_list). `channel` "manual" is "marked paid" with no details. */
-type Payment = {
-  id: string; channel: string; reference: string; amount: number | null; fee: number | null; total: number | null;
-  paid_at: string | null; recorded_at: string; source: "email" | "receipt" | "manual"; proof: { kind: string; name?: string | null };
-  message_id?: string | null;
-};
-
 interface Opts {
   tin: string; code: string; year: number; period: number;
   returnKey?: number | null; sample?: boolean; amend?: boolean; filedOriginalId?: number; back?: Opts;
@@ -203,16 +145,6 @@ interface FS extends Opts {
   removal: { r: any; edits: Edits; typed: Edits; draft: any } | null; chosenFrom: Edits;
   editSeq: number; validateSeq: number; chain: Promise<unknown>;
   picker: Picker | null; printResult: { sample: boolean; error: string } | null;
-  /** Whether the assistant may submit this form for this taxpayer (null: not read yet). */
-  /** This return's recorded payments (null: not read yet, or not a stored return). */
-  payments: Payment[] | null;
-  /** Why the payments could not be read (signed out, server down), in plain words. */
-  paymentsError?: string | null;
-  /** The Mark as paid details, while the user types them. */
-  payForm?: { paid_at: string; amount: string; channel: string; reference: string } | null;
-  /** The payment whose Remove asks "Remove this payment?" */
-  removeAsk?: string | null;
-  paying: boolean;
 }
 
 // =====================================================================
@@ -565,7 +497,7 @@ function newState(opts: Opts): FS {
     periodComplete: false, periodInFlight: null, periodSeq: 0, periodToken: 0, opens: null, existing: null, saveAfterAnswer: null,
     submittedAt: null, confirmedAt: null, amends: null, filedOriginal: null, filedOriginalView: null,
     removal: null, chosenFrom: {}, editSeq: 0, validateSeq: 0, chain: Promise.resolve(),
-    picker: null, printResult: null, payments: null, paying: false,
+    picker: null, printResult: null,
   };
 }
 
@@ -620,7 +552,6 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
       bump();
       then?.(null);
       recordNotesWhenShown(s, token);
-      readPayments(s, token);
       if (s.submitAsk && s.editable && !s.sample) validate(s);
     } catch (e) {
       if (token !== T) return;
@@ -1580,6 +1511,9 @@ async function cancelQueue(s: FS) {
   }
 }
 
+/** Whether this return has left Draft: its print preview is the filing record. */
+const sentOrQueued = (s: FS) => !s.sample && !s.filedOriginalView && s.status !== "Draft";
+
 /** Print preview: BIR fills the return's print sheet (`ebirforms_app_print_preview`) and the Bot shows it over this app
  *  with Print (the macOS print panel, which also saves a PDF) and Close; the page never comes through here. A
  *  sample previews as the page holds it (staged edits, held boxes blank); a return is saved first and prints as
@@ -1606,131 +1540,6 @@ async function print(s: FS) {
     s.printResult = { sample: !!s.sample, error: errText(e) };
   }
   bump();
-}
-
-// ----- payment and the filing record
-
-/** Whether this return has left Draft: it can be paid and has a filing record. */
-const sentOrQueued = (s: FS) => !s.sample && !s.filedOriginalView && s.status !== "Draft";
-
-async function readPayments(s: FS, token: number) {
-  if (!sentOrQueued(s)) return;
-  try {
-    const r = await H.payments(s.code, tokenPeriod(s));
-    if (!live(s, token)) return;
-    s.payments = r.payments || [];
-    s.paymentsError = null;
-  } catch (e) {
-    if (live(s, token)) {
-      s.payments = null;
-      s.paymentsError = errText(e);
-    }
-  }
-  bump();
-}
-
-/** Remove a payment recorded on this return (on the wrong return, or a test), after the row's own confirm. */
-async function removePayment(s: FS, id: string) {
-  s.paying = true;
-  bump();
-  try {
-    await H.removePayment(s.code, tokenPeriod(s), id);
-    toast("Payment removed.", "success");
-  } catch (e) {
-    toast(errText(e), "danger");
-  }
-  s.removeAsk = null;
-  s.paying = false;
-  await readPayments(s, T);
-}
-
-/** The return's receipt (every payment and its proof: the receipt file or the payment email) in the Bot's document
- *  view, made by BIR (`ebirforms_payment_receipt`). */
-function viewReceipt(s: FS) {
-  buwiz.preview({ tool: "ebirforms_payment_receipt", args: { tin: BRANCH, form: s.code, period: tokenPeriod(s) } }).catch((e) => toast(errText(e), "danger"));
-}
-
-/** The payment email in Gmail, for a payment recorded from one ("" otherwise). */
-const gmailOf = (s: FS) => {
-  const id = (s.payments || []).map((p) => p.message_id).find(Boolean);
-  return id ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(id)}` : "";
-};
-
-const pesos = (n: number | null) => (n == null ? "" : `PHP ${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-
-function paymentLine(p: Payment): string {
-  if (p.channel === "manual") return `Marked paid${p.proof.kind === "file" ? ", receipt attached" : ", no receipt"}`;
-  const paid = p.total ?? p.amount;
-  return [`Paid ${pesos(paid)}`.trim(), `via ${p.channel}`, p.paid_at ? `on ${shortDate(p.paid_at)}` : "", p.reference ? `ref ${p.reference}` : "", p.proof.kind === "file" ? "receipt attached" : p.proof.kind === "email" ? "from its email" : ""]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-/** "Mark as paid": the payment's details when the user gives them (date, amount, channel such as MyEG,
- *  reference: `ebirforms_record_payment`), else on the user's word alone (`ebirforms_mark_paid`). A receipt can be
- *  attached later. */
-async function markPaid(s: FS) {
-  const d = s.payForm;
-  s.paying = true;
-  bump();
-  try {
-    if (d && d.amount.trim() && d.channel.trim()) {
-      await H.recordPayment(s.code, tokenPeriod(s), { ...d, paid_at: d.paid_at.trim() || isoToday() });
-      toast("Payment recorded. Attach the receipt when you have it.", "success");
-    } else {
-      await H.markPaid(s.code, tokenPeriod(s));
-      toast("Marked as paid. Attach the receipt when you have it.", "success");
-    }
-    s.payForm = null;
-  } catch (e) {
-    toast(errText(e), "danger");
-  }
-  s.paying = false;
-  await readPayments(s, T);
-}
-
-/** Today as YYYY-MM-DD (the payment date's default). */
-function isoToday() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-/**
- * "Attach receipt": the Bot's file picker, and bir keeps a copy of the image or PDF as this return's proof of payment.
- * When the picker fails, the return is attached to the chat: the user drops the receipt there and the assistant records it.
- */
-async function attachReceipt(s: FS) {
-  let proof: { upload: string; name: string } | null;
-  s.paying = true;
-  bump();
-  try {
-    proof = await pickReceipt();
-  } catch (e) {
-    s.paying = false;
-    bump();
-    if ((e as any)?.code === "quota_exceeded") return toast("The receipt is over 25 MB; attach a smaller scan.", "danger");
-    attachReturn(s)
-      .then(() => toast("Attached to the chat: drop the receipt there and send it; the assistant records it."))
-      .catch((err) => toast(errText(err), "danger"));
-    return;
-  }
-  if (!proof) {
-    s.paying = false;
-    return bump();
-  }
-  if (!/\.(png|jpe?g|gif|webp|heic|pdf)$/i.test(proof.name)) {
-    s.paying = false;
-    bump();
-    return toast("A receipt must be an image or a PDF.", "danger");
-  }
-  try {
-    await H.markPaid(s.code, tokenPeriod(s), proof);
-    toast("Receipt attached as proof of payment.", "success");
-  } catch (e) {
-    toast(errText(e), "danger");
-  }
-  s.paying = false;
-  await readPayments(s, T);
 }
 
 function openFiledOriginal(s: FS) {
@@ -2640,7 +2449,7 @@ function FormPage(p: { s: FS }) {
   const needsYou = () => {
     rev();
     // A return that has left Draft (sent, confirmed, read-only) can't be changed: recompute-style
-    // messages on it are not the user's to fix. Payment shows in the payment panel instead.
+    // messages on it are not the user's to fix.
     if (!s.schema || !s.editable) return [] as { id: string; pi: number; ii: number; label: string; msg: string }[];
     return Object.entries({ ...s.messages, ...s.dateErrors })
       .filter(([id]) => id !== "form")
@@ -2686,7 +2495,6 @@ function FormPage(p: { s: FS }) {
         <Text class={`text-xs ${C.fg2}`}>Opened to view: nothing here can be changed. Open it from the forms list to edit it.</Text>
       </If>
       <SubmitConfirm s={s} />
-      <PaymentPanel s={s} />
       <If when={(rev(), s.profileUpdates.length > 0)}><Text class={`text-xs ${C.fg2}`}>{`Updated from your tax profile: ${s.profileUpdates.join("; ")}`}</Text></If>
       <Each of={(rev(), s.notes)}>{(n) => <Text class={`text-xs ${C.fg2}`}>{n().text}</Text>}</Each>
       <If when={(rev(), s.editable && s.profileDiffers.length > 0)}>
@@ -2856,82 +2664,6 @@ function SubmitConfirm(p: { s: FS }) {
           </If>
           <Btn label="Not now" variant="ghost" onPress={close} />
         </View>
-      </View>
-    </If>
-  );
-}
-
-/** Payment, apart from BIR's filing confirmation: what is recorded, and Mark as paid (with its details) /
- *  Attach receipt. Shown on every return that has left Draft, even when the payments could not be read. */
-function PaymentPanel(p: { s: FS }) {
-  const s = p.s;
-  const shown = () => (rev(), sentOrQueued(s) && !s.loading && !s.error);
-  const paid = () => (rev(), (s.payments || []).length > 0);
-  const hasReceipt = () => (rev(), (s.payments || []).some((x) => x.proof.kind === "file"));
-  const form = () => (rev(), s.payForm || null);
-  const field = (key: "paid_at" | "amount" | "channel" | "reference", label: string, placeholder: string, width: number) => (
-    <View class="gap-0.5">
-      <Text class={`text-xs ${C.fg2}`}>{label}</Text>
-      <Input
-        class={C.input}
-        style={{ width }}
-        placeholder={placeholder}
-        value={(rev(), form()?.[key] || "")}
-        onChange={(e) => {
-          if (s.payForm) s.payForm[key] = typed(e);
-        }}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-    </View>
-  );
-  return (
-    <If when={shown()}>
-      <View class={`gap-2 py-2 px-3 rounded-xl border ${C.line}`}>
-        <View class="flex-row flex-wrap items-center gap-2">
-          <Chip text={(rev(), paid() ? "Paid" : "Payment not recorded")} tone={(rev(), paid() ? "success" : "warning")} />
-          <View class="flex-1 gap-0.5" style={{ minWidth: 200 }}>
-            <If when={paid()} else={<Text class={`text-xs ${C.fg2}`}>{(rev(), s.paymentsError || "No payment recorded yet. The BIR payments routine records payment emails; you can also mark it paid here.")}</Text>}>
-              <Each of={(rev(), s.payments || [])} key={(x) => x.id}>
-                {(x) => (
-                  <View class="flex-row flex-wrap items-center gap-2">
-                    <Text class={`text-xs ${C.fg2}`}>{paymentLine(x())}</Text>
-                    <If when={(rev(), s.removeAsk === x().id)} else={<Btn label="Remove" variant="ghost" onPress={() => { s.removeAsk = x().id; bump(); }} disabled={(rev(), s.paying)} />}>
-                      <Text class={`text-xs ${C.fg}`}>Remove this payment?</Text>
-                      <Btn label="Remove" variant="danger" onPress={() => removePayment(s, x().id)} disabled={(rev(), s.paying)} />
-                      <Btn label="Cancel" variant="ghost" onPress={() => { s.removeAsk = null; bump(); }} />
-                    </If>
-                  </View>
-                )}
-              </Each>
-            </If>
-          </View>
-          <If when={!paid() && !form()}>
-            <Btn label="Mark as paid" onPress={() => { s.payForm = { paid_at: isoToday(), amount: "", channel: "", reference: "" }; bump(); }} disabled={(rev(), s.paying)} />
-          </If>
-          <If when={paid() && Boolean(buwiz.preview)}>
-            <Btn label="View receipt" variant="ghost" onPress={() => viewReceipt(s)} />
-          </If>
-          <If when={(rev(), Boolean(gmailOf(s)))}>
-            <Btn label="Open in Gmail" variant="ghost" onPress={() => buwiz.open({ url: gmailOf(s) }).catch((e) => toast(errText(e), "danger"))} />
-          </If>
-          <Btn label={(rev(), hasReceipt() ? "Replace receipt" : "Attach receipt")} variant="ghost" onPress={() => attachReceipt(s)} disabled={(rev(), s.paying)} />
-        </View>
-        <If when={Boolean(form())}>
-          <View class="gap-2">
-            <View class="flex-row flex-wrap gap-3">
-              {field("paid_at", "Paid on", "2026-10-26", 130)}
-              {field("amount", "Amount (PHP)", "1,629.94", 130)}
-              {field("channel", "Paid through", "MyEG, GCash, a bank…", 180)}
-              {field("reference", "Reference (optional)", "Reference no.", 180)}
-            </View>
-            <Text class={`text-xs ${C.fg3}`}>Leave the amount and channel empty to mark it paid without details.</Text>
-            <View class="flex-row gap-2">
-              <Btn label={(rev(), s.paying ? "Saving…" : "Save payment")} variant="primary" onPress={() => markPaid(s)} disabled={(rev(), s.paying)} />
-              <Btn label="Cancel" variant="ghost" onPress={() => { s.payForm = null; bump(); }} />
-            </View>
-          </View>
-        </If>
       </View>
     </If>
   );

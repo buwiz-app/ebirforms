@@ -26,7 +26,7 @@ use crate::jcs;
 use crate::scope;
 use crate::server::{
     ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS, CALENDAR_GET,
-    PAYMENTS_LIST, PRINT_PREVIEW, RESOLVE, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
+    PRINT_PREVIEW, RESOLVE, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
 /// The protocol this plugin speaks: the SDK's (1.0.0).
@@ -161,10 +161,10 @@ fn host_tools(functions: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// The tools the Forms app calls: the ticket helpers, the print preview,
-/// the (empty) payments list and one `ebirforms_app_<function>` per function.
+/// The tools the Forms app calls: the ticket helpers, the print preview
+/// and one `ebirforms_app_<function>` per function.
 pub(crate) fn forms_tools() -> Vec<String> {
-    let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, PAYMENTS_LIST]
+    let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW]
         .iter()
         .map(|tool| tool.to_string())
         .collect();
@@ -532,6 +532,87 @@ mod tests {
         // integers only, so it can be signed, and under 256 KiB
         assert!(jcs::canonical(&m).unwrap().len() < 256 * 1024);
         assert!(ManifestSource::Unsigned.staleness().is_none());
+    }
+
+    /// The tools an app's source calls, read from the source: every
+    /// `"ebirforms_…"` literal (a `buwiz.call` or a preview), each
+    /// `bir("<function>")` (the `ebirforms_app_<function>` wrapper) and each
+    /// `account("<action>")` (the Sign-in app's `ebirforms_account_<action>`).
+    fn called_tools(source: &str) -> std::collections::BTreeSet<String> {
+        let literal = regex::Regex::new(r#""(ebirforms_[a-z0-9_]+)""#).unwrap();
+        let host = regex::Regex::new(r#"\bbir(?:<.*?>)?\("([a-z0-9_]+)""#).unwrap();
+        let account = regex::Regex::new(r#"\baccount\("([a-z0-9_]+)""#).unwrap();
+        let mut found: std::collections::BTreeSet<String> = literal
+            .captures_iter(source)
+            .map(|c| c[1].to_string())
+            .collect();
+        found.extend(host.captures_iter(source).map(|c| app_tool_name(&c[1])));
+        found.extend(
+            account
+                .captures_iter(source)
+                .map(|c| format!("ebirforms_account_{}", &c[1])),
+        );
+        found
+    }
+
+    #[test]
+    fn every_tool_an_app_calls_is_granted_to_it() {
+        // A call the reader above can't follow would hide an ungranted tool, so
+        // every call site is one of the shapes it reads.
+        let site = regex::Regex::new(r"buwiz\.(?:call|preview)\(([^,)]{0,60})").unwrap();
+        let readable = [
+            "\"ebirforms_",
+            "{ tool: \"ebirforms_",
+            "`ebirforms_app_${fn}`",
+            "`ebirforms_account_${tool}`",
+            "P.tool",
+        ];
+        let m = unsigned();
+        for (entry, app) in m["apps"].as_array().unwrap().iter().zip(&APPS) {
+            for call in site.captures_iter(app.source) {
+                assert!(
+                    readable.iter().any(|shape| call[1].starts_with(shape)),
+                    "{}: a call this test can't read: {}",
+                    app.id,
+                    &call[0]
+                );
+            }
+            let granted: Vec<&str> = entry["permissions"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool.as_str().unwrap())
+                .collect();
+            for tool in called_tools(app.source) {
+                assert!(
+                    granted.contains(&tool.as_str()),
+                    "{} calls {tool}, which its manifest entry doesn't grant",
+                    app.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_call_reader_finds_each_shape() {
+        let source = r#"
+            await buwiz.call("ebirforms_calendar_get", {});
+            buwiz.preview({ tool: "ebirforms_app_print_preview", args: {} });
+            const rows = await bir<Record<string, Row>>("list_returns", "all");
+            await bir("list_taxpayers");
+            await account("sign_out");
+        "#;
+        let found: Vec<String> = called_tools(source).into_iter().collect();
+        assert_eq!(
+            found,
+            [
+                "ebirforms_account_sign_out",
+                "ebirforms_app_list_returns",
+                "ebirforms_app_list_taxpayers",
+                "ebirforms_app_print_preview",
+                "ebirforms_calendar_get",
+            ]
+        );
     }
 
     #[test]

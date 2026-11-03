@@ -81,7 +81,6 @@ pub(crate) const TICKET_ISSUE: &str = "ebirforms_ticket_issue";
 pub(crate) const PRINT_PREVIEW: &str = "ebirforms_app_print_preview";
 /// eBIRForms keeps no payments yet: the list is empty, so the Forms app's
 /// payment section shows nothing paid.
-pub(crate) const PAYMENTS_LIST: &str = "ebirforms_payments_list";
 // The Sign-in app's tools (account.rs): who is signed in, and the device
 // flow. Never the assistant's: it cannot sign the owner in or out.
 pub(crate) const ACCOUNT_STATUS: &str = "ebirforms_account_status";
@@ -400,7 +399,6 @@ impl Server {
         let answer = match name {
             TICKET_SUBJECT => ticket_subject(app, arguments, today),
             TICKET_ISSUE => ticket_issue(app, arguments, today),
-            PAYMENTS_LIST => payments_list(app, arguments),
             PRINT_PREVIEW => return print_preview(app, arguments, today),
             _ => self.host_call(app, name, arguments),
         };
@@ -746,7 +744,8 @@ impl Server {
             .map_err(|error| error.to_string())?;
         form.opened.draft = filled.draft;
         form.opened.values.extend(filled.values);
-        form.dirty = true;
+        // a fill eBIRForms rejected every box of leaves the return as it was
+        form.dirty |= edits.keys().any(|key| !filled.rejected.contains_key(key));
         // a box is filled when eBIRForms took it and holds the value given;
         // one it took but holds otherwise (a box another answer switches off
         // or recomputes) is `not_kept`, with what it holds, and no source
@@ -949,7 +948,7 @@ pub(crate) fn app_tool_name(function: &str) -> String {
 }
 
 fn is_app_only(name: &str) -> bool {
-    [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, PAYMENTS_LIST].contains(&name)
+    [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW].contains(&name)
         || ACCOUNT_TOOLS.contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
@@ -959,7 +958,7 @@ fn is_app_only(name: &str) -> bool {
 
 fn read_only(name: &str) -> bool {
     READ_ONLY.contains(&name)
-        || [TICKET_SUBJECT, PRINT_PREVIEW, PAYMENTS_LIST, ACCOUNT_STATUS].contains(&name)
+        || [TICKET_SUBJECT, PRINT_PREVIEW, ACCOUNT_STATUS].contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
             .and_then(scope::find)
@@ -1134,16 +1133,6 @@ fn ticket_issue(
         .title(app, today)
         .ok_or("no such branch is saved in eBIRForms")?;
     Ok(json!({ "ticket": tickets::issue(app, &subject)?, "title": title }))
-}
-
-/// `ebirforms_payments_list {tin, form?, period?}`: eBIRForms keeps no payments yet.
-fn payments_list(app: &BirApp, arguments: &Map<String, Value>) -> Result<Value, String> {
-    let tin = arguments
-        .get("tin")
-        .and_then(Value::as_str)
-        .ok_or("`tin` is required: the app's ticket")?;
-    tickets::subject_of(app, tin)?;
-    Ok(json!({ "payments": [] }))
 }
 
 /// `ebirforms_app_print_preview`: the return's print sheet as the HTML document
@@ -2465,17 +2454,6 @@ fn tool_list() -> Value {
                     "edits": { "type": "object" }, "unlocked": { "type": "array", "items": { "type": "string" } }, "period": { "type": "string" }
                 },
                 "required": ["ticket", "form"],
-                "additionalProperties": false
-            }),
-            true,
-        ),
-        app_only(
-            PAYMENTS_LIST,
-            "a return's recorded payments (eBIRForms keeps none yet: always empty).",
-            json!({
-                "type": "object",
-                "properties": { "tin": { "type": "string" }, "form": { "type": "string" }, "period": { "type": "string" } },
-                "required": ["tin"],
                 "additionalProperties": false
             }),
             true,

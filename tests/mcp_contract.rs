@@ -628,12 +628,6 @@ fn the_bot_contract_over_a_scratch_database() {
     let rows = result_of(&rows).as_array().unwrap().clone();
     assert_eq!(rows.len(), 1, "a list is held to the ticket's taxpayer");
     assert_eq!(rows[0]["ticket"], ticket);
-    let payments = bot.call_as(
-        forms_app.clone(),
-        "ebirforms_payments_list",
-        json!({ "tin": ticket, "form": "2551Q", "period": "2026-Q3" }),
-    );
-    assert_eq!(result_of(&payments), &json!({ "payments": [] }));
     let opened = bot.call_as(
         forms_app.clone(),
         "ebirforms_app_screen_form_open",
@@ -667,11 +661,33 @@ fn the_bot_contract_over_a_scratch_database() {
     assert!(
         error_text(&bot.agent("ebirforms_form_fill", json!({ "fields": {} }))).contains("fields")
     );
-    let filled = bot.agent(
+    let refused = bot.agent(
         "ebirforms_form_fill",
         json!({ "fields": { "no-such-box": "1.00" }, "source": "document" }),
     );
-    assert_eq!(filled["isError"], false, "{filled}");
+    let refused = result_of(&refused).clone();
+    assert!(
+        refused["rejected"].get("no-such-box").is_some(),
+        "{refused}"
+    );
+    assert_eq!(refused["filled"], json!([]), "{refused}");
+    // a fill eBIRForms took nothing from leaves the return unchanged, so it closes
+    let dismissed = bot.agent("ebirforms_form_dismiss", json!({}));
+    assert_eq!(result_of(&dismissed)["dismissed"], true, "{dismissed}");
+    let reopened = bot.agent(
+        "ebirforms_form_open",
+        json!({ "code": "2551Q", "tin": ticket, "period": "2026-Q3" }),
+    );
+    assert_eq!(reopened["isError"], false, "{reopened}");
+    let filled = bot.agent(
+        "ebirforms_form_fill",
+        json!({ "fields": { "txtATCAmt1": "1000.00", "no-such-box": "1.00" }, "source": "document" }),
+    );
+    assert_eq!(
+        result_of(&filled)["filled"],
+        json!(["txtATCAmt1"]),
+        "{filled}"
+    );
     // unsaved edits keep it open
     assert!(error_text(&bot.agent("ebirforms_form_dismiss", json!({}))).contains("unsaved"));
 
