@@ -15,7 +15,9 @@
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
-use crate::server::{ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, RDO_LOOKUP};
+use crate::server::{
+    ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, RDO_LOOKUP, TAXPAYERS_LIST,
+};
 use crate::tickets;
 
 /// Card kinds: id, app, small.
@@ -28,6 +30,7 @@ const KINDS: &[(&str, &str, bool)] = &[
     ("queue", "card-dates", false),
     ("rdo", "card-calc", true),
     ("atc", "card-calc", true),
+    ("people", "card-people", false),
 ];
 
 /// The read tool a card app's Refresh re-runs (named by the card's props,
@@ -36,6 +39,7 @@ pub(crate) fn refresh_tools(app: &str) -> &'static [&'static str] {
     match app {
         "card-dates" => &[CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST],
         "card-calc" => &[RDO_LOOKUP, ATC_LOOKUP],
+        "card-people" => &[TAXPAYERS_LIST],
         _ => &[],
     }
 }
@@ -127,6 +131,28 @@ fn calendar_card(args: &Map<String, Value>) -> (&'static str, &'static str) {
         }
         _ => ("dues", "What's due"),
     }
+}
+
+/// `/taxprofile` and `/taxprofile list`: the Tax profiles card inline in
+/// the chat, as a resolve's `open`. Its props hold no snapshot, only the
+/// read it makes when it mounts ([`TAXPAYERS_LIST`], an app's call): no
+/// taxpayer, name or TIN is in the answer, the props or the Bot's log of
+/// an open.
+pub(crate) fn people_open() -> Value {
+    let mut card = open(
+        "people",
+        "Tax profiles",
+        None,
+        json!(null),
+        TAXPAYERS_LIST,
+        json!({}),
+    );
+    if let Some(props) = card["props"].as_object_mut() {
+        props.remove("snapshot");
+        props.remove("as_of");
+    }
+    card["result"] = json!("open");
+    card
 }
 
 /// Add the card an answer to the assistant carries. `args` are the

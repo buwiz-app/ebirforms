@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use ebirforms_mini_app::owner;
+use ebirforms_mini_app::{legacy_import, owner};
 
 const USAGE: &str = "ebirforms-mini-app: the eBIRForms mini app (app.buwiz.ebirforms), the MCP server the Buwiz Bot spawns.
 
@@ -16,6 +16,19 @@ Usage: ebirforms-mini-app mcp              speak MCP (JSON-RPC 2.0, one message 
                                            from the signed manifest and the binary in <out>, for
                                            `buwiz-broker sign-manifest --block buwiz`
                                            (tools/release/publish.sh runs it)
+       ebirforms-mini-app import-legacy --from <old bir_data.db> --key-file <key> [--data-dir <dir>]
+                                [--dry-run [--explain]] [--rebuild-stale-backfill]
+                                           copy the retired BIR app's taxpayers, their branches,
+                                           saved and filed returns and yearly forms into this
+                                           app's own database, once: the old files are only read
+                                           (a copy is opened), the target is backed up first,
+                                           a taxpayer already there is skipped, and the output
+                                           is counts only. Pause eBIRForms in Buwiz Bot first.
+                                           --explain (dry run): why each refused branch was
+                                           refused, by index. --rebuild-stale-backfill: a taxpayer
+                                           refused only for a Confirmed registration backfill that
+                                           no longer matches its profile comes across with the
+                                           backfill made again from the profile as it is.
        ebirforms-mini-app --version
        ebirforms-mini-app --help
 
@@ -30,6 +43,7 @@ Environment:
                        ebirforms.db, its key ebirforms.key (0600, made on first run) and logs/";
 
 fn main() -> ExitCode {
+    legacy_import::sweep_stale_work();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args
         .iter()
@@ -54,6 +68,10 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        ["import-legacy", rest @ ..] => import_legacy(rest),
+        [legacy_import::EXPORT_COMMAND, "--db", db, "--out", out] => {
+            legacy_import::export_child(db, out)
+        }
         ["--version" | "-V"] => {
             println!("ebirforms-mini-app {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -107,6 +125,46 @@ fn print_manifest(key_id: &str) -> ExitCode {
         serde_json::to_string_pretty(&manifest).expect("json value")
     );
     ExitCode::SUCCESS
+}
+
+/// `import-legacy`: stage (the old copy read by a child process, the target
+/// backed up), point eBIRForms at the target's own key, import, print the
+/// counts.
+#[allow(unsafe_code)]
+fn import_legacy(args: &[&str]) -> ExitCode {
+    let fail = |message: &str| {
+        eprintln!("ebirforms-mini-app import-legacy: {message}");
+        ExitCode::FAILURE
+    };
+    let options = match legacy_import::Options::parse(args) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("ebirforms-mini-app import-legacy: {message}");
+            return ExitCode::from(2);
+        }
+    };
+    let staged = match legacy_import::stage(&options) {
+        Ok(staged) => staged,
+        Err(message) => return fail(&message),
+    };
+    // SAFETY: no thread has started: staging ran a child process only.
+    let database = match unsafe { owner::prepare(staged.target_dir()) } {
+        Ok(database) => database,
+        Err(message) => return fail(&message),
+    };
+    match legacy_import::import(&staged, &database) {
+        Ok(report) => {
+            for line in report.lines(&staged) {
+                println!("{line}");
+            }
+            if report.failed.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(message) => fail(&message),
+    }
 }
 
 #[allow(unsafe_code)]

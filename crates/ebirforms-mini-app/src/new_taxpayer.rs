@@ -35,9 +35,58 @@ const HEAD: [&str; 5] = [
     "email",
 ];
 
+// The field rules, the same as the form's (`apps/ebirforms/tax-profile.tsx`:
+// `TIN_RE`, `ZIP_RE`, `EMAIL_RE`, `phoneOk`): keep the two in step. The
+// tests below hold the same examples.
+
+/// An email: `local@domain.tld`, no spaces. The local part is letters,
+/// digits and `. _ % + -`; the domain is labels of letters, digits and inner
+/// hyphens joined by dots, ending in a top-level domain of 2 or more letters.
 fn email_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").expect("regex"))
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$",
+        )
+        .expect("regex")
+    })
+}
+/// The longest email kept.
+const EMAIL_MAX: usize = 254;
+
+fn email_ok(email: &str) -> bool {
+    email.len() <= EMAIL_MAX && email_re().is_match(email)
+}
+
+/// A Philippine phone number. Spaces, dashes and brackets are allowed and
+/// only the digits count, 12 at most (the form stops typing there):
+/// - a mobile: `09` and 9 more digits (11), or `639` and 9 more (12), with
+///   or without a leading `+`;
+/// - a landline: 7 or 8 digits not starting with 0, or with its area code
+///   9 or 10 digits starting with `0` but not `09`.
+///
+/// A `+` only leads, and only in `+639…`; nothing else is allowed.
+fn phone_ok(phone: &str) -> bool {
+    let body = phone.strip_prefix('+').unwrap_or(phone);
+    if body.is_empty()
+        || !body
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, ' ' | '(' | ')' | '-'))
+    {
+        return false;
+    }
+    let digits: String = body.chars().filter(char::is_ascii_digit).collect();
+    let d = digits.as_bytes();
+    if phone.starts_with('+') {
+        return d.len() == 12 && digits.starts_with("639");
+    }
+    match d.len() {
+        11 => digits.starts_with("09"),
+        12 => digits.starts_with("639"),
+        7 | 8 => d[0] != b'0',
+        9 | 10 => d[0] == b'0' && (b'1'..=b'8').contains(&d[1]),
+        _ => false,
+    }
 }
 
 /// `create_taxpayer [{tin_root, name, taxpayer_type, head_office: {rdo_code,
@@ -50,7 +99,8 @@ pub(crate) fn create(app: &BirApp, args: &[Value], today: NaiveDate) -> Result<V
         return Err("takes one argument: the new taxpayer, as an object".into());
     };
     let rdos = rdo_codes(app)?;
-    let new = check(input, &rdos).map_err(|problems| problems.join("\n"))?;
+    let zips = zip_codes(app)?;
+    let new = check(input, &rdos, &zips).map_err(|problems| problems.join("\n"))?;
     let root = new.tin_root.clone();
     app.create_taxpayer(&new)
         .map_err(|error| refusal(&error.to_string(), &root))?;
@@ -74,10 +124,29 @@ fn rdo_codes(app: &BirApp) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The new taxpayer as typed, or every problem with it, by field.
+/// The ZIP codes of the table the form picks from (`list_zip_codes`, each
+/// "1000 - Manila CPO - Ermita": the code, then the place).
+fn zip_codes(app: &BirApp) -> Result<Vec<String>, String> {
+    let listed = app
+        .call("list_zip_codes", Vec::new())
+        .map_err(|error| error.to_string())?;
+    Ok(listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|entry| entry.split(" - ").next())
+        .map(|code| code.trim().to_string())
+        .collect())
+}
+
+/// The new taxpayer as typed, or every problem with it, by field. `rdos`
+/// and `zips` are the codes of the lists the form picks from: the RDO and
+/// the ZIP code must be one of them, never free text.
 pub(crate) fn check(
     input: &Map<String, Value>,
     rdos: &[String],
+    zips: &[String],
 ) -> Result<NewTaxpayer, Vec<String>> {
     let mut problems = Vec::new();
     let empty = Map::new();
@@ -123,17 +192,20 @@ pub(crate) fn check(
     } else if !rdos.contains(&facts.rdo_code) {
         problems.push("rdo_code: pick an RDO from the list".into());
     }
-    if !facts.zip_code.is_empty()
-        && !(facts.zip_code.len() == 4 && facts.zip_code.bytes().all(|b| b.is_ascii_digit()))
-    {
-        problems.push("zip_code: a ZIP code is 4 digits, like 1226".into());
+    if !facts.zip_code.is_empty() {
+        if !(facts.zip_code.len() == 4 && facts.zip_code.bytes().all(|b| b.is_ascii_digit())) {
+            problems.push("zip_code: a ZIP code is 4 digits, like 1226".into());
+        } else if !zips.contains(&facts.zip_code) {
+            problems.push("zip_code: pick a ZIP code from the list".into());
+        }
     }
-    let phone_digits = facts.phone.chars().filter(char::is_ascii_digit).count();
-    if !facts.phone.is_empty() && !(7..=13).contains(&phone_digits) {
-        problems.push("phone: type a phone number like 09171234567 or 028123 4567".into());
+    if !facts.phone.is_empty() && !phone_ok(&facts.phone) {
+        problems.push(
+            "phone: type a Philippine number: a mobile 09XXXXXXXXX, +639XXXXXXXXX or 639XXXXXXXXX, or a landline of 7 to 10 digits with an optional area code, like (02) 8123 4567".into(),
+        );
     }
-    if !facts.email.is_empty() && !email_re().is_match(&facts.email) {
-        problems.push("email: type an email like name@example.com".into());
+    if !facts.email.is_empty() && !email_ok(&facts.email) {
+        problems.push("email: type an email like name@example.com, with no spaces".into());
     }
     if !problems.is_empty() {
         return Err(problems);
@@ -168,6 +240,26 @@ mod tests {
         vec!["043".into(), "050".into()]
     }
 
+    fn zips() -> Vec<String> {
+        vec!["1101".into(), "1600".into()]
+    }
+
+    /// `check` with the lists above.
+    fn checked(value: Value) -> Result<NewTaxpayer, Vec<String>> {
+        check(&input(value), &rdos(), &zips())
+    }
+
+    /// The fields `check` refuses `good()` with `field` of the head office
+    /// set to `value`.
+    fn refused_head(field: &str, value: &str) -> Vec<String> {
+        let mut form = good();
+        form["head_office"][field] = json!(value);
+        match checked(form) {
+            Ok(_) => Vec::new(),
+            Err(problems) => fields(&problems).iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
     fn input(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
     }
@@ -196,13 +288,13 @@ mod tests {
 
     #[test]
     fn a_complete_form_passes_as_typed() {
-        let new = check(&input(good()), &rdos()).unwrap();
+        let new = checked(good()).unwrap();
         assert_eq!(new.tin_root, "000111222");
         assert_eq!(new.head_office.rdo_code, "043");
         assert_eq!(new.birth_date, None);
         // only the TIN, name, type and RDO are required
         let bare = json!({ "tin_root": "000111222", "name": "Synthetic", "taxpayer_type": "Individual", "head_office": { "rdo_code": "050" } });
-        assert!(check(&input(bare), &rdos()).is_ok());
+        assert!(checked(bare).is_ok());
     }
 
     #[test]
@@ -213,7 +305,7 @@ mod tests {
             "taxpayer_type": "Robot",
             "head_office": { "zip_code": "16", "phone": "12", "email": "nope" }
         });
-        let problems = check(&input(bad), &rdos()).unwrap_err();
+        let problems = checked(bad).unwrap_err();
         assert_eq!(
             fields(&problems),
             [
@@ -234,14 +326,19 @@ mod tests {
 
     #[test]
     fn a_bad_tin_is_refused() {
-        for tin in ["00011122", "0001112223", "000-111-222", "00011122x", ""] {
+        for tin in [
+            "00011122",
+            "0001112223",
+            "000-111-222",
+            "00011122x",
+            "000555666a",
+            "00055566a",
+            "abcdefghi",
+            "",
+        ] {
             let mut value = good();
             value["tin_root"] = json!(tin);
-            assert_eq!(
-                fields(&check(&input(value), &rdos()).unwrap_err()),
-                ["tin_root"],
-                "{tin}"
-            );
+            assert_eq!(fields(&checked(value).unwrap_err()), ["tin_root"], "{tin}");
         }
     }
 
@@ -249,39 +346,132 @@ mod tests {
     fn the_rdo_is_required_and_from_the_table() {
         let mut missing = good();
         missing["head_office"]["rdo_code"] = json!("");
-        let problems = check(&input(missing), &rdos()).unwrap_err();
+        let problems = checked(missing).unwrap_err();
         assert_eq!(fields(&problems), ["rdo_code"]);
         let mut gone = good();
         gone["head_office"]
             .as_object_mut()
             .unwrap()
             .remove("rdo_code");
-        assert_eq!(
-            fields(&check(&input(gone), &rdos()).unwrap_err()),
-            ["rdo_code"]
-        );
+        assert_eq!(fields(&checked(gone).unwrap_err()), ["rdo_code"]);
         let mut unknown = good();
         unknown["head_office"]["rdo_code"] = json!("999");
-        assert_eq!(
-            fields(&check(&input(unknown), &rdos()).unwrap_err()),
-            ["rdo_code"]
-        );
+        assert_eq!(fields(&checked(unknown).unwrap_err()), ["rdo_code"]);
+    }
+
+    #[test]
+    fn the_zip_is_a_code_from_the_table() {
+        for zip in ["1101", "1600", ""] {
+            assert!(refused_head("zip_code", zip).is_empty(), "{zip}");
+        }
+        // not in the table, not 4 digits, or the picker's label rather than its code
+        for zip in ["9999", "16", "16000", "1600 - Pasig", "Pasig", "16a0"] {
+            assert_eq!(refused_head("zip_code", zip), ["zip_code"], "{zip}");
+        }
+        // the RDO too: its code, never the label the input shows
+        for rdo in ["043 - Pasig City", "Pasig City", "43"] {
+            assert_eq!(refused_head("rdo_code", rdo), ["rdo_code"], "{rdo}");
+        }
+    }
+
+    // The same examples as the form's rules (tax-profile.tsx `phoneOk`).
+    #[test]
+    fn a_phone_is_a_philippine_number() {
+        for phone in [
+            "",
+            "09170000000",
+            "0917 000 0000",
+            "0917-000-0000",
+            "+639170000000",
+            "+63 917 000 0000",
+            "+63 (917) 000-0000",
+            "+639156837000",
+            "09156837000",
+            "639156837000",
+            "639170000000",
+            "63 917 000 0000",
+            "8123 4567",
+            "812 3456",
+            "(02) 8123 4567",
+            "02 8123-4567",
+            "028123456",
+            "(032) 234 5678",
+        ] {
+            assert!(refused_head("phone", phone).is_empty(), "{phone}");
+        }
+        for phone in [
+            "12",
+            "123456",
+            "0917000000",
+            "091700000000",
+            "9170000000",
+            "+63917000000",
+            "+6391700000000",
+            "+6328123 4567",
+            "+1 415 555 0100",
+            "63917000000",
+            "6391700000000",
+            "6391568370001",
+            "+6391568370001",
+            "091568370001",
+            "638170000000",
+            "0123 4567",
+            "0912345678",
+            "0012345678",
+            "02.8123.4567",
+            "0917000000a",
+            "call 09170000000",
+            "0917+0000000",
+            "+",
+            "()-",
+        ] {
+            assert_eq!(refused_head("phone", phone), ["phone"], "{phone}");
+        }
+    }
+
+    // The same examples as the form's rules (tax-profile.tsx `EMAIL_RE`).
+    #[test]
+    fn an_email_is_plausible() {
+        for email in [
+            "",
+            "sample@example.invalid",
+            "first.last+tag@sub.example.ph",
+            "a_b-c%d@ex-ample.co",
+            "A@B.PH",
+        ] {
+            assert!(refused_head("email", email).is_empty(), "{email}");
+        }
+        let long = format!("{}@example.com", "a".repeat(250));
+        for email in [
+            "nope",
+            "a@b",
+            "a@b.c",
+            "a@b.123",
+            "@example.com",
+            "name@",
+            "na me@example.com",
+            "name@exa mple.com",
+            "name@@example.com",
+            "name@-example.com",
+            "name@example-.com",
+            "name@example..com",
+            "name@.example.com",
+            "name@example.com.",
+            "näme@example.com",
+            long.as_str(),
+        ] {
+            assert_eq!(refused_head("email", email), ["email"], "{email}");
+        }
     }
 
     #[test]
     fn nothing_but_the_form_s_fields() {
         let mut extra = good();
         extra["birth_date"] = json!("1990-01-01");
-        assert_eq!(
-            fields(&check(&input(extra), &rdos()).unwrap_err()),
-            ["birth_date"]
-        );
+        assert_eq!(fields(&checked(extra).unwrap_err()), ["birth_date"]);
         let mut extra = good();
         extra["head_office"]["line_of_business"] = json!("x");
-        assert_eq!(
-            fields(&check(&input(extra), &rdos()).unwrap_err()),
-            ["line_of_business"]
-        );
+        assert_eq!(fields(&checked(extra).unwrap_err()), ["line_of_business"]);
     }
 
     #[test]

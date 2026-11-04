@@ -211,6 +211,7 @@ fn the_bot_contract_over_a_scratch_database() {
             "buwiz-app://register",
             "buwiz-app://card-dates",
             "buwiz-app://card-calc",
+            "buwiz-app://card-people",
             "buwiz://manifest"
         ]
     );

@@ -5,7 +5,7 @@
 //!
 //! - the mini apps' calls: `ebirforms_app_<function>` (one per function an
 //!   app's source calls, held to its ticket by [`crate::scope`]), the ticket
-//!   helpers, the print preview and the payments list;
+//!   helpers, the print preview and the taxpayers list;
 //! - the assistant's tools: status, taxpayers, dues, the filing calendar,
 //!   drafts, opening an app, and one open return to read, fill, validate or
 //!   save;
@@ -79,8 +79,11 @@ pub(crate) const APP_PREFIX: &str = "ebirforms_app_";
 pub(crate) const TICKET_SUBJECT: &str = "ebirforms_ticket_subject";
 pub(crate) const TICKET_ISSUE: &str = "ebirforms_ticket_issue";
 pub(crate) const PRINT_PREVIEW: &str = "ebirforms_app_print_preview";
-/// eBIRForms keeps no payments yet: the list is empty, so the Forms app's
-/// payment section shows nothing paid.
+/// The saved taxpayers as the Tax profiles card and Tax Profile's picker
+/// show them (`/taxprofile list`): each by ticket, name, TIN as shown, type
+/// and RDO. An app's read only: the assistant lists taxpayers with
+/// `ebirforms_profiles_list`, by ticket.
+pub(crate) const TAXPAYERS_LIST: &str = "ebirforms_taxpayers_list";
 // The Sign-in app's tools (account.rs): who is signed in, and the device
 // flow. Never the assistant's: it cannot sign the owner in or out.
 pub(crate) const ACCOUNT_STATUS: &str = "ebirforms_account_status";
@@ -95,7 +98,10 @@ const ACCOUNT_TOOLS: [&str; 4] = [
 ];
 
 /// The assistant's tools that change nothing (`readOnlyHint`, P8): the ones
-/// a routine or resolve call may run.
+/// a routine or resolve call may run. A ticket issued on the way does not
+/// count: each of these answers by ticket ([`Scrubber`]), as a resolve does,
+/// and a taxpayer's first answer adds its ticket to the store. No taxpayer,
+/// branch or return changes.
 const READ_ONLY: [&str; 12] = [
     RDO_LOOKUP,
     ATC_LOOKUP,
@@ -125,8 +131,8 @@ waiting to be sent, ebirforms_queue_list. Each shows the user a card. To let the
 with `app: \"forms\"` and the taxpayer's ticket as `tin` (and `form`, `period` to open one \
 return), `app: \"tax-profile\"` for a taxpayer's registration, `app: \"calendar\"` for the \
 filing calendar, or `app: \"deadlines\"` for the next returns due as a card in the chat. \
-You cannot add a taxpayer: the user does, with New taxpayer in the Tax Profile app \
-(ebirforms_app_open `tax-profile`, without `tin` when none is saved yet). You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
+You cannot add a taxpayer: the user does, on the New taxpayer form of the Tax Profile app \
+(ebirforms_app_open `tax-profile` without `tin` opens on it when none is saved), or by typing /taxprofile create. You can draft a return yourself: ebirforms_form_open, ebirforms_form_fields, ebirforms_form_fill (with its \
 `source`), ebirforms_form_validate, ebirforms_form_save_draft, ebirforms_form_dismiss; one return is open at a time. \
 You never queue or send a return: the user does that in the Forms app (Queue), once signed in \
 to Buwiz in the Sign-in app (ebirforms_app_open `register`); it is then sent to the BIR and comes back \
@@ -134,7 +140,7 @@ with a receipt. Tools whose description starts with \"Mini apps only\" and ebirf
 to the mini apps and to the Bot: do not call them.";
 
 /// What `/taxprofile` and `/taxform` say with no taxpayer saved: how to add one.
-const NO_TAXPAYER: &str = "No taxpayer is saved in eBIRForms yet. To add one, open BIR Tax Profile (ask the Bot to open it) and press New taxpayer.";
+const NO_TAXPAYER: &str = "No taxpayer is saved in eBIRForms yet. To add one, type /taxprofile create, or open BIR Tax Profile (ask the Bot to open it): it opens on the New taxpayer form.";
 
 /// What a save answers when the boxes' sources were not kept.
 const SOURCES_LOST: &str = "The return is saved, but where its boxes' values came from was not kept: tell the person, and fill again before saving if they need the link.";
@@ -399,6 +405,7 @@ impl Server {
         let answer = match name {
             TICKET_SUBJECT => ticket_subject(app, arguments, today),
             TICKET_ISSUE => ticket_issue(app, arguments, today),
+            TAXPAYERS_LIST => no_arguments(arguments).and_then(|()| taxpayers_list(app)),
             PRINT_PREVIEW => return print_preview(app, arguments, today),
             _ => self.host_call(app, name, arguments),
         };
@@ -948,7 +955,7 @@ pub(crate) fn app_tool_name(function: &str) -> String {
 }
 
 fn is_app_only(name: &str) -> bool {
-    [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW].contains(&name)
+    [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, TAXPAYERS_LIST].contains(&name)
         || ACCOUNT_TOOLS.contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
@@ -956,9 +963,19 @@ fn is_app_only(name: &str) -> bool {
             .is_some()
 }
 
+/// Whether `name` changes nothing, as [`READ_ONLY`] means it: so
+/// [`TAXPAYERS_LIST`] counts, though it may issue tickets. Only `authorize`
+/// reads this, for resolve and routine calls, and the app-only tools here
+/// refuse those callers there anyway.
 fn read_only(name: &str) -> bool {
     READ_ONLY.contains(&name)
-        || [TICKET_SUBJECT, PRINT_PREVIEW, ACCOUNT_STATUS].contains(&name)
+        || [
+            TICKET_SUBJECT,
+            PRINT_PREVIEW,
+            TAXPAYERS_LIST,
+            ACCOUNT_STATUS,
+        ]
+        .contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
             .and_then(scope::find)
@@ -1133,6 +1150,66 @@ fn ticket_issue(
         .title(app, today)
         .ok_or("no such branch is saved in eBIRForms")?;
     Ok(json!({ "ticket": tickets::issue(app, &subject)?, "title": title }))
+}
+
+/// `ebirforms_taxpayers_list`: the saved taxpayers, archived ones left out,
+/// as `{taxpayers: [{ticket, name, tin_display, taxpayer_type, rdo_code,
+/// rdo_office}]}` and nothing else: what the Tax profiles card and Tax
+/// Profile's picker show. The TIN is there only as the screen shows it
+/// (000-000-000); this answer goes to an app, never to the assistant.
+/// A taxpayer with no ticket yet gets one here, the only thing it writes.
+pub(crate) fn taxpayers_list(app: &BirApp) -> Result<Value, String> {
+    let offices: BTreeMap<String, String> = BirApp::rdos()
+        .into_iter()
+        .map(|rdo| {
+            let office = rdo
+                .title
+                .split_once(" · ")
+                .map_or(String::new(), |(_, name)| name.to_string());
+            (rdo.value, office)
+        })
+        .collect();
+    let taxpayers: Vec<_> = app
+        .list_taxpayers()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|taxpayer| !taxpayer.archived)
+        .collect();
+    let subjects: Vec<Option<Subject>> = taxpayers
+        .iter()
+        .map(|taxpayer| Some(Subject::Taxpayer(taxpayer.tin_root.clone())))
+        .collect();
+    let issued = tickets::issue_all(app, &subjects)?;
+    let rows: Vec<Value> = taxpayers
+        .iter()
+        .zip(issued)
+        .map(|(taxpayer, ticket)| {
+            let rdo = taxpayer
+                .branches
+                .iter()
+                .find(|branch| branch.is_head_office)
+                .map(|branch| branch.facts.rdo_code.clone())
+                .unwrap_or_default();
+            json!({
+                "ticket": ticket.unwrap_or_default(),
+                "name": taxpayer.name,
+                "tin_display": tin_shown(&taxpayer.tin_root),
+                "taxpayer_type": taxpayer.taxpayer_type,
+                "rdo_office": offices.get(&rdo).cloned().unwrap_or_default(),
+                "rdo_code": rdo,
+            })
+        })
+        .collect();
+    Ok(json!({ "taxpayers": rows }))
+}
+
+/// A TIN root as the screen shows it: 000-000-000.
+fn tin_shown(root: &str) -> String {
+    let digits = tickets::digits(root);
+    if digits.len() < 9 {
+        return digits;
+    }
+    format!("{}-{}-{}", &digits[..3], &digits[3..6], &digits[6..9])
 }
 
 /// `ebirforms_app_print_preview`: the return's print sheet as the HTML document
@@ -1718,7 +1795,8 @@ struct ReturnAsk {
 }
 
 /// An open request (spec 6.6) for a taxpayer app: `tax-profile` without a
-/// taxpayer opens empty, on its New taxpayer button; `calendar` and
+/// taxpayer opens on its list of the saved taxpayers, or its New taxpayer
+/// form when none is saved; `calendar` and
 /// `deadlines` without one show every taxpayer.
 fn app_request(
     app: &BirApp,
@@ -1728,7 +1806,7 @@ fn app_request(
 ) -> Result<Value, String> {
     let entry = manifest::app(target).ok_or_else(|| format!("{target} is not an app"))?;
     let (ticket, title) = match subject {
-        // Tax Profile without a taxpayer: its empty state and New taxpayer
+        // Tax Profile without a taxpayer: its picker, or New taxpayer
         None => (None, entry.title.to_string()),
         Some(subject) => {
             let name = subject.title(app, today).ok_or_else(|| {
@@ -2046,32 +2124,245 @@ fn scope_taxform(app: &BirApp, ask: &Ask) -> Result<Value, String> {
     Ok(json!({ "result": "token", "ticket": ticket, "title": title }))
 }
 
-/// `/taxprofile [tin or name]`: opens that taxpayer's Tax Profile, or offers
-/// the taxpayers that match.
+/// `/taxprofile [list | create [tin or name] | edit <taxpayer> | delete
+/// <taxpayer> | <tin or name>]`:
+///
+/// - nothing or `list`: the Tax profiles card inline in the chat
+///   (`card-people`), which reads the taxpayers itself
+///   ([`TAXPAYERS_LIST`]): nothing about them is in this answer;
+/// - `create`: Tax Profile on its New taxpayer form, the name prefilled
+///   from the words after it; a TIN there opens that taxpayer's profile
+///   when it is saved, else the form empty (a TIN never goes in `props`:
+///   the Bot logs an open's props);
+/// - `edit` and `delete`: that taxpayer's profile with its Taxpayer section
+///   in edit, or at its Delete section, where deleting stays a press of the
+///   person's behind its confirmation;
+/// - anything else: that taxpayer's profile when one matches, choices when
+///   several do, else an error that echoes no digits.
+///
+/// `create`, `new`, `edit` or `delete` with words after it may be the start
+/// of a saved taxpayer's name: [`taxpayers_named`] decides, and a name it
+/// finds wins over the verb.
+///
+/// No answer names a TIN: taxpayers go by ticket and name.
 fn command_taxprofile(app: &BirApp, ask: &Ask) -> Result<Value, String> {
-    let subject = if tickets::is_ticket(&ask.value) {
-        Some(ticket_subject_title(app, &ask.value, ask.today)?.0)
-    } else if ask.value.is_empty() && ask.attached.len() == 1 && !ask.complete {
-        Some(ticket_subject_title(app, &ask.attached[0], ask.today)?.0)
-    } else {
-        let found = find_taxpayers(app, &ask.value, false)?;
-        if !ask.complete && found.len() == 1 {
-            Some(found[0].0.clone())
-        } else if found.is_empty() && !ask.complete {
-            return Err(if ask.value.is_empty() {
-                NO_TAXPAYER.to_string()
-            } else {
-                format!(
-                    "No taxpayer in eBIRForms matches “{}”",
-                    ask.value.chars().take(60).collect::<String>()
-                )
-            });
+    let (verb, rest) = ask
+        .value
+        .split_once(char::is_whitespace)
+        .map_or((ask.value.as_str(), ""), |(verb, rest)| (verb, rest.trim()));
+    let verb = verb.to_ascii_lowercase();
+    if matches!(verb.as_str(), "create" | "new" | "edit" | "delete") && !rest.is_empty() {
+        let named = taxpayers_named(app, &format!("{verb} {rest}"))?;
+        match named.as_slice() {
+            [] => {}
+            [(subject, ..)] if !ask.complete => return taxprofile_of(app, subject, ask),
+            _ => return choices_of(app, &named, ""),
+        }
+    }
+    match verb.as_str() {
+        "" => Ok(cards::people_open()),
+        "list" if rest.is_empty() => Ok(cards::people_open()),
+        "create" | "new" => taxprofile_create(app, rest, ask),
+        "edit" => taxprofile_section(app, rest, "edit", ask),
+        "delete" => taxprofile_section(app, rest, "delete", ask),
+        _ => taxprofile_open(app, ask),
+    }
+}
+
+/// The saved taxpayers `text` names outright, whatever its first word
+/// reads as: those with exactly that name (case aside), else the one whose
+/// name starts with it. Text that starts several names and is none of them
+/// names nobody, and neither does a TIN or a branch's name: a verb's own
+/// argument may be either. One row per taxpayer, its head office.
+fn taxpayers_named(app: &BirApp, text: &str) -> Result<Vec<(Subject, String, String)>, String> {
+    let wanted = text.to_lowercase();
+    let mut named: Vec<(Subject, String, String)> = app
+        .list_taxpayers()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|taxpayer| !taxpayer.archived && taxpayer.name.to_lowercase().starts_with(&wanted))
+        .map(|taxpayer| {
+            (
+                Subject::Taxpayer(taxpayer.tin_root),
+                taxpayer.name,
+                "Head office".to_string(),
+            )
+        })
+        .collect();
+    if named
+        .iter()
+        .any(|(_, name, _)| name.to_lowercase() == wanted)
+    {
+        named.retain(|(_, name, _)| name.to_lowercase() == wanted);
+    } else if named.len() > 1 {
+        named.clear();
+    }
+    Ok(named)
+}
+
+/// Every saved taxpayer that `value` names, as choices whose value is
+/// `<prefix> <ticket>` (`edit` and `delete` keep their verb).
+fn taxpayer_choices(app: &BirApp, value: &str, prefix: &str, ask: &Ask) -> Result<Value, String> {
+    let found = find_taxpayers(app, value, false)?;
+    if found.is_empty() && !ask.complete {
+        return Err(if value.is_empty() {
+            NO_TAXPAYER.to_string()
         } else {
-            return choices_of(app, &found, "");
+            no_match(value)
+        });
+    }
+    let subjects: Vec<Option<Subject>> = found
+        .iter()
+        .map(|(subject, ..)| Some(subject.clone()))
+        .collect();
+    let issued = tickets::issue_all(app, &subjects)?;
+    let choices: Vec<Value> = found
+        .iter()
+        .zip(issued)
+        .map(|((_, label, detail), ticket)| {
+            json!({
+                "label": label.chars().take(80).collect::<String>(),
+                "detail": detail.chars().take(160).collect::<String>(),
+                "value": format!("{prefix} {}", ticket.unwrap_or_default()).trim(),
+            })
+        })
+        .collect();
+    Ok(json!({ "result": "choices", "choices": choices }))
+}
+
+/// Why nothing matched `value`, without echoing a TIN typed there.
+fn no_match(value: &str) -> String {
+    if value.chars().any(|c| c.is_ascii_digit()) {
+        "No taxpayer in eBIRForms has that TIN or name".to_string()
+    } else {
+        format!(
+            "No taxpayer in eBIRForms matches “{}”",
+            value.chars().take(60).collect::<String>()
+        )
+    }
+}
+
+/// The New taxpayer form of Tax Profile, its name prefilled with `name`.
+fn new_taxpayer_open(name: Option<&str>) -> Result<Value, String> {
+    let entry = manifest::app(manifest::TAX_PROFILE_ID).ok_or("Tax Profile is not an app")?;
+    let mut props = json!({ "start": "new" });
+    if let Some(name) = name {
+        props["name"] = json!(name);
+    }
+    Ok(json!({
+        "result": "open",
+        "app": manifest::TAX_PROFILE_ID,
+        "props": props,
+        "title": entry.title,
+        "placement": "full",
+    }))
+}
+
+/// What `/taxprofile create <text>` prefills: a TIN (9 digits, or 14 with
+/// its branch, spaces and dashes ignored) as its 9-digit root, else the
+/// text as a name. Text with 9 or more digits that is not a TIN is
+/// neither: it may hold one.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Prefill {
+    Nothing,
+    Tin(String),
+    Name(String),
+}
+
+pub(crate) fn create_prefill(text: &str) -> Prefill {
+    let text = text.trim();
+    if text.is_empty() {
+        return Prefill::Nothing;
+    }
+    let packed: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    if packed.chars().all(|c| c.is_ascii_digit()) && (packed.len() == 9 || packed.len() == 14) {
+        return Prefill::Tin(packed[..9].to_string());
+    }
+    if text.chars().filter(char::is_ascii_digit).count() >= 9 {
+        return Prefill::Nothing;
+    }
+    Prefill::Name(text.chars().take(NAME_PREFILL_MAX).collect())
+}
+
+/// The longest name `/taxprofile create` prefills (the manifest's `name` prop).
+const NAME_PREFILL_MAX: usize = 120;
+
+/// `/taxprofile create [tin or name]`.
+fn taxprofile_create(app: &BirApp, text: &str, ask: &Ask) -> Result<Value, String> {
+    if ask.complete {
+        return Ok(json!({ "result": "choices", "choices": [] }));
+    }
+    match create_prefill(text) {
+        Prefill::Nothing => new_taxpayer_open(None),
+        Prefill::Name(name) => new_taxpayer_open(Some(&name)),
+        Prefill::Tin(root) => {
+            let subject = Subject::Taxpayer(root);
+            if subject.title(app, ask.today).is_some() {
+                let mut open =
+                    app_request(app, manifest::TAX_PROFILE_ID, Some(&subject), ask.today)?;
+                open["result"] = json!("open");
+                Ok(open)
+            } else {
+                // not saved: the form, which the person types the TIN into
+                new_taxpayer_open(None)
+            }
+        }
+    }
+}
+
+/// `/taxprofile edit|delete <taxpayer>`: its profile at that section; the
+/// taxpayer by ticket, the one attached, or by name or TIN as the
+/// `taxprofile` scope finds it (choices when several match).
+fn taxprofile_section(app: &BirApp, rest: &str, section: &str, ask: &Ask) -> Result<Value, String> {
+    let subject = if tickets::is_ticket(rest) {
+        ticket_subject_title(app, rest, ask.today)?.0
+    } else if rest.is_empty() && ask.attached.len() == 1 && !ask.complete {
+        ticket_subject_title(app, &ask.attached[0], ask.today)?.0
+    } else {
+        let found = find_taxpayers(app, rest, false)?;
+        match found.as_slice() {
+            [(subject, ..)] if !ask.complete => subject.clone(),
+            [] if !ask.complete => {
+                return Err(if rest.is_empty() {
+                    NO_TAXPAYER.to_string()
+                } else {
+                    no_match(rest)
+                });
+            }
+            _ => return taxpayer_choices(app, rest, section, ask),
         }
     };
-    let subject = subject.expect("a subject");
+    // a branch's ticket: its taxpayer, whose head office holds both sections
+    let subject = Subject::Taxpayer(subject.root());
     let mut open = app_request(app, manifest::TAX_PROFILE_ID, Some(&subject), ask.today)?;
+    open["props"]["section"] = json!(section);
+    open["result"] = json!("open");
+    Ok(open)
+}
+
+/// `/taxprofile <tin, name or ticket>`: that taxpayer's Tax Profile when
+/// one matches, the matches as choices when several do, else an error that
+/// echoes no digits.
+fn taxprofile_open(app: &BirApp, ask: &Ask) -> Result<Value, String> {
+    let subject = if tickets::is_ticket(&ask.value) {
+        ticket_subject_title(app, &ask.value, ask.today)?.0
+    } else {
+        let found = find_taxpayers(app, &ask.value, false)?;
+        match found.as_slice() {
+            [(subject, ..)] if !ask.complete => subject.clone(),
+            [] if !ask.complete => return Err(no_match(&ask.value)),
+            _ => return choices_of(app, &found, ""),
+        }
+    };
+    taxprofile_of(app, &subject, ask)
+}
+
+/// `subject`'s Tax Profile, as an `open`.
+fn taxprofile_of(app: &BirApp, subject: &Subject, ask: &Ask) -> Result<Value, String> {
+    let mut open = app_request(app, manifest::TAX_PROFILE_ID, Some(subject), ask.today)?;
     open["result"] = json!("open");
     Ok(open)
 }
@@ -2325,7 +2616,7 @@ fn tool_list() -> Value {
         ),
         tool(
             APP_OPEN,
-            "Ask the Bot to open one of eBIRForms's apps for the user: `forms` (the taxpayer's ticket as `tin`, and `form` + `period`, `action` view|file|submit, `draft_id` to open one return), `tax-profile` (the taxpayer's ticket as `tin`; without one it opens empty, with the New taxpayer button the user adds a taxpayer with), `calendar`, `deadlines` (the next returns due, as a card in the chat; `tin` for one taxpayer) or `register` (the Buwiz Sign-in screen, where the user signs in themselves).",
+            "Ask the Bot to open one of eBIRForms's apps for the user: `forms` (the taxpayer's ticket as `tin`, and `form` + `period`, `action` view|file|submit, `draft_id` to open one return), `tax-profile` (the taxpayer's ticket as `tin`; without one it lists the saved taxpayers to pick from, or opens on the New taxpayer form when none is saved, as /taxprofile create does), `calendar`, `deadlines` (the next returns due, as a card in the chat; `tin` for one taxpayer) or `register` (the Buwiz Sign-in screen, where the user signs in themselves).",
             json!({
                 "type": "object",
                 "properties": {
@@ -2458,6 +2749,12 @@ fn tool_list() -> Value {
             }),
             true,
         ),
+        app_only(
+            TAXPAYERS_LIST,
+            "the saved taxpayers (archived ones left out) as the Tax profiles card and Tax Profile's picker show them: ticket, name, TIN as shown, type and RDO.",
+            empty_schema(),
+            true,
+        ),
     ];
     for (name, description, read_only) in [
         (
@@ -2503,4 +2800,51 @@ fn tool_list() -> Value {
         ));
     }
     json!({ "tools": tools })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Prefill, create_prefill};
+
+    // `/taxprofile create <text>`: a TIN goes to the TIN field, anything
+    // else to the name. Synthetic TINs only.
+    #[test]
+    fn create_tells_a_tin_from_a_name() {
+        for tin in [
+            "000555666",
+            "000-555-666",
+            " 000 555 666 ",
+            "00055566600000",
+            "000-555-666-00000",
+            "000-555-666-00001",
+        ] {
+            assert_eq!(
+                create_prefill(tin),
+                Prefill::Tin("000555666".into()),
+                "{tin}"
+            );
+        }
+        for (text, name) in [
+            ("Synthetic Sample Trading", "Synthetic Sample Trading"),
+            ("  Synthetic Sample Trading ", "Synthetic Sample Trading"),
+            ("12345", "12345"),
+            ("Store 24", "Store 24"),
+        ] {
+            assert_eq!(create_prefill(text), Prefill::Name(name.into()), "{text}");
+        }
+        // no text, or text that may hold a TIN but is not one: nothing
+        for text in [
+            "",
+            "   ",
+            "0005556667",
+            "Synthetic 000555666",
+            "000-555-666-0000",
+        ] {
+            assert_eq!(create_prefill(text), Prefill::Nothing, "{text}");
+        }
+        assert_eq!(
+            create_prefill(&"x".repeat(300)),
+            Prefill::Name("x".repeat(120))
+        );
+    }
 }

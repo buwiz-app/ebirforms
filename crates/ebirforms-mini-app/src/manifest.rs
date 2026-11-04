@@ -26,7 +26,7 @@ use crate::jcs;
 use crate::scope;
 use crate::server::{
     ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS, CALENDAR_GET,
-    PRINT_PREVIEW, RESOLVE, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
+    PRINT_PREVIEW, RESOLVE, TAXPAYERS_LIST, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
 /// The protocol this plugin speaks: the SDK's (1.0.0).
@@ -67,6 +67,10 @@ pub(crate) const CARD_DATES_SOURCE: &str = include_str!("../../../apps/ebirforms
 /// Answer cards for quick lookups (an RDO).
 pub(crate) const CARD_CALC_ID: &str = "card-calc";
 pub(crate) const CARD_CALC_SOURCE: &str = include_str!("../../../apps/ebirforms/card-calc.tsx");
+/// The Tax profiles card: every saved taxpayer, inline in the chat
+/// (`/taxprofile list`).
+pub(crate) const CARD_PEOPLE_ID: &str = "card-people";
+pub(crate) const CARD_PEOPLE_SOURCE: &str = include_str!("../../../apps/ebirforms/card-people.tsx");
 pub(crate) const APP_URI_PREFIX: &str = "buwiz-app://";
 pub(crate) const APP_MIME: &str = "text/x-nsh-tsx";
 
@@ -80,7 +84,7 @@ pub(crate) struct App {
 }
 
 /// The apps, in manifest order.
-pub(crate) const APPS: [App; 7] = [
+pub(crate) const APPS: [App; 8] = [
     App {
         id: FORMS_ID,
         title: FORMS_TITLE,
@@ -123,6 +127,12 @@ pub(crate) const APPS: [App; 7] = [
         description: "Answer cards for quick lookups: a revenue district office or an ATC.",
         source: CARD_CALC_SOURCE,
     },
+    App {
+        id: CARD_PEOPLE_ID,
+        title: "Tax profiles",
+        description: "Every saved taxpayer as a card in the chat: name, TIN, type and RDO, each opening its BIR Tax Profile, and New taxpayer.",
+        source: CARD_PEOPLE_SOURCE,
+    },
 ];
 
 /// What the agent is told when a taxpayer token is in a message or attached.
@@ -164,7 +174,8 @@ fn host_tools(functions: &[&str]) -> Vec<String> {
 /// The tools the Forms app calls: the ticket helpers, the print preview
 /// and one `ebirforms_app_<function>` per function.
 pub(crate) fn forms_tools() -> Vec<String> {
-    let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW]
+    // TAXPAYERS_LIST: the picker of an open with no taxpayer (or one gone)
+    let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, TAXPAYERS_LIST]
         .iter()
         .map(|tool| tool.to_string())
         .collect();
@@ -220,14 +231,25 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
             }),
         ),
         TAX_PROFILE_ID => {
-            let mut tools = vec![TICKET_SUBJECT.to_string(), TICKET_ISSUE.to_string()];
+            // the picker of an open with no taxpayer: the saved taxpayers
+            let mut tools = vec![
+                TICKET_SUBJECT.to_string(),
+                TICKET_ISSUE.to_string(),
+                TAXPAYERS_LIST.to_string(),
+            ];
             tools.extend(host_tools(scope::TAX_PROFILE));
             (
                 json!({
                     "type": "object",
                     "properties": {
                         "ticket": ticket_schema(),
-                        "year": { "type": "integer", "minimum": 1900, "maximum": 2200 }
+                        "year": { "type": "integer", "minimum": 1900, "maximum": 2200 },
+                        // `/taxprofile create` and an open without a taxpayer:
+                        // the New taxpayer form, its name prefilled (never a TIN)
+                        "start": { "type": "string", "enum": ["new"] },
+                        "name": { "type": "string", "maxLength": 120 },
+                        // `/taxprofile edit` and `delete`: where the profile opens
+                        "section": { "type": "string", "enum": ["edit", "delete"] }
                     }
                 }),
                 json!(["full"]),
@@ -257,11 +279,15 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
                 "copy": true,
             }),
         ),
-        CARD_DATES_ID | CARD_CALC_ID => {
+        CARD_DATES_ID | CARD_CALC_ID | CARD_PEOPLE_ID => {
             let mut permissions = json!({ "tools": cards::refresh_tools(id) });
             if id == CARD_DATES_ID {
                 // Open (a return in Forms) and Open the Calendar
                 permissions["open"] = json!({ "apps": [FORMS_ID, CALENDAR_ID] });
+            }
+            if id == CARD_PEOPLE_ID {
+                // a row opens its taxpayer's Tax Profile; New taxpayer, its form
+                permissions["open"] = json!({ "apps": [TAX_PROFILE_ID] });
             }
             (
                 cards::props_schema(),
@@ -333,7 +359,7 @@ pub fn unsigned_for(key_id: &str) -> Value {
         "description": "Philippine BIR returns for the taxpayers kept in the eBIRForms mini app on this computer.",
         "publisher": { "id": "app.buwiz", "key_id": key_id, "name": "Buwiz" },
         "commands": [
-            { "name": "taxprofile", "args": "[tin or name]", "description": "Open a taxpayer's tax profile", "resolve": RESOLVE },
+            { "name": "taxprofile", "args": "[list | create [tin or name] | edit <taxpayer> | delete <taxpayer> | tin or name]", "description": "List, add, edit or delete taxpayers, or open one's tax profile", "resolve": RESOLVE },
             { "name": "taxform", "args": "[form] [period] [view|file|submit]", "description": "Open a BIR return", "resolve": RESOLVE },
         ],
         "scopes": [
@@ -477,7 +503,8 @@ mod tests {
                 "deadlines",
                 "register",
                 "card-dates",
-                "card-calc"
+                "card-calc",
+                "card-people"
             ]
         );
         for (entry, app) in apps.iter().zip(&APPS) {

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bir_app_core::BirApp;
+use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
 use ebirforms_mini_app::{ManifestSource, Server};
 use serde_json::{Value, json};
 
@@ -16,6 +16,7 @@ const TEST_KEY: &str = "00000000000000000000000000000000000000000000000000000000
 const ROOT: &str = "000111222";
 const OTHER: &str = "000333444";
 const CREATE: &str = "ebirforms_app_create_taxpayer";
+const TAXPAYERS: &str = "ebirforms_taxpayers_list";
 
 struct Bot {
     server: Server,
@@ -80,7 +81,12 @@ fn error_text(answer: &Value) -> String {
 
 /// The form as the app sends it: one argument, as JSON text.
 fn form(root: &str, rdo: &str) -> Value {
-    let new = json!({
+    form_with(root, rdo, "", "")
+}
+
+/// The form with the head office's `field` set to `value` (none: as `form`).
+fn form_with(root: &str, rdo: &str, field: &str, value: &str) -> Value {
+    let mut new = json!({
         "tin_root": root,
         "name": "Synthetic Sample Trading",
         "taxpayer_type": "Corporation",
@@ -92,6 +98,9 @@ fn form(root: &str, rdo: &str) -> Value {
             "email": "sample@example.invalid"
         }
     });
+    if !field.is_empty() {
+        new["head_office"][field] = json!(value);
+    }
     json!({ "args_json": json!([new]).to_string() })
 }
 
@@ -154,19 +163,60 @@ fn the_new_taxpayer_form_over_a_scratch_database() {
         "Tax Profile opens the new taxpayer's own profile"
     );
 
-    // nothing saved yet: the chat says how to add one
-    for name in ["taxprofile", "taxform"] {
-        let none = bot.call_as(
-            &json!({ "origin": "resolve" }),
-            "ebirforms_resolve",
-            json!({ "kind": "command", "name": name, "value": "" }),
+    // /taxprofile and /taxprofile list: the Tax profiles card inline in the
+    // chat, which reads the taxpayers itself; nothing about them is in the
+    // answer, saved or not
+    let card = json!({
+        "result": "open", "app": "card-people", "placement": "inline", "title": "Tax profiles",
+        "props": { "card": "people", "tool": TAXPAYERS, "args": {} }
+    });
+    for value in ["", "list", "LIST"] {
+        let none = resolve(&mut bot, value);
+        assert_eq!(none["structuredContent"], card, "{value}: {none}");
+    }
+    // the card's read, none saved: an empty list
+    let people = bot.open("card-people", 7, 4);
+    let empty = bot.call_as(&people, TAXPAYERS, json!({}));
+    assert_eq!(result_of(&empty), &json!({ "taxpayers": [] }));
+    let none = bot.call_as(
+        &json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxform", "value": "" }),
+    );
+    assert_eq!(none["structuredContent"]["result"], "error", "{none}");
+    let message = none["structuredContent"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("New taxpayer")
+            && message.contains("BIR Tax Profile")
+            && message.contains("/taxprofile create"),
+        "{message}"
+    );
+    // /taxprofile create: the form, a name prefilled; a TIN not saved
+    // yet opens it empty and is named nowhere
+    let named = resolve(&mut bot, "create Synthetic Sample Trading");
+    assert_eq!(
+        named["structuredContent"]["props"],
+        json!({ "start": "new", "name": "Synthetic Sample Trading" }),
+        "{named}"
+    );
+    for value in [
+        "create 000-111-222",
+        "create 00011122200000",
+        "create Juan 000111222",
+    ] {
+        let unsaved = resolve(&mut bot, value);
+        assert_eq!(
+            unsaved["structuredContent"]["props"],
+            json!({ "start": "new" }),
+            "{value}: {unsaved}"
         );
-        assert_eq!(none["structuredContent"]["result"], "error", "{none}");
-        let message = none["structuredContent"]["message"].as_str().unwrap();
-        assert!(
-            message.contains("New taxpayer") && message.contains("BIR Tax Profile"),
-            "{message}"
-        );
+        assert!(!unsaved.to_string().contains(ROOT), "{unsaved}");
+    }
+    // edit and delete with nothing to find: refused, the TIN not echoed
+    for value in ["edit 000111222", "delete 000-111-222"] {
+        let refused = resolve(&mut bot, value);
+        assert_eq!(refused["structuredContent"]["result"], "error", "{refused}");
+        assert!(!refused.to_string().contains("111"), "{refused}");
     }
     // and the assistant can open Tax Profile on New taxpayer, with no ticket
     let opened = bot.call_as(
@@ -176,6 +226,7 @@ fn the_new_taxpayer_form_over_a_scratch_database() {
     );
     let open = &opened["_meta"]["buwiz/open"];
     assert_eq!(open["app"], "tax-profile", "{opened}");
+    // (its picker, or its New taxpayer form when none is saved)
     assert_eq!(open["props"], json!({}));
     assert!(open.get("ticket").is_none());
 
@@ -207,12 +258,16 @@ fn the_new_taxpayer_form_over_a_scratch_database() {
 
     // the Tax Profile app, opened on no taxpayer (its empty state)
     let profile = bot.open("tax-profile", 1, 3);
-    // a bad TIN, a missing RDO, an RDO not in the table: refused by field
+    // a bad TIN, a missing RDO, an RDO not in the table or sent as its
+    // label: refused by field
     for (root, rdo, field) in [
         ("00011122", "043", "tin_root"),
         ("0001112223", "043", "tin_root"),
+        ("00011122a", "043", "tin_root"),
+        ("000111222a", "043", "tin_root"),
         (ROOT, "", "rdo_code"),
         (ROOT, "999", "rdo_code"),
+        (ROOT, "043 - Pasig City", "rdo_code"),
     ] {
         let refused = error_text(&bot.call_as(&profile, CREATE, form(root, rdo)));
         assert!(
@@ -220,6 +275,29 @@ fn the_new_taxpayer_form_over_a_scratch_database() {
             "{root}/{rdo}: {refused}"
         );
         assert!(!refused.contains(root) || root.is_empty(), "{refused}");
+        assert!(!refused.contains(ROOT), "{refused}");
+    }
+    // a bad phone, email or ZIP code (a ZIP is a code from the table, never
+    // free text): refused by field, the TIN named nowhere
+    for (field, value) in [
+        ("phone", "12"),
+        ("phone", "0917000000"),
+        ("phone", "+1 415 555 0100"),
+        ("phone", "0917000000a"),
+        ("email", "nope"),
+        ("email", "a@b"),
+        ("email", "na me@example.com"),
+        ("zip_code", "9999"),
+        ("zip_code", "1600 - Pasig"),
+        ("zip_code", "Pasig"),
+    ] {
+        let refused =
+            error_text(&bot.call_as(&profile, CREATE, form_with(ROOT, "043", field, value)));
+        assert!(
+            refused.contains(&format!("{field}: ")),
+            "{field}={value}: {refused}"
+        );
+        assert!(!refused.contains(ROOT), "{refused}");
     }
     let no_form = error_text(&bot.call_as(&profile, CREATE, json!({ "args": [] })));
     assert!(no_form.contains("one argument"), "{no_form}");
@@ -308,6 +386,260 @@ fn the_new_taxpayer_form_over_a_scratch_database() {
     );
     assert_eq!(found["structuredContent"]["result"], "choices", "{found}");
     assert!(!found.to_string().contains(ROOT) && !found.to_string().contains(OTHER));
+
+    // /taxprofile list with two saved: the same card, still naming no one
+    for value in ["", "list"] {
+        let listed = resolve(&mut bot, value);
+        assert_eq!(listed["structuredContent"], card, "{value}: {listed}");
+    }
+    // the card's read: what each row shows and nothing else, the TIN only
+    // as the screen shows it, never its digits run together
+    let read = bot.call_as(&people, TAXPAYERS, json!({}));
+    let rows = result_of(&read)["taxpayers"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{read}");
+    let first = rows
+        .iter()
+        .find(|row| row["ticket"] == ticket.as_str())
+        .expect("the first taxpayer");
+    assert_eq!(
+        first,
+        &json!({
+            "ticket": ticket, "name": "Synthetic Sample Trading", "tin_display": "000-111-222",
+            "taxpayer_type": "Corporation", "rdo_code": "043", "rdo_office": first["rdo_office"]
+        })
+    );
+    assert!(!first["rdo_office"].as_str().unwrap().is_empty(), "{first}");
+    assert!(
+        !read.to_string().contains(ROOT) && !read.to_string().contains(OTHER),
+        "{read}"
+    );
+    // Tax Profile's and Forms' pickers read the same; the assistant, a
+    // resolve or routine call may not
+    for picker_app in [&profile, &forms] {
+        let picker = bot.call_as(picker_app, TAXPAYERS, json!({}));
+        assert_eq!(result_of(&picker), result_of(&read));
+    }
+    for origin in ["agent", "resolve", "routine"] {
+        let refused = bot.call_as(&json!({ "origin": origin }), TAXPAYERS, json!({}));
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{origin}: {refused}"
+        );
+    }
+    let granted: Vec<&str> = manifest["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|app| {
+            app["permissions"]["tools"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(TAXPAYERS))
+        })
+        .map(|app| app["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(granted, ["forms", "tax-profile", "card-people"]);
+    assert_eq!(manifest["apps"][7]["placement"], json!(["inline"]));
+    assert_eq!(
+        manifest["apps"][7]["permissions"]["open"]["apps"],
+        json!(["tax-profile"])
+    );
+
+    // /taxprofile <name or TIN>: one match opens it, several are choices,
+    // none an error that echoes no digits
+    let one = resolve(&mut bot, ROOT);
+    assert_eq!(one["structuredContent"]["result"], "open", "{one}");
+    assert_eq!(
+        one["structuredContent"]["props"],
+        json!({ "ticket": ticket })
+    );
+    assert!(!one.to_string().contains(ROOT), "{one}");
+    let several = resolve(&mut bot, "synthetic");
+    assert_eq!(
+        several["structuredContent"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{several}"
+    );
+    for value in ["nobody", "000999888"] {
+        let none = resolve(&mut bot, value);
+        assert_eq!(none["structuredContent"]["result"], "error", "{none}");
+        assert!(!none.to_string().contains("999"), "{none}");
+    }
+
+    // /taxprofile create with a saved TIN: that taxpayer's profile
+    for value in ["create 000111222", "create 000-111-222-00000"] {
+        let saved = resolve(&mut bot, value);
+        assert_eq!(saved["structuredContent"]["result"], "open", "{saved}");
+        assert_eq!(saved["structuredContent"]["ticket"], ticket.as_str());
+        assert_eq!(
+            saved["structuredContent"]["props"],
+            json!({ "ticket": ticket })
+        );
+        assert!(!saved.to_string().contains(ROOT), "{saved}");
+    }
+
+    // /taxprofile edit and delete: by TIN or ticket straight to the
+    // section; by a name two share, a choice that keeps the verb
+    for (verb, section) in [("edit", "edit"), ("delete", "delete")] {
+        let by_tin = resolve(&mut bot, &format!("{verb} {ROOT}"));
+        let open = &by_tin["structuredContent"];
+        assert_eq!(open["result"], "open", "{by_tin}");
+        assert_eq!(
+            open["props"],
+            json!({ "ticket": ticket, "section": section })
+        );
+        assert!(!by_tin.to_string().contains(ROOT), "{by_tin}");
+        let by_name = resolve(&mut bot, &format!("{verb} synthetic"));
+        let choices = by_name["structuredContent"]["choices"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(choices.len(), 2, "{by_name}");
+        assert!(!by_name.to_string().contains(ROOT) && !by_name.to_string().contains(OTHER));
+        let picked = choices
+            .iter()
+            .find(|c| c["value"] == format!("{verb} {other_ticket}"))
+            .unwrap_or_else(|| panic!("{by_name}"));
+        let again = resolve(&mut bot, picked["value"].as_str().unwrap());
+        assert_eq!(
+            again["structuredContent"]["props"],
+            json!({ "ticket": other_ticket, "section": section }),
+            "{again}"
+        );
+    }
+    // delete only opens: both are still saved
+    assert_eq!(app.list_taxpayers().unwrap().len(), 2);
+
+    // a taxpayer whose name starts with a verb's word: the name wins
+    let saved = |root: &str, name: &str| {
+        app.create_taxpayer(&NewTaxpayer {
+            tin_root: root.into(),
+            name: name.into(),
+            taxpayer_type: "Corporation".into(),
+            birth_date: None,
+            head_office: BranchFacts {
+                rdo_code: "043".into(),
+                registered_address: "1 Sample Street, Sample City".into(),
+                zip_code: "1600".into(),
+                phone: String::new(),
+                email: String::new(),
+            },
+        })
+        .unwrap();
+    };
+    saved("000200001", "New Wave Trading");
+    saved("000200002", "Edit Point Services");
+    saved("000200003", "Delete Street Foods");
+    saved("000200004", "Create Hub Supply");
+    // several branches are still one taxpayer
+    app.add_branch("000200001", "00001", "Sample branch")
+        .unwrap();
+    for (value, name) in [
+        ("New Wave Trading", "New Wave Trading"),
+        ("new wave trading", "New Wave Trading"),
+        ("New   Wave Trading", "New Wave Trading"),
+        ("New Wave", "New Wave Trading"),
+        ("Edit Point Services", "Edit Point Services"),
+        ("Delete Street Foods", "Delete Street Foods"),
+        ("Create Hub Supply", "Create Hub Supply"),
+    ] {
+        let found = resolve(&mut bot, value);
+        let open = &found["structuredContent"];
+        assert_eq!(open["result"], "open", "{value}: {found}");
+        assert_eq!(open["app"], "tax-profile", "{found}");
+        assert_eq!(
+            open["title"],
+            format!("BIR Tax Profile · {name}"),
+            "{found}"
+        );
+        assert_eq!(
+            open["props"],
+            json!({ "ticket": open["ticket"] }),
+            "{found}"
+        );
+    }
+    // the same, while it is typed: the taxpayer, not nothing
+    let typed = bot.call_as(
+        &json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxprofile", "value": "New Wave", "complete": true }),
+    );
+    let choices = typed["structuredContent"]["choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 1, "{typed}");
+    assert_eq!(choices[0]["label"], "New Wave Trading", "{typed}");
+
+    // the verb alone, or with a name no taxpayer has, is still the verb
+    for verb in ["new", "create"] {
+        let form = resolve(&mut bot, verb);
+        assert_eq!(
+            form["structuredContent"]["props"],
+            json!({ "start": "new" }),
+            "{form}"
+        );
+        let form = resolve(&mut bot, &format!("{verb} Wave Goods"));
+        assert_eq!(
+            form["structuredContent"]["props"],
+            json!({ "start": "new", "name": "Wave Goods" }),
+            "{form}"
+        );
+    }
+    // a name that holds the words but does not start with them is not named
+    saved("000200007", "Brand New Day Foods");
+    let form = resolve(&mut bot, "new Day");
+    assert_eq!(
+        form["structuredContent"]["props"],
+        json!({ "start": "new", "name": "Day" }),
+        "{form}"
+    );
+    // the verb on such a taxpayer still works
+    for (value, section) in [
+        ("edit Create Hub Supply", "edit"),
+        ("delete Edit Point Services", "delete"),
+    ] {
+        let found = resolve(&mut bot, value);
+        let open = &found["structuredContent"];
+        assert_eq!(open["result"], "open", "{found}");
+        assert_eq!(open["props"]["section"], section, "{found}");
+    }
+
+    // an exact name beats a longer one that starts the same; words that
+    // start two names name neither, so the verb stands
+    saved("000200005", "New Wave Trading Two");
+    let exact = resolve(&mut bot, "New Wave Trading");
+    assert_eq!(
+        exact["structuredContent"]["title"], "BIR Tax Profile · New Wave Trading",
+        "{exact}"
+    );
+    let form = resolve(&mut bot, "New Wave");
+    assert_eq!(
+        form["structuredContent"]["props"],
+        json!({ "start": "new", "name": "Wave" }),
+        "{form}"
+    );
+    // two taxpayers of the same name: choices, never a blank form
+    saved("000200006", "Edit Point Services");
+    let twins = resolve(&mut bot, "Edit Point Services");
+    assert_eq!(
+        twins["structuredContent"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{twins}"
+    );
+    assert!(!twins.to_string().contains("00020000"), "{twins}");
+}
+
+/// `/taxprofile <value>`, as the Bot's resolve asks it.
+fn resolve(bot: &mut Bot, value: &str) -> Value {
+    bot.call_as(
+        &json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxprofile", "value": value }),
+    )
 }
 
 /// RFC 8785 for the test's integer-only objects: keys sorted, compact.
