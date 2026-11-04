@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bir_app_core::BirApp;
+use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
 use ebirforms_mini_app::{ManifestSource, Server};
 use serde_json::{Value, json};
 
@@ -512,6 +512,125 @@ fn the_new_taxpayer_form_over_a_scratch_database() {
     }
     // delete only opens: both are still saved
     assert_eq!(app.list_taxpayers().unwrap().len(), 2);
+
+    // a taxpayer whose name starts with a verb's word: the name wins
+    let saved = |root: &str, name: &str| {
+        app.create_taxpayer(&NewTaxpayer {
+            tin_root: root.into(),
+            name: name.into(),
+            taxpayer_type: "Corporation".into(),
+            birth_date: None,
+            head_office: BranchFacts {
+                rdo_code: "043".into(),
+                registered_address: "1 Sample Street, Sample City".into(),
+                zip_code: "1600".into(),
+                phone: String::new(),
+                email: String::new(),
+            },
+        })
+        .unwrap();
+    };
+    saved("000200001", "New Wave Trading");
+    saved("000200002", "Edit Point Services");
+    saved("000200003", "Delete Street Foods");
+    saved("000200004", "Create Hub Supply");
+    // several branches are still one taxpayer
+    app.add_branch("000200001", "00001", "Sample branch")
+        .unwrap();
+    for (value, name) in [
+        ("New Wave Trading", "New Wave Trading"),
+        ("new wave trading", "New Wave Trading"),
+        ("New   Wave Trading", "New Wave Trading"),
+        ("New Wave", "New Wave Trading"),
+        ("Edit Point Services", "Edit Point Services"),
+        ("Delete Street Foods", "Delete Street Foods"),
+        ("Create Hub Supply", "Create Hub Supply"),
+    ] {
+        let found = resolve(&mut bot, value);
+        let open = &found["structuredContent"];
+        assert_eq!(open["result"], "open", "{value}: {found}");
+        assert_eq!(open["app"], "tax-profile", "{found}");
+        assert_eq!(
+            open["title"],
+            format!("BIR Tax Profile · {name}"),
+            "{found}"
+        );
+        assert_eq!(
+            open["props"],
+            json!({ "ticket": open["ticket"] }),
+            "{found}"
+        );
+    }
+    // the same, while it is typed: the taxpayer, not nothing
+    let typed = bot.call_as(
+        &json!({ "origin": "resolve" }),
+        "ebirforms_resolve",
+        json!({ "kind": "command", "name": "taxprofile", "value": "New Wave", "complete": true }),
+    );
+    let choices = typed["structuredContent"]["choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 1, "{typed}");
+    assert_eq!(choices[0]["label"], "New Wave Trading", "{typed}");
+
+    // the verb alone, or with a name no taxpayer has, is still the verb
+    for verb in ["new", "create"] {
+        let form = resolve(&mut bot, verb);
+        assert_eq!(
+            form["structuredContent"]["props"],
+            json!({ "start": "new" }),
+            "{form}"
+        );
+        let form = resolve(&mut bot, &format!("{verb} Wave Goods"));
+        assert_eq!(
+            form["structuredContent"]["props"],
+            json!({ "start": "new", "name": "Wave Goods" }),
+            "{form}"
+        );
+    }
+    // a name that holds the words but does not start with them is not named
+    saved("000200007", "Brand New Day Foods");
+    let form = resolve(&mut bot, "new Day");
+    assert_eq!(
+        form["structuredContent"]["props"],
+        json!({ "start": "new", "name": "Day" }),
+        "{form}"
+    );
+    // the verb on such a taxpayer still works
+    for (value, section) in [
+        ("edit Create Hub Supply", "edit"),
+        ("delete Edit Point Services", "delete"),
+    ] {
+        let found = resolve(&mut bot, value);
+        let open = &found["structuredContent"];
+        assert_eq!(open["result"], "open", "{found}");
+        assert_eq!(open["props"]["section"], section, "{found}");
+    }
+
+    // an exact name beats a longer one that starts the same; words that
+    // start two names name neither, so the verb stands
+    saved("000200005", "New Wave Trading Two");
+    let exact = resolve(&mut bot, "New Wave Trading");
+    assert_eq!(
+        exact["structuredContent"]["title"], "BIR Tax Profile · New Wave Trading",
+        "{exact}"
+    );
+    let form = resolve(&mut bot, "New Wave");
+    assert_eq!(
+        form["structuredContent"]["props"],
+        json!({ "start": "new", "name": "Wave" }),
+        "{form}"
+    );
+    // two taxpayers of the same name: choices, never a blank form
+    saved("000200006", "Edit Point Services");
+    let twins = resolve(&mut bot, "Edit Point Services");
+    assert_eq!(
+        twins["structuredContent"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{twins}"
+    );
+    assert!(!twins.to_string().contains("00020000"), "{twins}");
 }
 
 /// `/taxprofile <value>`, as the Bot's resolve asks it.

@@ -98,7 +98,10 @@ const ACCOUNT_TOOLS: [&str; 4] = [
 ];
 
 /// The assistant's tools that change nothing (`readOnlyHint`, P8): the ones
-/// a routine or resolve call may run.
+/// a routine or resolve call may run. A ticket issued on the way does not
+/// count: each of these answers by ticket ([`Scrubber`]), as a resolve does,
+/// and a taxpayer's first answer adds its ticket to the store. No taxpayer,
+/// branch or return changes.
 const READ_ONLY: [&str; 12] = [
     RDO_LOOKUP,
     ATC_LOOKUP,
@@ -960,6 +963,10 @@ fn is_app_only(name: &str) -> bool {
             .is_some()
 }
 
+/// Whether `name` changes nothing, as [`READ_ONLY`] means it: so
+/// [`TAXPAYERS_LIST`] counts, though it may issue tickets. Only `authorize`
+/// reads this, for resolve and routine calls, and the app-only tools here
+/// refuse those callers there anyway.
 fn read_only(name: &str) -> bool {
     READ_ONLY.contains(&name)
         || [
@@ -1150,6 +1157,7 @@ fn ticket_issue(
 /// rdo_office}]}` and nothing else: what the Tax profiles card and Tax
 /// Profile's picker show. The TIN is there only as the screen shows it
 /// (000-000-000); this answer goes to an app, never to the assistant.
+/// A taxpayer with no ticket yet gets one here, the only thing it writes.
 pub(crate) fn taxpayers_list(app: &BirApp) -> Result<Value, String> {
     let offices: BTreeMap<String, String> = BirApp::rdos()
         .into_iter()
@@ -2132,13 +2140,26 @@ fn scope_taxform(app: &BirApp, ask: &Ask) -> Result<Value, String> {
 /// - anything else: that taxpayer's profile when one matches, choices when
 ///   several do, else an error that echoes no digits.
 ///
+/// `create`, `new`, `edit` or `delete` with words after it may be the start
+/// of a saved taxpayer's name: [`taxpayers_named`] decides, and a name it
+/// finds wins over the verb.
+///
 /// No answer names a TIN: taxpayers go by ticket and name.
 fn command_taxprofile(app: &BirApp, ask: &Ask) -> Result<Value, String> {
     let (verb, rest) = ask
         .value
         .split_once(char::is_whitespace)
         .map_or((ask.value.as_str(), ""), |(verb, rest)| (verb, rest.trim()));
-    match verb.to_ascii_lowercase().as_str() {
+    let verb = verb.to_ascii_lowercase();
+    if matches!(verb.as_str(), "create" | "new" | "edit" | "delete") && !rest.is_empty() {
+        let named = taxpayers_named(app, &format!("{verb} {rest}"))?;
+        match named.as_slice() {
+            [] => {}
+            [(subject, ..)] if !ask.complete => return taxprofile_of(app, subject, ask),
+            _ => return choices_of(app, &named, ""),
+        }
+    }
+    match verb.as_str() {
         "" => Ok(cards::people_open()),
         "list" if rest.is_empty() => Ok(cards::people_open()),
         "create" | "new" => taxprofile_create(app, rest, ask),
@@ -2146,6 +2167,37 @@ fn command_taxprofile(app: &BirApp, ask: &Ask) -> Result<Value, String> {
         "delete" => taxprofile_section(app, rest, "delete", ask),
         _ => taxprofile_open(app, ask),
     }
+}
+
+/// The saved taxpayers `text` names outright, whatever its first word
+/// reads as: those with exactly that name (case aside), else the one whose
+/// name starts with it. Text that starts several names and is none of them
+/// names nobody, and neither does a TIN or a branch's name: a verb's own
+/// argument may be either. One row per taxpayer, its head office.
+fn taxpayers_named(app: &BirApp, text: &str) -> Result<Vec<(Subject, String, String)>, String> {
+    let wanted = text.to_lowercase();
+    let mut named: Vec<(Subject, String, String)> = app
+        .list_taxpayers()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|taxpayer| !taxpayer.archived && taxpayer.name.to_lowercase().starts_with(&wanted))
+        .map(|taxpayer| {
+            (
+                Subject::Taxpayer(taxpayer.tin_root),
+                taxpayer.name,
+                "Head office".to_string(),
+            )
+        })
+        .collect();
+    if named
+        .iter()
+        .any(|(_, name, _)| name.to_lowercase() == wanted)
+    {
+        named.retain(|(_, name, _)| name.to_lowercase() == wanted);
+    } else if named.len() > 1 {
+        named.clear();
+    }
+    Ok(named)
 }
 
 /// Every saved taxpayer that `value` names, as choices whose value is
@@ -2305,7 +2357,12 @@ fn taxprofile_open(app: &BirApp, ask: &Ask) -> Result<Value, String> {
             _ => return choices_of(app, &found, ""),
         }
     };
-    let mut open = app_request(app, manifest::TAX_PROFILE_ID, Some(&subject), ask.today)?;
+    taxprofile_of(app, &subject, ask)
+}
+
+/// `subject`'s Tax Profile, as an `open`.
+fn taxprofile_of(app: &BirApp, subject: &Subject, ask: &Ask) -> Result<Value, String> {
+    let mut open = app_request(app, manifest::TAX_PROFILE_ID, Some(subject), ask.today)?;
     open["result"] = json!("open");
     Ok(open)
 }

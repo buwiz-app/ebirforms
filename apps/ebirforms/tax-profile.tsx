@@ -1515,6 +1515,10 @@ function Profile(p: { tin: string }) {
     const fieldsOf: BranchFieldName[] = sec === "branch" ? ["rdo_code"] : sec === "address" ? ADDRESS_FIELDS.map(([f]) => f) : [];
     for (const f of fieldsOf) {
       if (!b.is_head_office && inherit()[f]) continue;
+      // An address fact this edit left alone stays as it is, even one saved
+      // before these rules (a migrated `N/A`): only what changed is checked.
+      // A draft is text typed into an RDO or ZIP input, so it is a change.
+      if (sec === "address" && facts[f]().trim() === (b.facts[f] || "").trim() && !draftOf(factDrafts, f).trim()) continue;
       const e = factError(f, facts[f](), rdos(), draftOf(factDrafts, f));
       if (e) errs[f] = e;
     }

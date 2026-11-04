@@ -29,6 +29,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::time::{Duration, SystemTime};
 
 use bir_app_core::BirApp;
 use serde_json::{Value, json};
@@ -96,6 +97,43 @@ impl Options {
     }
 }
 
+/// A work folder's name starts with this.
+const WORK_PREFIX: &str = "ebirforms-import-";
+
+/// How old a work folder must be to count as left behind. An import takes
+/// minutes, so a running one's folder is never this old.
+const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Removes the work folders a killed import left in the temp folder.
+/// [`WorkDir`]'s `Drop` never ran for those, and they hold taxpayers' data.
+/// Runs at every start, because the import itself runs only once.
+pub fn sweep_stale_work() {
+    sweep(&std::env::temp_dir(), SystemTime::now());
+}
+
+fn sweep(temp: &Path, now: SystemTime) {
+    let Ok(entries) = fs::read_dir(temp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(WORK_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(found) = path.symlink_metadata() else {
+            continue;
+        };
+        let stale = found
+            .modified()
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age >= STALE_AFTER);
+        if found.is_dir() && stale {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// A 0700 folder of this run's, removed with everything in it when dropped.
 struct WorkDir(PathBuf);
 
@@ -103,7 +141,7 @@ impl WorkDir {
     fn new() -> Result<Self, String> {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).map_err(|error| format!("no random bytes: {error}"))?;
-        let dir = std::env::temp_dir().join(format!("ebirforms-import-{}", hex::encode(bytes)));
+        let dir = std::env::temp_dir().join(format!("{WORK_PREFIX}{}", hex::encode(bytes)));
         fs::create_dir(&dir)
             .map_err(|error| format!("the work folder could not be made: {error}"))?;
         owner::restrict(&dir, 0o700)?;
@@ -508,8 +546,9 @@ fn taxpayer_archive(
 /// eBIRForms, by way of an archive of their own at `one`; a refusal as its
 /// kind ([`refusal_kind`]).
 ///
-/// A taxpayer refused only for a stale migration backfill is tried again
-/// with it rebuilt when `rebuild` holds; `Ok(true)` then.
+/// A taxpayer refused only for a stale migration backfill
+/// ([`rebuild_may_help`]) is tried again with it rebuilt when `rebuild`
+/// holds; `Ok(true)` then.
 fn restore(
     app: &BirApp,
     archive: &Path,
@@ -518,14 +557,30 @@ fn restore(
     rebuild: bool,
 ) -> Result<bool, String> {
     match restore_once(app, archive, bases, one, false) {
-        Err(kind)
-            if rebuild
-                && kind.ends_with(":confirmed_version_needs_review:StaleMigrationBackfill") =>
-        {
+        Err(kind) if rebuild && rebuild_may_help(&kind) => {
             restore_once(app, archive, bases, one, true).map(|()| true)
         }
         other => other.map(|()| false),
     }
+}
+
+/// Whether a refusal is for a stale migration backfill and nothing else:
+/// the `+`-joined confirmed sources hold a stale one, and only migration
+/// backfills besides, which a rebuild makes again from each profile. A
+/// reviewed version (`ManualCor`, `OcrCor`, `UserOverride`) is not dropped by
+/// the rebuild, and eBIRForms takes a new profile's confirmed version only
+/// when it is the exact backfill, so that taxpayer stays refused either way.
+fn rebuild_may_help(kind: &str) -> bool {
+    let Some(sources) = kind.strip_prefix("refused_by_ebirforms:confirmed_version_needs_review:")
+    else {
+        return false;
+    };
+    sources
+        .split('+')
+        .any(|source| source == "StaleMigrationBackfill")
+        && sources
+            .split('+')
+            .all(|source| matches!(source, "StaleMigrationBackfill" | "MigrationBackfill"))
 }
 
 fn restore_once(
@@ -964,6 +1019,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_an_old_work_folder_is_swept() {
+        let scratch = super::WorkDir::new().unwrap();
+        let left = scratch.0.join(format!("{}left", super::WORK_PREFIX));
+        let other = scratch.0.join("another-folder");
+        std::fs::create_dir(&left).unwrap();
+        std::fs::create_dir(&other).unwrap();
+
+        let now = std::time::SystemTime::now();
+        super::sweep(&scratch.0, now);
+        assert!(left.exists(), "a running import's folder stays");
+
+        super::sweep(&scratch.0, now + super::STALE_AFTER * 2);
+        assert!(!left.exists(), "a folder left by a killed import goes");
+        assert!(other.exists(), "nothing else is touched");
+    }
+
+    #[test]
     fn a_tin_names_its_root_and_branch_however_it_is_written() {
         assert_eq!(tin_key("000-111-222-00000"), Some(("000111222".into(), 0)));
         assert_eq!(tin_key("00011122200001"), Some(("000111222".into(), 1)));
@@ -996,6 +1068,42 @@ mod tests {
 #[cfg(test)]
 mod refusal_tests {
     use super::*;
+
+    #[test]
+    fn only_a_refusal_for_backfills_with_a_stale_one_is_tried_again() {
+        let refused = |sources: &str| {
+            format!("refused_by_ebirforms:confirmed_version_needs_review:{sources}")
+        };
+        for sources in [
+            "StaleMigrationBackfill",
+            "MigrationBackfill+StaleMigrationBackfill",
+        ] {
+            assert!(rebuild_may_help(&refused(sources)), "{sources}");
+        }
+        // a reviewed version survives the rebuild and eBIRForms refuses it
+        // again; a backfill that matches is not what was refused
+        for sources in [
+            "StaleMigrationBackfill+UserOverride",
+            "ManualCor+StaleMigrationBackfill",
+            "ManualCor+MigrationBackfill+OcrCor+StaleMigrationBackfill",
+            "StaleMigrationBackfill+unknown",
+            "MigrationBackfill",
+            "UserOverride",
+            "none",
+            "unknown",
+            "NotStaleMigrationBackfill",
+            "",
+        ] {
+            assert!(!rebuild_may_help(&refused(sources)), "{sources}");
+        }
+        for kind in [
+            "refused_by_ebirforms:confirmed_version_plan_mismatch:StaleMigrationBackfill",
+            "refused_by_ebirforms:foreign_key",
+            "unreadable_archive",
+        ] {
+            assert!(!rebuild_may_help(kind), "{kind}");
+        }
+    }
 
     #[test]
     fn a_refusal_is_a_kind_that_names_no_data() {

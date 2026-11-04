@@ -21,7 +21,8 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
    data folder `app.buwiz.ebirforms`): `ebirforms.db`, a 0600 key file `ebirforms.key`, the Buwiz sign-in's tokens
    and device key as 0600 files (`buwiz_submit_*.txt`), the boxes' sources (`fill-sources.json` and its key
    `fill-sources.key`, both 0600, and `fill-sources.lock`), and `logs/`. It never reads a keychain
-   (`BUWIZ_NO_KEYCHAIN=1`) and never opens either eBIRForms desktop app's database. Old data comes in by export.
+   (`BUWIZ_NO_KEYCHAIN=1`) and never opens either eBIRForms desktop app's database. Old data comes in by export. The one exception is the
+   one-time `import-legacy`, whose child opens a copy of the retired app's database; it never opens the original.
 2. **Only the person sends, from an app.** Queueing a return is an app-only tool (`Access::Queue` in `scope.rs`):
    the agent, resolve and routine callers are refused it, and it needs a Buwiz sign-in (the Sign-in app,
    `account.rs`). The queue sends through Buwiz's relay with eBIRForms' submission client (`buwiz-ebirforms`) and
@@ -61,5 +62,6 @@ never `gc-2026-01`) and runs the Bot's `buwiz-plugin-test`. It needs a Buwiz Bot
 ## Do not
 
 - Edit eBIRForms (`eBIRForms/eBIRForms`), the Bot (`buwiz-bot/buwiz-bot`) or `hexuria/buwiz-forms` from here.
-- Sign with `gc-2026-01` or touch the login Keychain.
+- Sign with `gc-2026-01` or touch the login Keychain, unless the owner runs `tools/dev-install.sh --live` or a release
+  by hand.
 - Commit, push or deploy unless the owner asks.

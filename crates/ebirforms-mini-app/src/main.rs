@@ -43,6 +43,7 @@ Environment:
                        ebirforms.db, its key ebirforms.key (0600, made on first run) and logs/";
 
 fn main() -> ExitCode {
+    legacy_import::sweep_stale_work();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args
         .iter()

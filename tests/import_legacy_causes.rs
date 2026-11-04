@@ -16,11 +16,13 @@ const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333
 const PLAIN: &str = "000111222";
 const STALE: &str = "000555666";
 const LOOSE: &str = "000777888";
-const NAMES: [&str; 4] = [
+const MIXED: &str = "000999111";
+const NAMES: [&str; 5] = [
     "Synthetic Plain Trading",
     "Synthetic Old Registration",
     "Synthetic Loose Facts",
     "Synthetic Other Name",
+    "Synthetic Mixed Registration",
 ];
 // (the rename at the end happens after the last output is read)
 
@@ -76,7 +78,7 @@ fn save_like_the_old_app(
 }
 
 fn names_nothing(output: &str) {
-    for root in [PLAIN, STALE, LOOSE] {
+    for root in [PLAIN, STALE, LOOSE, MIXED] {
         assert!(!output.contains(root), "a TIN in the output: {output}");
         assert!(
             !output.contains(&format!("{}-{}-{}", &root[..3], &root[3..6], &root[6..])),
@@ -132,6 +134,22 @@ fn what_ebirforms_refuses_on_import_and_why() {
             ],
         )
         .unwrap();
+        // the same, and then a branch saved with the changed address: one
+        // backfill stale and one that matches, under one taxpayer
+        let mixed = format!("{MIXED}00000");
+        save_like_the_old_app(&app, &head, PLAIN, &mixed, |p| {
+            p["full_name"] = json!(NAMES[4]);
+            p["business_start_date"] = json!("2020-01-06");
+        });
+        app.call(
+            "update_branch",
+            vec![
+                json!(mixed),
+                json!({ "fields": { "registered_address": "2 Changed Street, Sample City" } }),
+            ],
+        )
+        .unwrap();
+        save_like_the_old_app(&app, &mixed, MIXED, &format!("{MIXED}00001"), |_| {});
         // facts our New taxpayer form refuses: RDO, ZIP, phone and email
         save_like_the_old_app(&app, &head, PLAIN, &format!("{LOOSE}00000"), |p| {
             p["full_name"] = json!(NAMES[2]);
@@ -174,7 +192,7 @@ fn what_ebirforms_refuses_on_import_and_why() {
     println!("{said}");
     names_nothing(&said);
     assert!(
-        said.contains("taxpayers: 2 to import, 0 already there, 1 refused"),
+        said.contains("taxpayers: 2 to import, 0 already there, 2 refused"),
         "{said}"
     );
     assert!(
@@ -182,7 +200,7 @@ fn what_ebirforms_refuses_on_import_and_why() {
         "{said}"
     );
     assert!(
-        said.contains("failed: 1 branches (1 refused_by_ebirforms:confirmed_version_needs_review:StaleMigrationBackfill)"),
+        said.contains("failed: 3 branches (2 refused_by_ebirforms:confirmed_version_needs_review:MigrationBackfill+StaleMigrationBackfill, 1 refused_by_ebirforms:confirmed_version_needs_review:StaleMigrationBackfill)"),
         "{said}"
     );
     assert!(
@@ -198,11 +216,11 @@ fn what_ebirforms_refuses_on_import_and_why() {
     names_nothing(&said);
     assert!(rebuilt.status.success(), "{said}");
     assert!(
-        said.contains("taxpayers: 3 imported, 0 already there, 0 refused"),
+        said.contains("taxpayers: 4 imported, 0 already there, 0 refused"),
         "{said}"
     );
     assert!(
-        said.contains("taxpayers whose stale registration backfill was rebuilt: 1"),
+        said.contains("taxpayers whose stale registration backfill was rebuilt: 2"),
         "{said}"
     );
     assert!(said.contains("failed: 0"), "{said}");
@@ -218,7 +236,7 @@ fn what_ebirforms_refuses_on_import_and_why() {
     let said = text(&later);
     assert!(later.status.success(), "{said}");
     assert!(
-        said.contains("branches: 1 imported, 5 already there"),
+        said.contains("branches: 1 imported, 7 already there"),
         "{said}"
     );
 
@@ -252,6 +270,16 @@ fn what_ebirforms_refuses_on_import_and_why() {
         versions[0]["cor"]["registered_address"],
         "2 Changed Street, Sample City"
     );
+    for tin in [format!("{MIXED}00000"), format!("{MIXED}00001")] {
+        let mixed = app.call("profile_detail", vec![json!(tin)]).unwrap();
+        let versions = mixed["profile_versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "{versions:?}");
+        assert_eq!(versions[0]["status"], "Confirmed");
+        assert_eq!(
+            versions[0]["cor"]["registered_address"],
+            "2 Changed Street, Sample City"
+        );
+    }
     let plain = taxpayers.iter().find(|t| t.tin_root == PLAIN).unwrap();
     assert_eq!(plain.branches.len(), 4);
     // an unrelated save goes through with the loose facts kept: the

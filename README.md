@@ -53,8 +53,8 @@ executable.
 To try a change in your running Buwiz Bot without a release (a dirty tree is fine):
 
 ```sh
-BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/dev-install.sh            # release build
-BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/dev-install.sh --debug    # faster build
+BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/dev-install.sh --live            # release build
+BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/dev-install.sh --live --debug    # faster build
 ```
 
 It builds `ebirforms-mini-app` (into `CARGO_TARGET_DIR` when set), copies it to a folder of its own under
@@ -64,6 +64,9 @@ It builds `ebirforms-mini-app` (into `CARGO_TARGET_DIR` when set), copies it to 
 version change and the permissions the build adds, and approves them: running it is your consent. A dev version is
 below the release of the same number, so the first dev install over a published one is an allowed downgrade, and the
 release installs over it again as an update.
+
+`--live` confirms you mean your own Bot: the script refuses without it if a run would use the broker on 8787, the
+`gc-2026-01` key or your real data. For a test Bot, give all of `--broker`, `--key-file` and `--data-dir` instead.
 
 The build uses your real eBIRForms data (`~/Library/Application Support/app.buwiz.ebirforms`), as the published
 install does. Options: `--data-dir <dir>` for a scratch data folder, `--dry-run` to stop after the inspect,

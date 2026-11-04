@@ -2,8 +2,13 @@
 # tools/dev-install.sh — install this checkout's eBIRForms build straight into
 # the running Buwiz Bot, with no GitHub release: build, sign, inspect, install.
 #
-#   BUWIZ_BROKER_BIN=<buwiz-broker> tools/dev-install.sh [--debug] [--broker <url>]
-#       [--key-file <seed> [--key-id <id>]] [--data-dir <dir>] [--dry-run]
+#   BUWIZ_BROKER_BIN=<buwiz-broker> tools/dev-install.sh --live [--debug]
+#   BUWIZ_BROKER_BIN=<buwiz-broker> tools/dev-install.sh --broker <url> \
+#       --key-file <seed> [--key-id <id>] --data-dir <dir> [--debug] [--dry-run]
+#
+# A run that uses the broker on 8787, the gc-2026-01 Keychain key or the real
+# eBIRForms data needs --live: only the owner runs it that way, by hand. A
+# test Bot gives all three of --broker, --key-file and --data-dir instead.
 #
 # 1. Builds ebirforms-mini-app (release; --debug for a faster build), into
 #    CARGO_TARGET_DIR when it is set. A dirty tree is fine: this is for
@@ -58,8 +63,9 @@ KEY_FILE=
 KEY_ID=
 DATA_DIR=
 DRY_RUN=0
+LIVE=0
 usage() {
-  echo "usage: BUWIZ_BROKER_BIN=<buwiz-broker> tools/dev-install.sh [--debug] [--broker <url>] [--key-file <seed> [--key-id <id>]] [--data-dir <dir>] [--dry-run]" >&2
+  echo "usage: BUWIZ_BROKER_BIN=<buwiz-broker> tools/dev-install.sh [--live] [--debug] [--broker <url>] [--key-file <seed> [--key-id <id>]] [--data-dir <dir>] [--dry-run]" >&2
   exit 2
 }
 while [ $# -gt 0 ]; do
@@ -70,12 +76,21 @@ while [ $# -gt 0 ]; do
     --key-id) KEY_ID="${2:?--key-id needs an id}"; shift ;;
     --data-dir) DATA_DIR="${2:?--data-dir needs a folder}"; shift ;;
     --dry-run) DRY_RUN=1 ;;
+    --live) LIVE=1 ;;
     -h|--help) usage ;;
     *) echo "dev-install: unknown argument $1" >&2; usage ;;
   esac
   shift
 done
 die() { echo "dev-install: $*" >&2; exit 1; }
+LIVE_USES=()
+case "$BROKER" in *://127.0.0.1:8787* | *://localhost:8787*) LIVE_USES+=("the broker on 8787") ;; esac
+[ -n "$KEY_FILE" ] || LIVE_USES+=("the gc-2026-01 Keychain key")
+[ -n "$DATA_DIR" ] || LIVE_USES+=("the real eBIRForms data")
+if [ "${#LIVE_USES[@]}" -gt 0 ] && [ "$LIVE" != 1 ]; then
+  IFS=,
+  die "this run uses${LIVE_USES[*]/#/ }. Pass --live to confirm, or give --broker, --key-file and --data-dir for a test Bot"
+fi
 : "${BUWIZ_BROKER_BIN:?set BUWIZ_BROKER_BIN to a buwiz-broker build (buwiz-bot/buwiz-bot broker/)}"
 [ -x "$BUWIZ_BROKER_BIN" ] || die "BUWIZ_BROKER_BIN $BUWIZ_BROKER_BIN is not executable"
 [ -z "$KEY_ID" ] || [ -n "$KEY_FILE" ] || die "--key-id goes with --key-file (the Keychain key is gc-2026-01)"
