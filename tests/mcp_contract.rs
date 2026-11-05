@@ -190,6 +190,15 @@ fn the_bot_contract_over_a_scratch_database() {
         tool("ebirforms_app_screen_form_validate")["annotations"]["readOnlyHint"],
         true
     );
+    // a screen opens a branch or a return with it, under the AI's press too
+    assert_eq!(
+        tool("ebirforms_ticket_issue")["annotations"]["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        tool("ebirforms_ticket_issue")["_meta"]["buwiz/audience"],
+        json!(["app"])
+    );
     assert_eq!(
         tool("ebirforms_app_screen_form_save")["annotations"]["readOnlyHint"],
         false
@@ -600,6 +609,38 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(subject["kind"], "return");
     assert_eq!(subject["tin"], tin);
     assert_eq!(subject["form"], "2551Q");
+    // a ticket issued under the AI's press is the one the model was already given
+    let pressed = json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } });
+    let issued = bot.call_as(
+        pressed,
+        "ebirforms_ticket_issue",
+        json!({ "ticket": return_ticket, "tin": tin }),
+    );
+    assert_eq!(result_of(&issued)["ticket"], ticket, "{issued}");
+    // anything that changes something needs the person's own click, as the app's call or not
+    for write in [
+        "ebirforms_app_screen_form_save",
+        "ebirforms_form_save_draft",
+    ] {
+        let refused = bot.call_as(
+            json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } }),
+            write,
+            json!({}),
+        );
+        assert_eq!(refused["isError"], true, "{write}: {refused}");
+        assert!(
+            refused.to_string().contains("the person's own click"),
+            "{write}: {refused}"
+        );
+    }
+    assert_eq!(
+        bot.agent(
+            "ebirforms_ticket_issue",
+            json!({ "ticket": return_ticket, "tin": tin })
+        )["isError"],
+        true,
+        "and the model can't call it"
+    );
     let years = bot.call_as(
         forms_app.clone(),
         "ebirforms_app_list_tax_years",

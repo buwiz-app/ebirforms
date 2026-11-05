@@ -41,6 +41,8 @@ pub(crate) struct Caller {
     pub origin: Origin,
     pub app: Option<String>,
     pub open_id: Option<String>,
+    /// The Bot's record of the AI's press: this call is no person's own.
+    pub press: bool,
 }
 
 impl Caller {
@@ -65,6 +67,7 @@ impl Caller {
             origin,
             app: text("app"),
             open_id: text("open_id"),
+            press: caller.is_some_and(|caller| caller.get("press").is_some()),
         }
     }
 }

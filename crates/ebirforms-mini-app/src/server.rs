@@ -359,6 +359,11 @@ impl Server {
                 "{name} changes eBIRForms data, so it does not run for a resolve or routine call"
             ));
         }
+        // the AI's press: a screen's reads run under it, anything that changes
+        // something needs the person's own click
+        if caller.press && !read_only(name) {
+            return Err(format!("{name} needs the person's own click"));
+        }
         if caller.origin != Origin::App {
             return if is_app_only(name) {
                 Err(format!("{name} is for the eBIRForms mini apps only"))
@@ -964,13 +969,14 @@ fn is_app_only(name: &str) -> bool {
 }
 
 /// Whether `name` changes nothing, as [`READ_ONLY`] means it: so
-/// [`TAXPAYERS_LIST`] counts, though it may issue tickets. Only `authorize`
-/// reads this, for resolve and routine calls, and the app-only tools here
-/// refuse those callers there anyway.
+/// [`TAXPAYERS_LIST`] and [`TICKET_ISSUE`] count, though they may issue
+/// tickets. Only `authorize` reads this, for resolve and routine calls, and
+/// the app-only tools here refuse those callers there anyway.
 fn read_only(name: &str) -> bool {
     READ_ONLY.contains(&name)
         || [
             TICKET_SUBJECT,
+            TICKET_ISSUE,
             PRINT_PREVIEW,
             TAXPAYERS_LIST,
             ACCOUNT_STATUS,
@@ -2732,7 +2738,9 @@ fn tool_list() -> Value {
             json!({
                 "type": "object", "properties": { "ticket": { "type": "string" }, "tin": { "type": "string" } }, "required": ["ticket", "tin"], "additionalProperties": false
             }),
-            false,
+            // a screen reads with it to open a branch or a return: it changes no
+            // taxpayer, branch or return, so the AI's press on a screen can use it
+            true,
         ),
         app_only(
             PRINT_PREVIEW,
