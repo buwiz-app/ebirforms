@@ -20,7 +20,7 @@
 # Keychain, the Bot's or the broker's data folder, or the Bot's trust.json.
 #
 # Usage: tools/bot/conformance.sh [extra buwiz-plugin-test args, e.g. --json]
-# Env:   BUWIZ_BOT_DIR (default /Volumes/goldcoders/Projects/rox): a Buwiz Bot
+# Env:   BUWIZ_BOT_DIR (default /Volumes/goldcoders/buwiz-bot/buwiz-bot): a Buwiz Bot
 #          checkout at protocol 1.0 (buwiz-bot main 4ab3ded2 or later)
 #        BUWIZ_BROKER_BIN (a buwiz-broker binary from buwiz-bot; signs in place
 #          of server/src/v1/sign-manifest.mjs)
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BOT_DIR="${BUWIZ_BOT_DIR:-/Volumes/goldcoders/Projects/rox}"
+BOT_DIR="${BUWIZ_BOT_DIR:-/Volumes/goldcoders/buwiz-bot/buwiz-bot}"
 KEY_ID="${EBIRFORMS_TEST_KEY_ID:-ebirforms-test-01}"
 PLUGIN_ID="app.buwiz.ebirforms"
 RUNNER="$BOT_DIR/server/sdk/mini-app/bin/buwiz-plugin-test.mjs"
