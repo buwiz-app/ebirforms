@@ -25,6 +25,39 @@ fn dashed_tin_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\b\d{3}-\d{3}-\d{3}(?:-\d{3,5})?\b").expect("regex"))
 }
 
+fn bare_tin_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\b[0-9]{9,12}\b").expect("regex"))
+}
+
+/// Whether the digits at `start..end` of `text` are an amount: they have
+/// decimals or grouping beside them, or a peso sign before them. A ticket
+/// needs no such test: its digits touch `_` or a letter, so they aren't a run.
+fn amount_at(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let mut after = text[end..].chars();
+    let separated =
+        matches!(after.next(), Some('.' | ',')) && after.next().is_some_and(|c| c.is_ascii_digit());
+    separated || matches!(before, Some('.' | ',' | '₱'))
+}
+
+/// `text` with each TIN as `word` says, formatted or a bare run of 9 to 12
+/// digits. An amount stays as it is.
+fn scrub_tins(text: &str, mut word: impl FnMut(&str) -> String) -> String {
+    let text = dashed_tin_re().replace_all(text, |caps: &regex::Captures<'_>| word(&caps[0]));
+    let (mut out, mut kept) = (String::new(), 0);
+    for run in bare_tin_re().find_iter(&text) {
+        if amount_at(&text, run.start(), run.end()) {
+            continue;
+        }
+        out.push_str(&text[kept..run.start()]);
+        out.push_str(&word(run.as_str()));
+        kept = run.end();
+    }
+    out.push_str(&text[kept..]);
+    out
+}
+
 /// Turn the tickets in a tool's arguments into what the tool reads.
 pub(crate) fn expand(
     app: &BirApp,
@@ -166,14 +199,51 @@ impl<'a> Scrubber<'a> {
         }
     }
 
-    /// Free text: formatted TINs become tickets.
+    /// Free text: TINs become tickets ([`scrub_tins`]).
     pub(crate) fn text(&mut self, text: &str) -> String {
-        dashed_tin_re()
-            .replace_all(text, |caps: &regex::Captures<'_>| {
-                Subject::of_tin(&caps[0])
-                    .and_then(|subject| self.ticket(&subject))
-                    .unwrap_or_else(|| "[TIN]".into())
-            })
-            .into_owned()
+        scrub_tins(text, |tin| {
+            Subject::of_tin(tin)
+                .and_then(|subject| self.ticket(&subject))
+                .unwrap_or_else(|| "[TIN]".into())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scrubbed(text: &str) -> String {
+        scrub_tins(text, |_| "[TIN]".into())
+    }
+
+    #[test]
+    fn a_bare_run_of_nine_to_twelve_digits_is_a_tin() {
+        for (text, want) in [
+            ("TIN 000123453 is due", "TIN [TIN] is due"),
+            ("TIN 000123453000.", "TIN [TIN]."),
+            ("0001234530, then", "[TIN], then"),
+            ("000123453/2551Q-2026-Q3", "[TIN]/2551Q-2026-Q3"),
+            ("dashed 000-123-453-000", "dashed [TIN]"),
+        ] {
+            assert_eq!(scrubbed(text), want);
+        }
+    }
+
+    #[test]
+    fn amounts_tickets_and_other_numbers_stay() {
+        for text in [
+            "owed 123456789.50",
+            "owed ₱123456789",
+            "1,234,567,890.00",
+            "12345678901.5 and 1234567890,50",
+            "0.123456789",
+            "tkt_000123453ABCDEFGHJKMNPQRS",
+            "tkt_ABCDEFGHJKMNPQ000123453000",
+            "20261105",
+            "a 13-digit id 1793745245000",
+        ] {
+            assert_eq!(scrubbed(text), text);
+        }
     }
 }
