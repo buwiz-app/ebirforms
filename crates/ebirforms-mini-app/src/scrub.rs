@@ -20,9 +20,12 @@ const TIN_KEYS: [&str; 5] = ["tin", "tin_root", "tin_display", "branch_tin", "ro
 /// Arguments that hold a return in the agent's tools.
 const RETURN_ARGS: [&str; 2] = ["code", "form"];
 
-fn dashed_tin_re() -> &'static Regex {
+/// A TIN written in groups, with dashes, spaces or dots.
+fn grouped_tin_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b\d{3}-\d{3}-\d{3}(?:-\d{3,5})?\b").expect("regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"\b[0-9]{3}[-. ][0-9]{3}[-. ][0-9]{3}(?:[-. ][0-9]{3,5})?\b").expect("regex")
+    })
 }
 
 fn bare_tin_re() -> &'static Regex {
@@ -30,24 +33,27 @@ fn bare_tin_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\b[0-9]{9,12}\b").expect("regex"))
 }
 
-/// Whether the digits at `start..end` of `text` are an amount: they have
-/// decimals or grouping beside them, or a peso sign before them. A ticket
-/// needs no such test: its digits touch `_` or a letter, so they aren't a run.
+/// Whether the digits at `start..end` of `text` are an amount: a peso sign
+/// before them, one or two decimals after them, or they are the decimals of
+/// `0.123456789`. A separator alone says nothing: `x,000123453,y` and a list
+/// of TINs have those too. A ticket needs no such test: its digits touch `_`
+/// or a letter, so they aren't a run.
 fn amount_at(text: &str, start: usize, end: usize) -> bool {
-    let before = text[..start].chars().next_back();
+    let mut before = text[..start].chars().rev();
+    let (one, two) = (before.next(), before.next());
+    let decimals_before = one == Some('.') && two.is_some_and(|c| c.is_ascii_digit());
     let mut after = text[end..].chars();
-    let separated =
-        matches!(after.next(), Some('.' | ',')) && after.next().is_some_and(|c| c.is_ascii_digit());
-    separated || matches!(before, Some('.' | ',' | '₱'))
+    let separated = matches!(after.next(), Some('.' | ','));
+    let digits = after.clone().take_while(char::is_ascii_digit).count();
+    let decimals_after = separated && (1..=2).contains(&digits);
+    one == Some('₱') || decimals_before || decimals_after
 }
 
-/// `text` with each TIN as `word` says, formatted or a bare run of 9 to 12
-/// digits. An amount stays as it is.
-fn scrub_tins(text: &str, mut word: impl FnMut(&str) -> String) -> String {
-    let text = dashed_tin_re().replace_all(text, |caps: &regex::Captures<'_>| word(&caps[0]));
+/// `text` with what `re` finds as `word` says, amounts left as they are.
+fn scrub_runs(text: &str, re: &Regex, word: &mut impl FnMut(&str) -> String) -> String {
     let (mut out, mut kept) = (String::new(), 0);
-    for run in bare_tin_re().find_iter(&text) {
-        if amount_at(&text, run.start(), run.end()) {
+    for run in re.find_iter(text) {
+        if amount_at(text, run.start(), run.end()) {
             continue;
         }
         out.push_str(&text[kept..run.start()]);
@@ -56,6 +62,13 @@ fn scrub_tins(text: &str, mut word: impl FnMut(&str) -> String) -> String {
     }
     out.push_str(&text[kept..]);
     out
+}
+
+/// `text` with each TIN as `word` says: in groups, or a bare run of 9 to 12
+/// digits. An amount stays as it is.
+fn scrub_tins(text: &str, mut word: impl FnMut(&str) -> String) -> String {
+    let text = scrub_runs(text, grouped_tin_re(), &mut word);
+    scrub_runs(&text, bare_tin_re(), &mut word)
 }
 
 /// Turn the tickets in a tool's arguments into what the tool reads.
@@ -202,7 +215,8 @@ impl<'a> Scrubber<'a> {
     /// Free text: TINs become tickets ([`scrub_tins`]).
     pub(crate) fn text(&mut self, text: &str) -> String {
         scrub_tins(text, |tin| {
-            Subject::of_tin(tin)
+            let digits: String = tin.chars().filter(char::is_ascii_digit).collect();
+            Subject::of_tin(&digits)
                 .and_then(|subject| self.ticket(&subject))
                 .unwrap_or_else(|| "[TIN]".into())
         })
@@ -225,6 +239,13 @@ mod tests {
             ("0001234530, then", "[TIN], then"),
             ("000123453/2551Q-2026-Q3", "[TIN]/2551Q-2026-Q3"),
             ("dashed 000-123-453-000", "dashed [TIN]"),
+            ("x,000123453,y", "x,[TIN],y"),
+            ("x.000123453.y", "x.[TIN].y"),
+            ("000123453,000987654", "[TIN],[TIN]"),
+            ("000123453.000", "[TIN].000"),
+            ("spaced 000 123 453 000", "spaced [TIN]"),
+            ("dotted 000.123.453.000 here", "dotted [TIN] here"),
+            ("mixed 000 123-453", "mixed [TIN]"),
         ] {
             assert_eq!(scrubbed(text), want);
         }
@@ -235,6 +256,9 @@ mod tests {
         for text in [
             "owed 123456789.50",
             "owed ₱123456789",
+            "owed ₱123 456 789",
+            "123.456.789.50",
+            "123 456 789,50",
             "1,234,567,890.00",
             "12345678901.5 and 1234567890,50",
             "0.123456789",
