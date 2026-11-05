@@ -305,12 +305,17 @@ function Btn(p: { label: string; onPress: () => void; variant?: "primary" | "sec
   );
 }
 
-function Segmented<T extends string>(p: { options: { value: T; label: string }[]; value: T; onChange: (v: T) => void }) {
+/** `said`: for an option whose label is someone's data. Its accessibility label is then these fixed words and its
+ *  accessibility value the label. A button whose label differs from its text reaches the Bot's assistant unnamed
+ *  (app/src/agent_hub/filter.rs), so the name stays out of what it reads; a screen reader still says it. */
+function Segmented<T extends string>(p: { options: { value: T; label: string; said?: string }[]; value: T; onChange: (v: T) => void }) {
   return (
     <View class={`flex-row gap-0.5 p-0.5 rounded-md self-start ${C.inset}`}>
       <Each of={p.options}>
         {(o) => (
           <View
+            accessibilityLabel={o().said}
+            accessibilityValue={o().said ? { text: o().label } : undefined}
             onPress={() => p.onChange(o().value)}
             activeStyle={{ opacity: 0.7 }}
             class={`px-3 py-1 rounded-md ${o().value === p.value ? `${C.pane} border ${C.line}` : ""}`}
@@ -506,7 +511,7 @@ export default function R() {
             <If when={Boolean(TICKET)}>
               <Segmented
                 options={[
-                  { value: "mine", label: mineLabel() },
+                  { value: "mine", label: mineLabel(), said: "This taxpayer" },
                   { value: "all", label: "All branches" },
                 ]}
                 value={whose()}
