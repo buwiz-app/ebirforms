@@ -609,6 +609,22 @@ fn the_bot_contract_over_a_scratch_database() {
     assert_eq!(subject["kind"], "return");
     assert_eq!(subject["tin"], tin);
     assert_eq!(subject["form"], "2551Q");
+    // a ticket issued under the AI's press is the one the model was already given
+    let pressed = json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } });
+    let issued = bot.call_as(
+        pressed,
+        "ebirforms_ticket_issue",
+        json!({ "ticket": return_ticket, "tin": tin }),
+    );
+    assert_eq!(result_of(&issued)["ticket"], ticket, "{issued}");
+    assert_eq!(
+        bot.agent(
+            "ebirforms_ticket_issue",
+            json!({ "ticket": return_ticket, "tin": tin })
+        )["isError"],
+        true,
+        "and the model can't call it"
+    );
     let years = bot.call_as(
         forms_app.clone(),
         "ebirforms_app_list_tax_years",
