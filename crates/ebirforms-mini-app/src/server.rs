@@ -935,15 +935,11 @@ impl Server {
     }
 
     fn form_dismiss(&mut self, arguments: &Map<String, Value>) -> Result<Value, String> {
-        reject_unknown(arguments, &["discard"])?;
-        let discard = arguments
-            .get("discard")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        no_arguments(arguments)?;
         match &self.form {
             None => Ok(json!({ "dismissed": false, "message": "no return was open" })),
-            Some(form) if form.dirty && !discard => Err(format!(
-                "unsaved edits: save them with {FORM_SAVE}, or call {FORM_DISMISS} with `discard: true` once the user said to drop them"
+            Some(form) if form.dirty => Err(format!(
+                "unsaved edits: save them with {FORM_SAVE}; you can't drop them"
             )),
             Some(_) => {
                 self.form = None;
@@ -970,18 +966,13 @@ fn is_app_only(name: &str) -> bool {
 
 /// Whether `name` changes nothing, as [`READ_ONLY`] means it: so
 /// [`TAXPAYERS_LIST`] and [`TICKET_ISSUE`] count, though they may issue
-/// tickets. Only `authorize` reads this, for resolve and routine calls, and
-/// the app-only tools here refuse those callers there anyway.
+/// tickets. [`PRINT_PREVIEW`] doesn't: by `period` it opens the stored return,
+/// and an open can save it (`screen_form_open`, in [`scope::FUNCTIONS`]).
+/// Only `authorize` reads this, for the AI's press and for resolve and routine
+/// calls, and the app-only tools here refuse those callers there anyway.
 fn read_only(name: &str) -> bool {
     READ_ONLY.contains(&name)
-        || [
-            TICKET_SUBJECT,
-            TICKET_ISSUE,
-            PRINT_PREVIEW,
-            TAXPAYERS_LIST,
-            ACCOUNT_STATUS,
-        ]
-        .contains(&name)
+        || [TICKET_SUBJECT, TICKET_ISSUE, TAXPAYERS_LIST, ACCOUNT_STATUS].contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
             .and_then(scope::find)
@@ -2703,12 +2694,8 @@ fn tool_list() -> Value {
         ),
         tool(
             FORM_DISMISS,
-            "Close the open return without saving. Refused when it has unsaved edits unless `discard` is true, which you set only after the user said to drop them.",
-            json!({
-                "type": "object",
-                "properties": { "discard": { "type": "boolean" } },
-                "additionalProperties": false
-            }),
+            "Close the open return. Refused when it has unsaved edits: save them first.",
+            empty_schema(),
             false,
         ),
         tool(
@@ -2755,7 +2742,8 @@ fn tool_list() -> Value {
                 "required": ["ticket", "form"],
                 "additionalProperties": false
             }),
-            true,
+            // by `period` it opens the stored return, and an open can save it
+            false,
         ),
         app_only(
             TAXPAYERS_LIST,

@@ -64,7 +64,9 @@ pub(crate) static FUNCTIONS: &[(&str, Rule, Access)] = &[
     ("list_tax_years", Rule::Tin(0), Access::Read),
     ("yearly_forms", Rule::Tin(0), Access::Read),
     ("list_form_templates", Rule::Tin(0), Access::Read),
-    ("screen_form_open", Rule::Tin(0), Access::Read),
+    // a write: a stored Draft follows the tax profile as it opens, and the open
+    // saves that quietly (`open_screen_form`, bir-app-core)
+    ("screen_form_open", Rule::Tin(0), Access::Write),
     ("screen_form_sample", Rule::Tin(0), Access::Read),
     ("screen_form_sample_period", Rule::Tin(0), Access::Read),
     ("screen_form_amend", Rule::Tin(0), Access::Read),

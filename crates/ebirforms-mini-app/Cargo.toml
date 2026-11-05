@@ -23,6 +23,10 @@ name = "mcp_contract"
 path = "../../tests/mcp_contract.rs"
 
 [[test]]
+name = "open_saves"
+path = "../../tests/open_saves.rs"
+
+[[test]]
 name = "own_data"
 path = "../../tests/own_data.rs"
 
