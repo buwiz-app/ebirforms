@@ -190,6 +190,15 @@ fn the_bot_contract_over_a_scratch_database() {
         tool("ebirforms_app_screen_form_validate")["annotations"]["readOnlyHint"],
         true
     );
+    // a screen opens a branch or a return with it, under the AI's press too
+    assert_eq!(
+        tool("ebirforms_ticket_issue")["annotations"]["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        tool("ebirforms_ticket_issue")["_meta"]["buwiz/audience"],
+        json!(["app"])
+    );
     assert_eq!(
         tool("ebirforms_app_screen_form_save")["annotations"]["readOnlyHint"],
         false
