@@ -31,6 +31,10 @@ name = "fill_sources"
 path = "../../tests/fill_sources.rs"
 
 [[test]]
+name = "labels_hide_data"
+path = "../../tests/labels_hide_data.rs"
+
+[[test]]
 name = "new_taxpayer"
 path = "../../tests/new_taxpayer.rs"
 
