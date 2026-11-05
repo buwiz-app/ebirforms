@@ -359,6 +359,11 @@ impl Server {
                 "{name} changes eBIRForms data, so it does not run for a resolve or routine call"
             ));
         }
+        // the AI's press: a screen's reads run under it, anything that changes
+        // something needs the person's own click
+        if caller.press && !read_only(name) {
+            return Err(format!("{name} needs the person's own click"));
+        }
         if caller.origin != Origin::App {
             return if is_app_only(name) {
                 Err(format!("{name} is for the eBIRForms mini apps only"))

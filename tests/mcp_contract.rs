@@ -617,6 +617,22 @@ fn the_bot_contract_over_a_scratch_database() {
         json!({ "ticket": return_ticket, "tin": tin }),
     );
     assert_eq!(result_of(&issued)["ticket"], ticket, "{issued}");
+    // anything that changes something needs the person's own click, as the app's call or not
+    for write in [
+        "ebirforms_app_screen_form_save",
+        "ebirforms_form_save_draft",
+    ] {
+        let refused = bot.call_as(
+            json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } }),
+            write,
+            json!({}),
+        );
+        assert_eq!(refused["isError"], true, "{write}: {refused}");
+        assert!(
+            refused.to_string().contains("the person's own click"),
+            "{write}: {refused}"
+        );
+    }
     assert_eq!(
         bot.agent(
             "ebirforms_ticket_issue",
