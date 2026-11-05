@@ -199,9 +199,20 @@ fn the_bot_contract_over_a_scratch_database() {
         tool("ebirforms_ticket_issue")["_meta"]["buwiz/audience"],
         json!(["app"])
     );
+    for write in [
+        "ebirforms_app_screen_form_save",
+        "ebirforms_app_screen_form_open",
+        "ebirforms_app_print_preview",
+    ] {
+        assert_eq!(tool(write)["annotations"]["readOnlyHint"], false, "{write}");
+    }
     assert_eq!(
-        tool("ebirforms_app_screen_form_save")["annotations"]["readOnlyHint"],
-        false
+        tool("ebirforms_app_screen_form_sample")["annotations"]["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        tool("ebirforms_form_dismiss")["inputSchema"]["properties"],
+        json!({})
     );
     let resources = bot.send("resources/list", json!({}))["result"]["resources"].clone();
     let uris: Vec<&str> = resources
@@ -621,6 +632,9 @@ fn the_bot_contract_over_a_scratch_database() {
     for write in [
         "ebirforms_app_screen_form_save",
         "ebirforms_form_save_draft",
+        // an open saves a stored draft that followed the profile (tests/open_saves.rs)
+        "ebirforms_app_screen_form_open",
+        "ebirforms_app_print_preview",
     ] {
         let refused = bot.call_as(
             json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } }),
@@ -731,6 +745,12 @@ fn the_bot_contract_over_a_scratch_database() {
         "{filled}"
     );
     // unsaved edits keep it open
+    assert!(error_text(&bot.agent("ebirforms_form_dismiss", json!({}))).contains("unsaved"));
+    // the model has no way to drop what's unsaved, whatever it says the user said
+    assert!(
+        bot.agent("ebirforms_form_dismiss", json!({ "discard": true }))["isError"] == true,
+        "discard is no argument"
+    );
     assert!(error_text(&bot.agent("ebirforms_form_dismiss", json!({}))).contains("unsaved"));
 
     // another process of this mini app with the database open (eBIRForms
