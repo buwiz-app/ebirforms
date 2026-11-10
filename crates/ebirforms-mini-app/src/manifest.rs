@@ -34,7 +34,7 @@ pub(crate) const PROTOCOL: &str = buwiz_plugin::manifest::PROTOCOL;
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
 /// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0 release).
-pub(crate) const VERSION: &str = "0.3.1";
+pub(crate) const VERSION: &str = "0.3.2";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
