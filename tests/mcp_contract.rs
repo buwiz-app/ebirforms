@@ -1173,6 +1173,11 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert_eq!(refused_state["tone"], "warning");
     assert_eq!(
+        refused_state["reason"],
+        Value::Null,
+        "the raw server text is not for a screen"
+    );
+    assert_eq!(
         refused_state["draft_note"],
         "Back to a draft. Nothing was sent."
     );

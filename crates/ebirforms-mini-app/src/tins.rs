@@ -67,6 +67,10 @@ pub(crate) fn with_button_and_note(mut state: Value) -> Value {
         state["tone"] = json!(tone_name(
             BirApp::tin_statement_for_refusal(code, None).tone
         ));
+        // the server's sentence stays out of a screen: the line says it
+        if state["line"].is_string() {
+            state["reason"] = Value::Null;
+        }
     }
     state
 }
