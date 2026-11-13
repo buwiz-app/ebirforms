@@ -38,10 +38,50 @@ const FIX_URL: &str = "https://account.buwiz.com/tins/claims/c3/fix";
 const NOTE: &str = "Retake it in daylight, said JUANA DELA CRUZ";
 const SIGNED_IN_AS: &str = "owner@example.test";
 
+const ROOTS: [&str; 8] = [
+    UNVERIFIED,
+    APPROVED,
+    SENT_BACK,
+    PAUSED,
+    PENDING,
+    ABSENT,
+    FOREIGN_LINK,
+    INFO_ONLY,
+];
+
+/// A TIN in `text`, whatever its form: a fixture's root bare (9 digits), with
+/// its 3-digit or 5-digit branch (12 and 14 digits), dashed in groups, or any
+/// run of 9 or more digits (a ticket's own characters are left out first).
+fn tin_in(text: &str) -> Option<String> {
+    let tickets = regex::Regex::new(r"tkt_[0-9A-HJKMNP-TV-Z]{26}").unwrap();
+    let text = tickets.replace_all(text, "tkt");
+    // a card's `as_of` is a clock in milliseconds, not a TIN
+    let text = regex::Regex::new(r#""as_of":\s*[0-9]+"#)
+        .unwrap()
+        .replace_all(&text, "as_of");
+    for root in ROOTS {
+        let dashed = format!("{}-{}-{}", &root[..3], &root[3..6], &root[6..]);
+        for form in [
+            root.to_string(),
+            format!("{root}000"),
+            format!("{root}00000"),
+            dashed,
+        ] {
+            if text.contains(&form) {
+                return Some(form);
+            }
+        }
+    }
+    let run = regex::Regex::new(r"[0-9]{9,}|[0-9]{3}[-. ][0-9]{3}[-. ][0-9]{3}").unwrap();
+    run.find(&text).map(|found| found.as_str().to_string())
+}
+
 /// What the mock account server answers for the list.
 struct Mock {
     list: (u16, Value),
     requests: Vec<String>,
+    /// The list route drops the connection: the server cannot be reached.
+    down: bool,
 }
 
 fn row(tin_root: &str, status: &str, can_send: bool, extra: Value) -> Value {
@@ -66,7 +106,7 @@ fn complete_list() -> Value {
         row(UNVERIFIED, "unverified", false, json!({ "action": { "label": "Verify to send", "url": VERIFY_URL } })),
         row(APPROVED, "approved", true, json!({})),
         row(SENT_BACK, "needs_fix", false, json!({
-            "reasons": ["A photo is too blurry to read."], "note": NOTE,
+            "reasons": ["A photo is too blurry to read.", "Name does not match MARIA CLARA."], "note": NOTE,
             "action": { "label": "Fix and send again", "url": FIX_URL } })),
         row(PAUSED, "paused", false, json!({})),
         row(PENDING, "pending", false, json!({})),
@@ -84,9 +124,13 @@ fn old_server_list() -> Value {
     ] })
 }
 
-fn serve(mock: Arc<Mutex<Mock>>) -> String {
+fn bind() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    (listener, base)
+}
+
+fn serve(listener: TcpListener, mock: Arc<Mutex<Mock>>) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
@@ -129,6 +173,9 @@ fn serve(mock: Arc<Mutex<Mock>>) -> String {
                 ["GET", path] if path.starts_with("/api/tax-profiles") => {
                     let mut mock = mock.lock().unwrap();
                     mock.requests.push(path.to_string());
+                    if mock.down {
+                        continue;
+                    }
                     mock.list.clone()
                 }
                 _ => (404, json!({ "error": { "code": "not_found" } })),
@@ -142,7 +189,6 @@ fn serve(mock: Arc<Mutex<Mock>>) -> String {
             .unwrap();
         }
     });
-    base
 }
 
 struct Bot {
@@ -266,14 +312,20 @@ fn the_account_states_reach_the_apps_and_the_gate() {
     let mock = Arc::new(Mutex::new(Mock {
         list: (200, complete_list()),
         requests: vec![],
+        down: false,
     }));
-    let base = serve(mock.clone());
-    // SAFETY: set before any thread of this test reads them (one test per process).
+    // The mock's port is bound first and the process environment is set before
+    // the mock's thread starts (`owner::prepare` is not used: it names a data
+    // folder, while this test opens a scratch database and also needs the
+    // account URL, which it does not set).
+    let (listener, base) = bind();
+    // SAFETY: set before this test starts any thread (one test per process).
     unsafe {
         std::env::set_var("BUWIZ_DB_KEY", TEST_KEY);
         std::env::set_var("BUWIZ_NO_KEYCHAIN", "1");
         std::env::set_var("EBIRFORMS_ACCOUNT_URL", &base);
     }
+    serve(listener, mock.clone());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bir_data.db");
     let app = Arc::new(BirApp::open_at(&path).unwrap());
@@ -308,10 +360,9 @@ fn the_account_states_reach_the_apps_and_the_gate() {
             .unwrap()
             .to_string()
     };
-    let stray_tin = regex::Regex::new(r"\b[0-9]{9}\b").unwrap();
     let clean = |answer: &Value| {
         let text = answer.to_string();
-        assert!(!stray_tin.is_match(&text), "a TIN in {text}");
+        assert_eq!(tin_in(&text), None, "a TIN in {text}");
         for private in ["SYNTHETIC REGISTERED", SIGNED_IN_AS] {
             assert!(!text.contains(private), "{private} in {text}");
         }
@@ -350,7 +401,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
 
     // ---- signed out: states unknown, nothing blocked by the list; the
     // sign-in refusal is today's
-    let signed_out = bot.app("forms", "ebirforms_account_tins", json!({}));
+    let signed_out = bot.app("tax-profile", "ebirforms_account_tins", json!({}));
     assert_eq!(result_of(&signed_out)["read"], "signed_out", "{signed_out}");
     for row in result_of(&signed_out)["rows"].as_array().unwrap() {
         assert_eq!(
@@ -372,7 +423,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
 
     // ---- the new server's complete list
     bot.sign_in();
-    let answer = bot.app("forms", "ebirforms_account_tins", json!({}));
+    let answer = bot.app("tax-profile", "ebirforms_account_tins", json!({}));
     clean(&answer);
     let list = result_of(&answer);
     assert_eq!(
@@ -407,7 +458,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
             SENT_BACK,
             "sent_back",
             "Sent back",
-            "Buwiz sent this TIN back for a fix: A photo is too blurry to read.",
+            "Buwiz sent this TIN back for a fix: A photo is too blurry to read. Name does not match MARIA CLARA.",
             Some(("fix", "Fix it")),
             false,
         ),
@@ -519,12 +570,59 @@ fn the_account_states_reach_the_apps_and_the_gate() {
     }
     // a check again asks the server at most every 15 seconds: no second request yet
     let again = bot.app(
-        "forms",
+        "tax-profile",
         "ebirforms_account_tins",
         json!({ "refresh": true }),
     );
     assert_eq!(result_of(&again)["read"], "ok");
     assert_eq!(mock.lock().unwrap().requests.len(), 1);
+    // every saved taxpayer is answered to the apps that list them, and to no other
+    let everyone = bot.app("forms", "ebirforms_account_tins", json!({}));
+    assert!(
+        error_text(&everyone).contains("apps that list every taxpayer"),
+        "{everyone}"
+    );
+    let people = bot.app("card-people", "ebirforms_account_tins", json!({}));
+    assert_eq!(
+        result_of(&people)["rows"].as_array().unwrap().len(),
+        8,
+        "{people}"
+    );
+    assert_eq!(tin_in(&people.to_string()), None, "{people}");
+    // the card-people card has the list tool and not the link tool
+    let link_refused = bot.app(
+        "card-people",
+        "ebirforms_account_tin_link",
+        json!({ "ticket": ticket_of(ABSENT), "step": "add" }),
+    );
+    assert!(
+        error_text(&link_refused).contains("permissions"),
+        "{link_refused}"
+    );
+    // Tax Profile calls as itself, for one branch and for a link
+    let header = bot.app(
+        "tax-profile",
+        "ebirforms_account_tins",
+        json!({ "ticket": ticket_of(SENT_BACK), "tin": tin_of(SENT_BACK) }),
+    );
+    assert_eq!(
+        result_of(&header)["rows"][0]["state"],
+        "sent_back",
+        "{header}"
+    );
+    let tp_link = bot.app(
+        "tax-profile",
+        "ebirforms_account_tin_link",
+        json!({ "ticket": ticket_of(UNVERIFIED), "tin": tin_of(UNVERIFIED), "step": "verify" }),
+    );
+    assert_eq!(result_of(&tp_link)["url"], VERIFY_URL, "{tp_link}");
+    // a branch that is not saved is refused, and no ticket is made for it
+    let unsaved = bot.app(
+        "forms",
+        "ebirforms_account_tins",
+        json!({ "ticket": ticket_of(UNVERIFIED), "tin": format!("{UNVERIFIED}00007") }),
+    );
+    assert!(error_text(&unsaved).contains("no such branch"), "{unsaved}");
 
     // ---- who may call them: apps that list them; never the assistant,
     // a resolve or a routine
@@ -563,7 +661,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
     );
     let verify = link(&mut bot, "forms", UNVERIFIED, "verify");
     assert!(
-        !stray_tin.is_match(&verify.to_string()),
+        tin_in(&verify.to_string()).is_none(),
         "Verify carries no TIN: {verify}"
     );
     // a link the server supplied off the site is not followed
@@ -591,7 +689,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         ),
         (
             SENT_BACK,
-            "Buwiz sent this TIN back for a fix: A photo is too blurry to read.",
+            "Buwiz sent this TIN back for a fix: A photo is too blurry to read. Name does not match MARIA CLARA.",
         ),
         (
             PAUSED,
@@ -636,10 +734,21 @@ fn the_account_states_reach_the_apps_and_the_gate() {
     assert_eq!(queued["isError"], false, "{queued}");
     assert_eq!(status_of(&mut bot, APPROVED), "Queued");
 
+    // a queue call whose TIN is not one the gate can check is refused, not waved through
+    let odd = bot.app(
+        "forms",
+        "ebirforms_app_queue_form_draft",
+        json!({ "args": [format!("{APPROVED}1"), "0619E", 2026, 2], "ticket": ticket_of(APPROVED) }),
+    );
+    assert!(
+        error_text(&odd).contains("names no TIN eBIRForms can check"),
+        "{odd}"
+    );
+
     // ---- a state shown as information only: the server says it can send, so
     // Queue is never off and the gate never refuses, whatever the status says
     let info = row_of(
-        &bot.app("forms", "ebirforms_account_tins", json!({})),
+        &bot.app("tax-profile", "ebirforms_account_tins", json!({})),
         &ticket_of(INFO_ONLY),
     );
     assert_eq!(info["can_queue"], true, "{info}");
@@ -670,6 +779,20 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         },
     )
     .expect("a refused draft");
+    // a queued return that failed with a TIN code (an older build's row), waiting
+    saved_0619e(&app, &tin_of(PENDING));
+    let waiting_id = app
+        .queue_return("0619E", &saved_0619e(&app, &tin_of(PENDING)))
+        .expect("queue");
+    app.demo_set_send_stage(
+        waiting_id,
+        &SendStage::Failed {
+            reason: "Not sent (nothing reached BIR): this TIN is not active on your account (tin_not_active)".into(),
+            attempts: 2,
+            next_retry_at: Some("2099-01-01T00:00:00Z".into()),
+        },
+    )
+    .expect("a failed waiting row");
     let queue_list = bot.agent("ebirforms_queue_list", json!({}));
     let text = queue_list.to_string();
     for private in [
@@ -685,7 +808,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         );
     }
     assert!(
-        !stray_tin.is_match(&text),
+        tin_in(&text).is_none(),
         "a TIN reached the assistant: {text}"
     );
     let drafts = result_of(&queue_list)["back_to_draft"]
@@ -694,6 +817,25 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         .clone();
     assert_eq!(drafts.len(), 1, "{queue_list}");
     assert_eq!(drafts[0]["chip"], "Sent back");
+    // the waiting row reads BIR's chip and line, not the retry text; the list was
+    // read before its failure, so it cannot replace it
+    let waiting = result_of(&queue_list)["waiting"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let failed = waiting
+        .iter()
+        .find(|row| row["stage"] == "failed")
+        .unwrap_or_else(|| panic!("a failed waiting row: {queue_list}"));
+    assert_eq!(failed["chip"], "Not on your Buwiz account", "{failed}");
+    assert_eq!(failed["line"], "This TIN is not on your Buwiz account.");
+    for key in ["reason", "attempts", "next_try"] {
+        assert!(failed.get(key).is_none(), "{key}: {failed}");
+    }
+    assert!(
+        !text.contains("MARIA"),
+        "a reason of the list reached the assistant: {text}"
+    );
     // the list was read before the refusal, so it only confirms the state: the
     // stored refusal stands, in its plain sentence (no reasons, no note)
     assert_eq!(drafts[0]["line"], "Buwiz sent this TIN back for a fix.");
@@ -716,12 +858,37 @@ fn the_account_states_reach_the_apps_and_the_gate() {
             .is_string()
     );
 
+    // ---- the server cannot be reached: the last list is answered as stale, which
+    // shows the state and never closes Queue (the 15 s age passes first)
+    saved_0619e(&app, &tin_of(PAUSED));
+    mock.lock().unwrap().down = true;
+    std::thread::sleep(std::time::Duration::from_secs(16));
+    let stale = bot.app(
+        "tax-profile",
+        "ebirforms_account_tins",
+        json!({ "refresh": true }),
+    );
+    assert_eq!(result_of(&stale)["stale"], true, "{stale}");
+    let paused = row_of(&stale, &ticket_of(PAUSED));
+    assert_eq!(
+        (paused["state"].as_str(), paused["can_queue"].as_bool()),
+        (Some("paused"), Some(true)),
+        "{paused}"
+    );
+    let through = queue(&mut bot, PAUSED);
+    assert_eq!(
+        through["isError"], false,
+        "a stale list never blocks: {through}"
+    );
+    assert_eq!(status_of(&mut bot, PAUSED), "Queued");
+    mock.lock().unwrap().down = false;
+
     // ---- today's server: no marker, so a TIN missing from its list is
     // unknown and not blocked; a pending row still blocks
     bot.sign_out();
     mock.lock().unwrap().list = (200, old_server_list());
     bot.sign_in();
-    let old = bot.app("forms", "ebirforms_account_tins", json!({}));
+    let old = bot.app("tax-profile", "ebirforms_account_tins", json!({}));
     assert_eq!(result_of(&old)["complete"], false, "{old}");
     assert_eq!(row_of(&old, &ticket_of(ABSENT))["state"], "unknown");
     assert_eq!(row_of(&old, &ticket_of(ABSENT))["can_queue"], true);
@@ -742,11 +909,39 @@ fn the_account_states_reach_the_apps_and_the_gate() {
     );
     assert_eq!(status_of(&mut bot, ABSENT), "Queued");
 
+    // ---- a banned account: every TIN reads as the account's state, Queue is
+    // refused with the line, and the assistant still reads nothing private
+    bot.sign_out();
+    mock.lock().unwrap().list = (
+        403,
+        json!({ "error": { "code": "account_banned", "message": "banned" } }),
+    );
+    bot.sign_in();
+    let banned = bot.app("tax-profile", "ebirforms_account_tins", json!({}));
+    assert_eq!(result_of(&banned)["read"], "banned", "{banned}");
+    let banned_row = row_of(&banned, &ticket_of(APPROVED));
+    assert_eq!(
+        (
+            banned_row["state"].as_str(),
+            banned_row["can_queue"].as_bool()
+        ),
+        (Some("account_banned"), Some(false))
+    );
+    let refused = queue(&mut bot, APPROVED);
+    assert!(
+        error_text(&refused)
+            .contains("This Buwiz account is banned, so nothing can be sent. Nothing was queued."),
+        "{refused}"
+    );
+    let banned_queue = bot.agent("ebirforms_queue_list", json!({}));
+    assert_eq!(banned_queue["isError"], false, "{banned_queue}");
+    assert_eq!(tin_in(&banned_queue.to_string()), None, "{banned_queue}");
+
     // ---- a list that cannot be read blocks nothing either
     bot.sign_out();
     mock.lock().unwrap().list = (500, json!({ "error": { "code": "boom" } }));
     bot.sign_in();
-    let broken = bot.app("forms", "ebirforms_account_tins", json!({}));
+    let broken = bot.app("tax-profile", "ebirforms_account_tins", json!({}));
     assert_eq!(result_of(&broken)["read"], "unavailable", "{broken}");
     assert_eq!(row_of(&broken, &ticket_of(UNVERIFIED))["can_queue"], true);
     let through = queue(&mut bot, UNVERIFIED);

@@ -23,6 +23,17 @@ fn step_json(step: Option<TinStep>) -> Value {
     )
 }
 
+/// The gate for `tin` from the list `read`. A list answered as stale (the
+/// server could not be reached, so it is the last one read) says the state
+/// as information only: it never closes Queue, whatever it says.
+pub(crate) fn gate_for(tin: &str, read: &TinsRead, now: i64) -> QueueGate {
+    let mut gate = BirApp::tin_gate(tin, std::slice::from_ref(read), now);
+    if read.as_ref().is_ok_and(|list| list.stale) {
+        gate.can_queue = true;
+    }
+    gate
+}
+
 /// A chip's tone: danger, warning or info.
 fn tone_name(tone: TinTone) -> &'static str {
     match tone {
@@ -59,15 +70,13 @@ pub(crate) fn with_button_and_note(mut state: Value) -> Value {
     if state["stage"] == "Refused" {
         state["draft_note"] = json!(BirApp::DRAFT_NOTE);
     }
-    // the chip's tone, from the stored reason's code
+    // the chip's tone, from the stored reason's code; the server's sentence
+    // itself stays out of a screen (the line says it), whatever the stage
     if let Some(code) = state["reason"].as_str().and_then(TinRefusal::from_reason) {
         state["tone"] = json!(tone_name(
             BirApp::tin_statement_for_refusal(code, None).tone
         ));
-        // the server's sentence stays out of a screen: the line says it
-        if state["line"].is_string() {
-            state["reason"] = Value::Null;
-        }
+        state["reason"] = Value::Null;
     }
     state
 }
@@ -94,7 +103,7 @@ pub(crate) fn row(
     now: i64,
     with_note: bool,
 ) -> Value {
-    let gate = BirApp::tin_gate(tin, std::slice::from_ref(read), now);
+    let gate = gate_for(tin, read, now);
     let mut row = json!({
         "ticket": ticket,
         "branch": branch,
@@ -208,6 +217,44 @@ mod tests {
         ] {
             assert!(!account_url(url), "{url:?}");
         }
+    }
+
+    #[test]
+    fn a_stale_list_shows_the_state_and_never_closes_queue() {
+        let body = json!({ "include": "all", "profiles": [{
+            "tin": "000-123-453-00000", "status": "paused", "can_send": false }] });
+        let mut list = bir_submit::AccountTins::parse(&body, 1_000);
+        let fresh = gate_for("000123453", &Ok(list.clone()), 1_000);
+        assert!(!fresh.can_queue && fresh.statement.is_some());
+        list.stale = true;
+        let stale = gate_for("000123453", &Ok(list.clone()), 1_000);
+        assert!(stale.can_queue, "a stale list never blocks");
+        assert_eq!(
+            stale.statement.unwrap().chip,
+            "Paused",
+            "the state is still shown"
+        );
+        assert_eq!(
+            row("t", "00000", "000123453", &Ok(list), 1_000, false)["can_queue"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_tin_refusals_raw_text_is_nulled_at_every_stage() {
+        for stage in ["Failed", "Refused", "Queued", "NeedsAttention"] {
+            let state = json!({
+                "stage": stage,
+                "reason": "Not sent (nothing reached BIR): x (tin_not_active)",
+                "step": "add",
+            });
+            let shown = with_button_and_note(state);
+            assert_eq!(shown["reason"], Value::Null, "{stage}");
+            assert_eq!(shown["tone"], "danger");
+        }
+        let plain =
+            with_button_and_note(json!({ "stage": "Failed", "reason": "the network is down" }));
+        assert_eq!(plain["reason"], "the network is down");
     }
 
     #[test]

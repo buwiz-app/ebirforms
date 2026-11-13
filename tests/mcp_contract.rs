@@ -647,6 +647,27 @@ fn the_bot_contract_over_a_scratch_database() {
         "permission_denied"
     );
 
+    // the TIN state tools need a certified open too (an open this process did
+    // not certify is refused), and answer a certified Forms open signed out
+    for name in ["ebirforms_account_tins", "ebirforms_account_tin_link"] {
+        let refused = bot.call_as(
+            json!({ "origin": "app", "app": "forms", "open_id": b64(&[9u8; 16]) }),
+            name,
+            json!({ "ticket": ticket, "step": "verify" }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {refused}"
+        );
+    }
+    let certified = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_account_tins",
+        json!({ "ticket": ticket, "tin": tin }),
+    );
+    assert_eq!(result_of(&certified)["read"], "signed_out", "{certified}");
+    assert_eq!(result_of(&certified)["rows"][0]["state"], "unknown");
+
     // the app learns its ticket's subject, and is held to it
     let subject = bot.call_as(
         forms_app.clone(),

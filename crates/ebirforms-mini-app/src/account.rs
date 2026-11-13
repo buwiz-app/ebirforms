@@ -35,6 +35,12 @@ pub(crate) const SCREEN_AGE: i64 = 60;
 pub(crate) const QUEUE_AGE: i64 = 15;
 /// How old it may be for an assistant's answer (the Sending queue card).
 pub(crate) const ASSISTANT_AGE: i64 = 300;
+/// How long a screen waits for the account's list, in seconds, token
+/// refresh included.
+pub(crate) const SCREEN_WAIT: u64 = 8;
+/// How long the Queue gate and the assistant's answer wait: the one request
+/// thread must not stall behind a slow account server.
+pub(crate) const GATE_WAIT: u64 = 4;
 
 /// The sign-in state of this process.
 pub(crate) struct Account {
@@ -119,16 +125,49 @@ impl Account {
     }
 
     /// The account's TINs and their states: from memory when the last read
-    /// is younger than `max_age` seconds, else one request (bearer only, 5 s
-    /// at most). Signed out: no request. Never a TIN in a log line.
+    /// is younger than `max_age` seconds, else one request (bearer only; the
+    /// client gives each request 5 s). The wait is ended after `wait`
+    /// seconds, a token refresh included: the last list is then answered as
+    /// stale when it is under ten minutes old, else the read is offline, so
+    /// a slow server never stalls the plugin's one request thread. Signed
+    /// out: no request. Never a TIN in a log line.
+    pub(crate) fn tins_within(&self, max_age: i64, wait: u64) -> TinsRead {
+        let read = self.runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(wait),
+                self.submission.account_tins(max_age),
+            )
+            .await
+        });
+        read.unwrap_or_else(|_| self.last_list_or_offline())
+    }
+
+    /// A screen's read ([`SCREEN_WAIT`]).
     pub(crate) fn tins(&self, max_age: i64) -> TinsRead {
-        self.runtime.block_on(self.submission.account_tins(max_age))
+        self.tins_within(max_age, SCREEN_WAIT)
+    }
+
+    /// The last list read, as stale, when it is recent enough; else offline.
+    fn last_list_or_offline(&self) -> TinsRead {
+        match self.submission.cached_account_tins() {
+            Some(mut list) if now() - list.fetched_at < bir_submit::tins::STALE_LIMIT_SECS => {
+                list.stale = true;
+                Ok(list)
+            }
+            _ => Err(bir_submit::TinsError::Offline),
+        }
     }
 
     /// "Check again": a new read, unless one ended in the last 15 seconds.
     pub(crate) fn refresh_tins(&self) -> TinsRead {
-        self.runtime
-            .block_on(self.submission.refresh_account_tins())
+        let read = self.runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(SCREEN_WAIT),
+                self.submission.refresh_account_tins(),
+            )
+            .await
+        });
+        read.unwrap_or_else(|_| self.last_list_or_offline())
     }
 
     /// `ebirforms_account_status`: who is signed in, or the code waiting.
@@ -223,6 +262,8 @@ mod tests {
         /// request lines and bearers it saw.
         profiles: Option<(u16, Value)>,
         tins: Vec<(String, String)>,
+        /// Seconds the list route waits before it answers.
+        delay: u64,
     }
 
     /// A one-thread HTTP server with account.buwiz.com's sign-in routes and
@@ -300,6 +341,9 @@ mod tests {
                     }
                     ["GET", path] if path.starts_with("/api/tax-profiles") => {
                         seen.tins.push((line.trim().to_string(), bearer.clone()));
+                        if seen.delay > 0 {
+                            std::thread::sleep(std::time::Duration::from_secs(seen.delay));
+                        }
                         match seen.profiles.clone() {
                             Some(answer) => answer,
                             None => (404, json!({ "error": { "code": "not_found" } })),
@@ -510,6 +554,30 @@ mod tests {
             1,
             "the list was not asked again"
         );
+    }
+
+    #[test]
+    fn a_slow_account_server_is_waited_for_only_so_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = mock();
+        let account = signed_in(dir.path(), &base, &seen);
+        // no list yet: the wait ends as offline, not as an error, and soon
+        seen.lock().unwrap().delay = 3;
+        let began = std::time::Instant::now();
+        let read = account.tins_within(0, 1);
+        assert!(
+            matches!(read, Err(bir_submit::TinsError::Offline)),
+            "{read:?}"
+        );
+        assert!(began.elapsed() < std::time::Duration::from_secs(2));
+        // after a good read, the same slow server answers that list as stale
+        seen.lock().unwrap().delay = 0;
+        account.tins(ASSISTANT_AGE).expect("the list");
+        seen.lock().unwrap().delay = 3;
+        let began = std::time::Instant::now();
+        let list = account.tins_within(0, 1).expect("the last list");
+        assert!(list.stale, "answered from the last read");
+        assert!(began.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

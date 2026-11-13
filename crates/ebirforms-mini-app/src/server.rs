@@ -328,7 +328,7 @@ impl Server {
             return Ok(self.account_tool(name, arguments));
         }
         if is_app_only(name) {
-            return Ok(self.app_tool(&app, name, arguments));
+            return Ok(self.app_tool(&app, name, arguments, caller.app.as_deref()));
         }
         // as the caller sent them (tickets), for the card the answer carries
         let sent = arguments.clone();
@@ -410,13 +410,19 @@ impl Server {
         call_result(answer.map_err(|message| format!("{name}: {message}")))
     }
 
-    fn app_tool(&mut self, app: &Arc<BirApp>, name: &str, arguments: &Map<String, Value>) -> Value {
+    fn app_tool(
+        &mut self,
+        app: &Arc<BirApp>,
+        name: &str,
+        arguments: &Map<String, Value>,
+        caller: Option<&str>,
+    ) -> Value {
         let today = taxform::today();
         let answer = match name {
             TICKET_SUBJECT => ticket_subject(app, arguments, today),
             TICKET_ISSUE => ticket_issue(app, arguments, today),
             TAXPAYERS_LIST => no_arguments(arguments).and_then(|()| taxpayers_list(app)),
-            ACCOUNT_TINS => self.account_tins(app, arguments),
+            ACCOUNT_TINS => self.account_tins(app, arguments, caller),
             ACCOUNT_TIN_LINK => self.account_tin_link(app, arguments),
             PRINT_PREVIEW => return print_preview(app, arguments, today),
             _ => self.host_call(app, name, arguments),
@@ -432,11 +438,19 @@ impl Server {
     /// seconds old (a person who just fixed the TIN is not held to an older
     /// one).
     fn queue_gate(&self, function: &str, args: &[Value]) -> Result<(), String> {
-        let Some(tin) = scope::queue_tin(function, args) else {
-            return Ok(());
+        // a queue call whose TIN cannot be read is not waved through
+        let Some(tin) = scope::queue_tin(function, args)
+            .filter(|tin| bir_app_core::TinKey::parse(tin).is_some())
+        else {
+            return Err(
+                "This return names no TIN eBIRForms can check on your Buwiz account. Nothing was queued."
+                    .to_string(),
+            );
         };
-        let read = self.account.tins(account::QUEUE_AGE);
-        let gate = BirApp::tin_gate(&tin, &[read], account::now());
+        let read = self
+            .account
+            .tins_within(account::QUEUE_AGE, account::GATE_WAIT);
+        let gate = tins::gate_for(&tin, &read, account::now());
         match gate.statement {
             Some(statement) if !gate.can_queue => {
                 Err(format!("{} Nothing was queued.", statement.line))
@@ -456,8 +470,20 @@ impl Server {
         &mut self,
         app: &Arc<BirApp>,
         arguments: &Map<String, Value>,
+        caller: Option<&str>,
     ) -> Result<Value, String> {
         reject_unknown(arguments, &["ticket", "tin", "refresh"])?;
+        // every saved taxpayer, for the apps that list them
+        if !arguments.contains_key("ticket")
+            && !matches!(
+                caller,
+                Some(manifest::CARD_PEOPLE_ID | manifest::TAX_PROFILE_ID)
+            )
+        {
+            return Err(
+                "without a `ticket` this answers the apps that list every taxpayer only".into(),
+            );
+        }
         let ticket = text_arg(arguments, "ticket")?;
         let tin = text_arg(arguments, "tin")?;
         let refresh = match arguments.get("refresh") {
@@ -500,7 +526,21 @@ impl Server {
                             .into(),
                     );
                 }
-                vec![(tickets::digits(tin), true)]
+                // a branch that is saved: no ticket is made for another
+                let key = bir_app_core::TinKey::parse(tin).ok_or("`tin` is not a TIN")?;
+                let full = format!("{}{}", key.root(), key.branch());
+                let taxpayer = app
+                    .get_taxpayer(&root)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("the taxpayer of this ticket is no longer saved in eBIRForms")?;
+                if !taxpayer
+                    .branches
+                    .iter()
+                    .any(|b| tickets::digits(&b.tin) == full)
+                {
+                    return Err("no such branch is saved in eBIRForms".into());
+                }
+                vec![(full, true)]
             }
         };
         let read = if refresh {
@@ -654,7 +694,10 @@ impl Server {
             PENALTY_ESTIMATE => answers::penalty_estimate(arguments, today),
             QUEUE_LIST => {
                 // the account's TIN list is asked only if a row needs it
-                let read = || self.account.tins(crate::account::ASSISTANT_AGE);
+                let read = || {
+                    self.account
+                        .tins_within(crate::account::ASSISTANT_AGE, crate::account::GATE_WAIT)
+                };
                 let live = answers::Live::new(&read, crate::account::now());
                 answers::queue_list(app, arguments, today, self.account.signed_in(), &live)
             }

@@ -293,12 +293,20 @@ fn tin_digits(value: &Value) -> Option<String> {
     (!digits.is_empty()).then_some(digits)
 }
 
+/// The functions with `Access::Queue`, each of which `queue_tin` can name the
+/// TIN of: the Queue gate refuses a queue call it cannot, so a new one is
+/// not waved through (a test compares this with `FUNCTIONS`).
+pub(crate) const QUEUE_FUNCTIONS: [&str; 2] = ["queue_form_draft", "screen_form_queue"];
+
 /// The TIN of the return a Queue call puts in the sending queue, as the
 /// call wrote it (9, 12 or 14 digits): argument 0 of `queue_form_draft`, or
 /// the draft `screen_form_queue` is given, by its own identity. `None` for
 /// any other function, or a call that names no TIN (then `check_args` has
 /// refused it already). Compare it only through `TinKey`.
 pub(crate) fn queue_tin(function: &str, args: &[Value]) -> Option<String> {
+    if !QUEUE_FUNCTIONS.contains(&function) {
+        return None;
+    }
     match function {
         "queue_form_draft" => args.first().and_then(tin_digits),
         "screen_form_queue" => {
@@ -479,6 +487,32 @@ mod tests {
         assert_eq!(queue_tin("queue_form_draft", &[]), None);
         assert_eq!(queue_tin("queue_form_draft", &[json!(5)]), None);
         assert_eq!(queue_tin("screen_form_queue", &[json!("0619E")]), None);
+    }
+
+    #[test]
+    fn every_queue_function_is_one_the_gate_can_name_the_tin_of() {
+        let mut queue: Vec<&str> = FUNCTIONS
+            .iter()
+            .filter(|(_, _, access)| *access == Access::Queue)
+            .map(|(name, ..)| *name)
+            .collect();
+        queue.sort_unstable();
+        let mut known = QUEUE_FUNCTIONS.to_vec();
+        known.sort_unstable();
+        assert_eq!(
+            queue, known,
+            "a queue function the gate cannot read the TIN of"
+        );
+        let draft = json!({ "tin": "000123453" });
+        for function in QUEUE_FUNCTIONS {
+            let args = [json!("000123453"), draft.clone()];
+            let args = if function == "screen_form_queue" {
+                [json!("NO-SUCH"), args[1].clone()]
+            } else {
+                args
+            };
+            assert!(queue_tin(function, &args).is_some(), "{function}");
+        }
     }
 
     #[test]

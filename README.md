@@ -118,7 +118,7 @@ Scratch data is deleted on exit; `KEEP_TMP=1` retains it, including test keys, f
 
 The signed `ebirforms_status` check expects refusal: status is assistant-only in the shipped manifest.
 Status succeeds through the assistant surface; Forms and Deadlines each exercise a permitted signed read.
-All four `ebirforms_account_*` tools are hidden from and refused to the assistant.
+All six `ebirforms_account_*` tools (status, sign-in start and poll, sign-out, and the TIN state and link tools) are hidden from and refused to the assistant.
 
 ## Next
 

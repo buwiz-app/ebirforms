@@ -9,7 +9,7 @@
 //! text made from centavos (`"1234.50"`).
 
 use bir_app_core::bir_core::forms::taxform::{self, TaxPeriod};
-use bir_app_core::{BirApp, QueueGate, SendStage, TinRefusal, TinStatement};
+use bir_app_core::{BirApp, QueueGate, SendStage, TinRefusal, TinState, TinStatement};
 use bir_submit::TinsRead;
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
@@ -316,8 +316,16 @@ impl<'a> Live<'a> {
 /// Add a TIN statement's words to a card row: the chip, the one line and
 /// the step's button. Never the staff note, and never the stored reason: an
 /// assistant reads this, and only the fixed sentences may reach it.
+///
+/// A sent-back TIN reads as its plain sentence whatever the source: the fixed
+/// reasons and staff's note are for app screens only (`ebirforms_account_tins`).
 fn tin_words(statement: &TinStatement, out: &mut Value) {
-    crate::tins::assistant_fields(statement, out);
+    if statement.state == TinState::SentBack {
+        let plain = BirApp::tin_statement_for_refusal(TinRefusal::NeedsFix, None);
+        crate::tins::assistant_fields(&plain, out);
+    } else {
+        crate::tins::assistant_fields(statement, out);
+    }
 }
 
 /// The words of a stored TIN refusal (a refused draft, or a queued return
@@ -480,7 +488,7 @@ pub(crate) fn queue_list(
         } else {
             live.none()
         };
-        stage(sent_stage, &gate, None, &mut out);
+        stage(sent_stage, &gate, seconds_of(&row.updated_at), &mut out);
         if row.status == "Queued" {
             waiting.push(out);
         } else {
@@ -558,18 +566,30 @@ fn back_to_draft(
     Ok(rows)
 }
 
-/// The period of a listed return, as its form is filed.
+/// The period of a listed return, as its form is filed: by `queue_period`,
+/// as the waiting rows have it, so a period outside the form's range (month
+/// 0 or 13, quarter 5) falls back to the year and never panics.
 fn refused_period(row: &bir_app_core::ReturnRow) -> Option<TaxPeriod> {
-    let year = u16::try_from(row.taxable_year).ok()?;
-    let index = u8::try_from(row.period).ok()?;
+    let index = Some(row.period);
     Some(match taxform::cadence(&row.form_code)? {
-        taxform::Cadence::Monthly => TaxPeriod::Month { year, month: index },
-        taxform::Cadence::Quarterly => TaxPeriod::Quarter {
-            year,
-            quarter: index,
-        },
-        taxform::Cadence::Annual | taxform::Cadence::AsNeeded => TaxPeriod::Year(year),
+        taxform::Cadence::Monthly => queue_period(row.taxable_year, None, index)?,
+        taxform::Cadence::Quarterly => queue_period(row.taxable_year, index, None)?,
+        taxform::Cadence::Annual | taxform::Cadence::AsNeeded => {
+            queue_period(row.taxable_year, None, None)?
+        }
     })
+}
+
+/// A stored time (`updated_at`) in seconds since the epoch.
+fn seconds_of(text: &str) -> Option<i64> {
+    let text = text.trim();
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|at| at.timestamp())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+                .map(|at| at.and_utc().timestamp())
+        })
+        .ok()
 }
 
 #[cfg(test)]
@@ -1035,13 +1055,72 @@ mod tests {
                 "{text}"
             );
         }
-        // with the list's row, the line holds its fixed reasons only
+        // the assistant gets the plain sentence, from the list's row too: the
+        // fixed reasons are for app screens
         let mut row = json!({});
         stage(Some(&stored), &live, None, &mut row);
-        assert_eq!(
-            row["line"],
-            "Buwiz sent this TIN back for a fix: A photo is too blurry to read."
+        assert_eq!(row["line"], "Buwiz sent this TIN back for a fix.");
+    }
+
+    #[test]
+    fn a_poisoned_reason_in_the_list_never_reaches_a_row() {
+        let live = gate_of(account_row(
+            "needs_fix",
+            false,
+            json!({ "reasons": ["Name does not match MARIA CLARA."], "note": "x" }),
+        ));
+        assert!(
+            live.statement.as_ref().unwrap().line.contains("MARIA"),
+            "the screens' own line does carry the reasons"
         );
+        for stage_in in [
+            refused(TinRefusal::NeedsFix, "x"),
+            SendStage::Failed {
+                reason: "Not sent (nothing reached BIR): x (tin_needs_fix)".into(),
+                attempts: 1,
+                next_retry_at: None,
+            },
+        ] {
+            let mut row = json!({});
+            stage(Some(&stage_in), &live, None, &mut row);
+            assert!(!row.to_string().contains("MARIA"), "{row}");
+            assert_eq!(row["line"], "Buwiz sent this TIN back for a fix.");
+        }
+    }
+
+    #[test]
+    fn a_refused_row_with_a_bad_period_does_not_crash_and_reads_as_a_year() {
+        let row = |form: &str, period: i64| bir_app_core::ReturnRow {
+            id: 1,
+            tin: "000123453".into(),
+            taxpayer_name: String::new(),
+            branch_name: String::new(),
+            form_code: form.into(),
+            taxable_year: 2026,
+            period,
+            period_label: String::new(),
+            status: "Draft".into(),
+            updated_at: "2026-11-01 00:00:00".into(),
+            return_key: None,
+            extra: Map::new(),
+        };
+        for bad in [0, 13, -1, 300] {
+            let monthly = refused_period(&row("0619E", bad)).unwrap();
+            assert_eq!(monthly, TaxPeriod::Year(2026), "month {bad}");
+            assert!(!taxform::canonical_value("000123453", "0619E", monthly).is_empty());
+        }
+        assert_eq!(
+            refused_period(&row("2551Q", 5)),
+            Some(TaxPeriod::Year(2026))
+        );
+        assert_eq!(
+            refused_period(&row("0619E", 3)),
+            Some(TaxPeriod::Month {
+                year: 2026,
+                month: 3
+            })
+        );
+        assert_eq!(seconds_of("2026-11-01 00:00:00"), Some(1_793_491_200));
     }
 
     #[test]
