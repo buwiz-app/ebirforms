@@ -907,7 +907,7 @@ function Opened() {
 
 /** One TIN's state on the Buwiz account as BIR words it (`ebirforms_account_tins`): `chip`, `line`, `step.label`
  *  and `note` are shown as they come; chip is null when the TIN is active or its state is not known. */
-interface TinGate { ticket: string; chip: string | null; tone: string | null; line: string | null; step: { kind: string; label: string } | null; note?: string | null }
+interface TinGate { ticket: string; forTin?: string; can_queue?: boolean; chip: string | null; tone: string | null; line: string | null; step: { kind: string; label: string } | null; note?: string | null }
 const tinTone = (tone: string | null | undefined): "danger" | "warning" | "accent" => (tone === "danger" ? "danger" : tone === "warning" ? "warning" : "accent");
 
 /** A saved taxpayer as `ebirforms_taxpayers_list` answers it: the same rows
@@ -1399,27 +1399,50 @@ function Profile(p: { tin: string }) {
   const head = computed(() => tp()?.branches.find((b) => b.is_head_office) || null);
   const tin = computed(() => branch()?.tin || "");
 
-  /** This branch's TIN on the Buwiz account, worded by BIR (Check again reads it anew). A failed read shows nothing. */
+  /** This branch's TIN on the Buwiz account, worded by BIR (Check again reads it anew). A failed read shows nothing.
+   *  The row carries the TIN it was read for (`forTin`), and the header shows it only for the branch on screen. */
   const checks = signal(0);
+  const reading = signal(0);
+  let forced = 0;
   const gate = resource(
     () => !!tin() && { tin: tin(), again: checks() },
     async (q) => {
+      // a press forces one read, not every later branch's
+      const refresh = q.again > forced;
+      forced = q.again;
+      reading.set(reading() + 1);
       try {
-        const r: any = await buwiz.call!("ebirforms_account_tins", { ticket: TICKET, tin: q.tin, ...(q.again ? { refresh: true } : {}) });
-        return (r?.result?.rows?.[0] as TinGate | undefined) ?? null;
+        const r: any = await buwiz.call!("ebirforms_account_tins", { ticket: TICKET, tin: q.tin, ...(refresh ? { refresh: true } : {}) });
+        const row = r?.result?.rows?.[0] as TinGate | undefined;
+        return row ? { ...row, forTin: q.tin } : null;
       } catch {
         return null;
+      } finally {
+        reading.set(reading() - 1);
       }
     },
     { initialValue: null as TinGate | null },
   );
-  /** A step's page on account.buwiz.com (the Bot asks first). */
+  /** The state of the branch on screen: never another branch's. */
+  const shown = () => {
+    const g = gate();
+    return g && g.forTin === tin() ? g : null;
+  };
+  /** Staff's line, step and note belong to a state that cannot send; one the server lets send shows its chip only. */
+  const blocked = () => shown()?.can_queue === false;
+  /** A step's page on account.buwiz.com (the Bot asks first), one press at a time. */
+  let opening = false;
   const openStep = async (kind: string) => {
+    if (opening) return;
+    opening = true;
     try {
       const r: any = await buwiz.call!("ebirforms_account_tin_link", { ticket: TICKET, tin: tin(), step: kind });
       if (r?.result?.url) await buwiz.open!({ url: String(r.result.url) });
     } catch (e) {
-      say(errorText(e), false);
+      // declining the Bot's "open this link?" question is the person's answer, not an error
+      if (!/said no/i.test(errorText(e))) say(errorText(e), false);
+    } finally {
+      opening = false;
     }
   };
 
@@ -1858,18 +1881,20 @@ function Profile(p: { tin: string }) {
           />
           <Button label="New return" variant="primary" onPress={() => openForms("New return", tin(), root())} />
         </View>
-        <If when={Boolean(gate()?.chip)}>
+        <If when={Boolean(shown()?.chip)}>
           <View class="gap-1">
             <View class="flex-row flex-wrap items-center gap-2">
-              <Chip label={gate()?.chip || ""} tone={tinTone(gate()?.tone)} />
-              <Text class={`text-xs flex-1 ${C.fg}`} style={{ minWidth: 200 }}>{gate()?.line || ""}</Text>
-              <If when={Boolean(gate()?.step)}>
-                <Button label={gate()?.step?.label || ""} onPress={() => void openStep(gate()?.step?.kind || "")} />
+              <Chip label={shown()?.chip || ""} tone={tinTone(shown()?.tone)} />
+              <If when={blocked()}>
+                <Text class={`text-xs flex-1 ${C.fg}`} style={{ minWidth: 200 }}>{shown()?.line || ""}</Text>
               </If>
-              <Button label="Check again" onPress={() => checks.set(checks() + 1)} />
+              <If when={blocked() && Boolean(shown()?.step)}>
+                <Button label={shown()?.step?.label || ""} onPress={() => void openStep(shown()?.step?.kind || "")} />
+              </If>
+              <Button label="Check again" disabled={reading() > 0} onPress={() => checks.set(checks() + 1)} />
             </View>
-            <If when={Boolean(gate()?.note)}>
-              <Text class={`text-xs ${C.fg2}`}>{gate()?.note || ""}</Text>
+            <If when={blocked() && Boolean(shown()?.note)}>
+              <Text class={`text-xs ${C.fg2}`}>{shown()?.note || ""}</Text>
             </If>
           </View>
         </If>

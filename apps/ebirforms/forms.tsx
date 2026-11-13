@@ -192,7 +192,7 @@ interface FS extends Opts {
   picker: Picker | null; printResult: { sample: boolean; error: string } | null;
   sendState: SendRead; releaseArmed: boolean; releasing: boolean; storedPeriod: number | null;
   /** This TIN's state on the Buwiz account: undefined while it loads, null when it could not be read (nothing shown, nothing blocked). */
-  gate: Gate | null | undefined; gateBusy: boolean;
+  gate: Gate | null | undefined; gateBusy: boolean; gateReads: number; gateSeq: number;
 }
 
 // =====================================================================
@@ -547,7 +547,7 @@ function newState(opts: Opts): FS {
     removal: null, chosenFrom: {}, editSeq: 0, validateSeq: 0, chain: Promise.resolve(),
     picker: null, printResult: null,
     sendState: undefined, releaseArmed: false, releasing: false, storedPeriod: null,
-    gate: undefined, gateBusy: false,
+    gate: undefined, gateBusy: false, gateReads: 0, gateSeq: 0,
   };
 }
 
@@ -1620,25 +1620,37 @@ const gateBlocks = (s: FS) => !s.sample && !s.filedOriginalView && s.gate != nul
 /** Read this TIN's state on the Buwiz account (`refresh`: Check again). A failed read leaves it unknown. */
 function loadGate(s: FS, token: number, refresh = false) {
   if (s.sample || s.filedOriginalView || (s.status !== "Queued" && s.status !== "Draft")) return;
+  // reads may overlap: busy while any runs, and only the latest read's answer is kept
+  const seq = ++s.gateSeq;
+  s.gateReads++;
   s.gateBusy = true;
   bump();
   H.accountState(s.tin, refresh)
     .catch(() => null)
     .then((gate) => {
+      s.gateReads--;
+      s.gateBusy = s.gateReads > 0;
       if (!live(s, token)) return;
-      s.gate = gate;
-      s.gateBusy = false;
+      if (seq === s.gateSeq) s.gate = gate;
       bump();
     });
 }
 
-/** Open a step's page on account.buwiz.com (the Bot asks first); Verify and Fix open the TIN's own page. */
+/** Declining the Bot's "open this link?" question is the person's answer, not an error. */
+const declined = (e: unknown) => /said no/i.test(String((e as any)?.message || e));
+
+/** Open a step's page on account.buwiz.com (the Bot asks first); Verify and Fix open the TIN's own page. One at a time. */
+let stepOpening = false;
 async function openStep(s: FS, kind: string) {
+  if (stepOpening) return;
+  stepOpening = true;
   try {
     const url = await H.accountLink(s.tin, kind);
     if (url) await buwiz.open!({ url });
   } catch (e) {
-    toast(errText(e), "danger");
+    if (!declined(e)) toast(errText(e), "danger");
+  } finally {
+    stepOpening = false;
   }
 }
 
@@ -1651,8 +1663,9 @@ function tinNotice(s: FS) {
   if (g && g.state === "active") return null;
   const st = s.sendState && s.sendState !== "unreadable" ? s.sendState : null;
   const draftNote = st?.draft_note || null;
-  // a state the server lets send is information only: shown, and Queue stays on (gateBlocks reads can_queue)
-  if (g && g.line) return { chip: g.chip || "", tone: g.tone, line: g.line, note: g.note || null, draftNote, step: g.step };
+  if (g && g.can_queue === false && g.line) return { chip: g.chip || "", tone: g.tone, line: g.line, note: g.note || null, draftNote, step: g.step };
+  // a state the server lets send is information only: the chip alone (its line may speak of waiting), Queue stays on
+  if (g && g.chip) return { chip: g.chip, tone: g.tone, line: "", note: null, draftNote: null, step: null };
   if (st && st.line) return { chip: st.chip || "", tone: st.tone, line: st.line, note: null, draftNote, step: st.step_button || null };
   return null;
 }
@@ -2910,7 +2923,7 @@ function TinNotice(p: { s: FS }) {
       <View class={`flex-row flex-wrap items-center gap-2 px-4 py-2 border-b ${C.line} ${C.inset}`}>
         <Chip text={n()?.chip || ""} tone={chipTone(n()?.tone)} />
         <View class="flex-1 gap-0.5" style={{ minWidth: 220 }}>
-          <Text class={`text-xs ${C.fg}`}>{n()?.line || ""}</Text>
+          <If when={Boolean(n()?.line)}><Text class={`text-xs ${C.fg}`}>{n()?.line || ""}</Text></If>
           <If when={Boolean(n()?.draftNote)}><Text class={`text-xs ${C.fg2}`}>{n()?.draftNote || ""}</Text></If>
           <If when={Boolean(n()?.note)}><Text class={`text-xs ${C.fg2}`}>{n()?.note || ""}</Text></If>
         </View>

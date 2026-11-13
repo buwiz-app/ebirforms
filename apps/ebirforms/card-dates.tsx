@@ -500,7 +500,12 @@ function stageOf(r: any): [string, Tone, string] {
 const openStep = (r: any) =>
   act(async () => {
     const link = answerOf(await buwiz.call("ebirforms_account_tin_link", { ticket: r.key, step: r.step.kind }));
-    if (link?.url) await buwiz.open({ url: String(link.url) });
+    try {
+      if (link?.url) await buwiz.open({ url: String(link.url) });
+    } catch (e) {
+      // declining the Bot's "open this link?" question is the person's answer, not an error
+      if (!/said no/i.test(String((e as any)?.message || e))) throw e;
+    }
   });
 
 function Queue() {
