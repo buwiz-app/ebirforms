@@ -444,6 +444,10 @@ fn the_account_states_reach_the_apps_and_the_gate() {
             continue;
         }
         assert_eq!(row["chip"], chip);
+        assert!(
+            ["danger", "warning", "info"].contains(&row["tone"].as_str().unwrap()),
+            "{row}"
+        );
         assert_eq!(row["line"], line);
         assert!(
             row["next"]

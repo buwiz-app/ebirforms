@@ -1157,6 +1157,29 @@ fn the_bot_contract_over_a_scratch_database() {
             .all(|row| row["form"] != "0619E"),
         "a draft is not waiting: {list}"
     );
+    // the Forms app reads the same refusal from the send state of the draft, with
+    // the draft note and its step's button worded by BIR
+    let refused_state = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_queued_send_state",
+        json!({ "args_json": json!([tin, "0619E", 2026, 1]).to_string(), "ticket": ticket }),
+    );
+    let refused_state = result_of(&refused_state);
+    assert_eq!(refused_state["stage"], "Refused", "{refused_state}");
+    assert_eq!(refused_state["chip"], "Not verified");
+    assert_eq!(
+        refused_state["line"],
+        "This TIN is on your Buwiz account but not verified yet."
+    );
+    assert_eq!(refused_state["tone"], "warning");
+    assert_eq!(
+        refused_state["draft_note"],
+        "Back to a draft. Nothing was sent."
+    );
+    assert_eq!(
+        refused_state["step_button"],
+        json!({ "kind": "verify", "label": "Verify it" })
+    );
     let digits = regex::Regex::new(r"[0-9]{9}").unwrap();
     assert!(
         !digits.is_match(&list.to_string()),

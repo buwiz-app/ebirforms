@@ -653,6 +653,52 @@ mod tests {
         );
     }
 
+    /// The words of a TIN's state are written once, in eBIRForms' table, and
+    /// reach a screen as `chip`, `line`, `next` and the step's `label`: no app
+    /// source holds one of its sentences (its text would drift from the Rust
+    /// side and from the desktop app's).
+    #[test]
+    fn no_app_source_writes_a_tin_state_sentence() {
+        use bir_app_core::{BirApp, TinRefusal};
+        let mut sentences = vec![BirApp::DRAFT_NOTE.to_string()];
+        for code in TinRefusal::ALL {
+            let statement = BirApp::tin_statement_for_refusal(code, None);
+            sentences.push(statement.line);
+            sentences.push(statement.next);
+        }
+        // the list's one state no refusal names
+        sentences.push("This Buwiz account is not allowed to send this TIN.".into());
+        sentences.push("Sign in to Buwiz first".into());
+        for app in &APPS {
+            for sentence in &sentences {
+                assert!(
+                    !app.source.contains(sentence.as_str()),
+                    "{} writes a state sentence: {sentence}",
+                    app.id
+                );
+            }
+        }
+    }
+
+    /// The Sending queue card only reads: its only calls are its card's
+    /// reads and the link a step opens, never one that queues, cancels or
+    /// releases a return.
+    #[test]
+    fn card_dates_still_has_no_queue_or_cancel_calls() {
+        for banned in [
+            "queue_form_draft",
+            "screen_form_queue",
+            "cancel_queue",
+            "release_abandoned_claim",
+            "ebirforms_app_",
+        ] {
+            assert!(
+                !CARD_DATES_SOURCE.contains(banned),
+                "card-dates mentions {banned}"
+            );
+        }
+    }
+
     #[test]
     fn a_signed_file_that_is_not_this_build_is_stale() {
         let dir = tempfile::tempdir().unwrap();

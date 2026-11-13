@@ -619,6 +619,11 @@ impl Server {
             Some(root) => scope::filter_result(function, rule, &args, value, root)?,
             None => value,
         };
+        let value = if function == "queued_send_state" {
+            tins::with_button_and_note(value)
+        } else {
+            value
+        };
         if rule == Rule::Rows {
             return with_tickets(app, value);
         }

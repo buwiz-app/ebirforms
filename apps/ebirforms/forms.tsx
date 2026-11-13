@@ -119,10 +119,14 @@ const H = {
 // =====================================================================
 
 /** Where a queued return is on its way to the BIR (`queued_send_state`); `claim` names the current send attempt. */
-type SendState = { stage: string | null; reason: string | null; claim: string | null; releasable: boolean };
+type SendState = {
+  stage: string | null; reason: string | null; claim: string | null; releasable: boolean;
+  /** A return Buwiz refused for its TIN, in BIR's words: the chip, its tone, the line, the step's button and, once it is a draft again, the draft note. */
+  chip?: string | null; tone?: string | null; line?: string | null; step_button?: { kind: string; label: string } | null; draft_note?: string | null;
+};
 /** One TIN's state on the Buwiz account as BIR words it: `chip`, `line` and `step.label` are shown as they come
  *  (null when the TIN is active or its state is not known); `can_queue` is false only for a state that cannot send. */
-type Gate = { state: string; chip: string | null; line: string | null; next: string | null; step: { kind: string; label: string } | null; can_queue: boolean; note?: string | null };
+type Gate = { state: string; chip: string | null; tone: string | null; line: string | null; next: string | null; step: { kind: string; label: string } | null; can_queue: boolean; note?: string | null };
 /** A state read: undefined while it loads, "unreadable" when the call failed (then Cancel queue stays). */
 type SendRead = SendState | "unreadable" | undefined;
 const RELEASE_REASON = "abandoned_no_bir_filing";
@@ -187,6 +191,8 @@ interface FS extends Opts {
   editSeq: number; validateSeq: number; chain: Promise<unknown>;
   picker: Picker | null; printResult: { sample: boolean; error: string } | null;
   sendState: SendRead; releaseArmed: boolean; releasing: boolean; storedPeriod: number | null;
+  /** This TIN's state on the Buwiz account: undefined while it loads, null when it could not be read (nothing shown, nothing blocked). */
+  gate: Gate | null | undefined; gateBusy: boolean;
 }
 
 // =====================================================================
@@ -541,6 +547,7 @@ function newState(opts: Opts): FS {
     removal: null, chosenFrom: {}, editSeq: 0, validateSeq: 0, chain: Promise.resolve(),
     picker: null, printResult: null,
     sendState: undefined, releaseArmed: false, releasing: false, storedPeriod: null,
+    gate: undefined, gateBusy: false,
   };
 }
 
@@ -594,6 +601,7 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
       takeOpened(s, r);
       bump();
       loadSendState(s, token);
+      loadGate(s, token);
       then?.(null);
       recordNotesWhenShown(s, token);
       if (s.submitAsk && s.editable && !s.sample) validate(s);
@@ -1533,6 +1541,8 @@ async function queue(s: FS) {
     const now = cur();
     if (now) queue(now);
   });
+  // a state that cannot send is shown under the bar with its line; the host refuses it too
+  if (gateBlocks(s)) return toast(s.gate?.line || "", "danger");
   if (!(await ensureSaved(s))) return;
   try {
     if (usesPeriodPath(s)) await H.queuePeriod(s.tin, s.code, s.year, s.period || null);
@@ -1540,7 +1550,10 @@ async function queue(s: FS) {
     toast("Queued for background submission.", "success");
     reload(s);
   } catch (e) {
-    toast(errText(e), "danger");
+    // the host's own refusal (the line of the state, or sign-in first), without the tool's name
+    toast(errText(e).replace(/^ebirforms_app_\w+:\s*/, ""), "danger");
+    // a screen that was stale: read the account's state again
+    loadGate(s, T, true);
   }
 }
 
@@ -1588,7 +1601,8 @@ function readSendState(tin: string, code: string, year: number, slot: number | n
 
 /** Read a queued return's send state (the shown return only); a failed or slow read keeps Cancel queue. */
 function loadSendState(s: FS, token: number) {
-  if (s.sample || s.filedOriginalView || s.status !== "Queued") return;
+  // a draft is read too: Buwiz may have sent it back for its TIN
+  if (s.sample || s.filedOriginalView || (s.status !== "Queued" && s.status !== "Draft")) return;
   s.sendState = undefined;
   s.releaseArmed = false;
   bump();
@@ -1599,6 +1613,51 @@ function loadSendState(s: FS, token: number) {
     bump();
   });
 }
+
+/** Whether the account says this return's TIN cannot send, so Queue stays off. An unreadable or unknown state never does. */
+const gateBlocks = (s: FS) => !s.sample && !s.filedOriginalView && s.gate != null && s.gate.can_queue === false;
+
+/** Read this TIN's state on the Buwiz account (`refresh`: Check again). A failed read leaves it unknown. */
+function loadGate(s: FS, token: number, refresh = false) {
+  if (s.sample || s.filedOriginalView || (s.status !== "Queued" && s.status !== "Draft")) return;
+  s.gateBusy = true;
+  bump();
+  H.accountState(s.tin, refresh)
+    .catch(() => null)
+    .then((gate) => {
+      if (!live(s, token)) return;
+      s.gate = gate;
+      s.gateBusy = false;
+      bump();
+    });
+}
+
+/** Open a step's page on account.buwiz.com (the Bot asks first); Verify and Fix open the TIN's own page. */
+async function openStep(s: FS, kind: string) {
+  try {
+    const url = await H.accountLink(s.tin, kind);
+    if (url) await buwiz.open!({ url });
+  } catch (e) {
+    toast(errText(e), "danger");
+  }
+}
+
+/** What to show under the bar about this return's TIN, all in BIR's words: the live state when it cannot send,
+ *  else Buwiz's refusal stored on the return (a draft again, or a queued return that failed with a TIN code).
+ *  Nothing when the account says the TIN is active now, or when it is not known and nothing was refused. */
+function tinNotice(s: FS) {
+  if (s.sample || s.filedOriginalView) return null;
+  const g = s.gate;
+  if (g && g.state === "active") return null;
+  const st = s.sendState && s.sendState !== "unreadable" ? s.sendState : null;
+  const draftNote = st?.draft_note || null;
+  if (g && g.can_queue === false && g.line) return { chip: g.chip || "", tone: g.tone, line: g.line, note: g.note || null, draftNote, step: g.step };
+  if (st && st.line) return { chip: st.chip || "", tone: st.tone, line: st.line, note: null, draftNote, step: st.step_button || null };
+  return null;
+}
+
+/** A chip's tone as this app's chips know it. */
+const chipTone = (tone: string | null | undefined) => (tone === "danger" ? "danger" : tone === "warning" ? "warning" : "accent") as "danger" | "warning" | "accent";
 
 /** Release a stuck send to a draft, with the claim of the state that was shown. */
 async function releaseStuck(
@@ -2727,6 +2786,7 @@ function FormPage(p: { s: FS }) {
   return (
     <View style={{ flex: 1 }}>
       <FormBar s={s} />
+      <TinNotice s={s} />
       <If
         when={ready() && wide()}
         else={
@@ -2810,8 +2870,8 @@ function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () =>
         <If when={p.armed()}>
           <View class="gap-1 flex-1">
             <Text class={`text-xs ${C.fg2}`}>Release only if nothing reached the BIR. Check your email for a BIR confirmation first. The return goes back to a draft.</Text>
-            <If when={Boolean(readable()?.reason)}>
-              <Text class={`text-xs ${C.fg2}`}>{readable()?.reason || ""}</Text>
+            <If when={Boolean(readable()?.line || readable()?.reason)}>
+              <Text class={`text-xs ${C.fg2}`}>{readable()?.line || readable()?.reason || ""}</Text>
             </If>
           </View>
           <Btn
@@ -2835,6 +2895,28 @@ function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () =>
         <Text class={`text-xs ${C.fg2}`}>This send is not finished or cannot be released yet. Open the return again in a few minutes. If it stays this way, quit and reopen the app, then open the return again.</Text>
       </If>
     </>
+  );
+}
+
+/** Under the bar: what the Buwiz account says about this return's TIN when it cannot be queued (Queue is off) or
+ *  Buwiz sent the return back to a draft: BIR's chip and line, the step's button and Check again. Staff's note of a
+ *  sent-back TIN shows here only (an app screen). */
+function TinNotice(p: { s: FS }) {
+  const s = p.s;
+  const n = () => (rev(), tinNotice(s));
+  return (
+    <If when={Boolean(n())}>
+      <View class={`flex-row flex-wrap items-center gap-2 px-4 py-2 border-b ${C.line} ${C.inset}`}>
+        <Chip text={n()?.chip || ""} tone={chipTone(n()?.tone)} />
+        <View class="flex-1 gap-0.5" style={{ minWidth: 220 }}>
+          <Text class={`text-xs ${C.fg}`}>{n()?.line || ""}</Text>
+          <If when={Boolean(n()?.draftNote)}><Text class={`text-xs ${C.fg2}`}>{n()?.draftNote || ""}</Text></If>
+          <If when={Boolean(n()?.note)}><Text class={`text-xs ${C.fg2}`}>{n()?.note || ""}</Text></If>
+        </View>
+        <If when={Boolean(n()?.step)}><Btn label={n()?.step?.label || ""} onPress={() => openStep(s, n()?.step?.kind || "")} /></If>
+        <Btn label="Check again" variant="ghost" disabled={(rev(), s.gateBusy)} onPress={() => loadGate(s, T, true)} />
+      </View>
+    </If>
   );
 }
 
@@ -2878,7 +2960,7 @@ function FormBar(p: { s: FS }) {
       </If>
       <If when={(rev(), !s.filedOriginalView && !s.sample && s.status !== "Queued" && s.editable)}>
         <Btn label={(rev(), s.checking ? "Checking…" : "Check")} onPress={() => check(s)} disabled={busy()} />
-        <Btn label="Queue" onPress={() => queue(s)} disabled={busy()} />
+        <Btn label="Queue" onPress={() => queue(s)} disabled={(rev(), busy() || gateBlocks(s))} />
         <Btn label="Save draft" variant="primary" onPress={() => save(s)} disabled={busy()} />
       </If>
     </View>

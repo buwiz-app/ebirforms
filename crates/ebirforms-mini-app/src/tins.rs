@@ -9,7 +9,9 @@
 //! here by nobody: a TSX app shows `chip`, `line` and the step's `label` as
 //! they come.
 
-use bir_app_core::{BirApp, QueueGate, TinKey, TinState, TinStatement, TinStep};
+use bir_app_core::{
+    BirApp, QueueGate, TinKey, TinRefusal, TinState, TinStatement, TinStep, TinTone,
+};
 use bir_submit::{TinsError, TinsRead};
 use serde_json::{Map, Value, json};
 
@@ -24,13 +26,49 @@ fn step_json(step: Option<TinStep>) -> Value {
     )
 }
 
-/// What the assistant may read of a state: its name, chip, line and step.
-/// No `next`, no staff note, no stored server text.
+/// A chip's tone: danger, warning or info.
+fn tone_name(tone: TinTone) -> &'static str {
+    match tone {
+        TinTone::Danger => "danger",
+        TinTone::Warning => "warning",
+        TinTone::Info => "info",
+    }
+}
+
+/// What the assistant may read of a state: its name, chip, tone, line and
+/// step. No `next`, no staff note, no stored server text.
 pub(crate) fn assistant_fields(statement: &TinStatement, out: &mut Value) {
     out["state"] = json!(statement.state.name());
     out["chip"] = json!(statement.chip);
+    out["tone"] = json!(tone_name(statement.tone));
     out["line"] = json!(statement.line);
     out["step"] = step_json(statement.step);
+}
+
+/// A return's send state (`queued_send_state`) for the Forms app: when it
+/// carries a TIN refusal's `step` (a kind), its `step_button` (`{kind, label}`
+/// as the account tools give it), and, for a return that is a draft again, the
+/// `draft_note` BIR words. The rest of the answer is BIR's own.
+pub(crate) fn with_button_and_note(mut state: Value) -> Value {
+    let step = match state["step"].as_str() {
+        Some("add") => Some(TinStep::Add),
+        Some("verify") => Some(TinStep::Verify),
+        Some("fix") => Some(TinStep::Fix),
+        _ => None,
+    };
+    if let Some(step) = step {
+        state["step_button"] = step_json(Some(step));
+    }
+    if state["stage"] == "Refused" {
+        state["draft_note"] = json!(BirApp::DRAFT_NOTE);
+    }
+    // the chip's tone, from the stored reason's code
+    if let Some(code) = state["reason"].as_str().and_then(TinRefusal::from_reason) {
+        state["tone"] = json!(tone_name(
+            BirApp::tin_statement_for_refusal(code, None).tone
+        ));
+    }
+    state
 }
 
 /// Why a read has no state to show, as the answer's `read`.
@@ -62,6 +100,7 @@ pub(crate) fn row(
         "can_queue": gate.can_queue,
         "state": gate_state(&gate),
         "chip": null,
+        "tone": null,
         "line": null,
         "next": null,
         "step": null,
