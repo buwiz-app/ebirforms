@@ -90,6 +90,18 @@ const H = {
     if (!addressable(quarter)) throw new Error("Open the return to cancel its queue.");
     return bir<null>("cancel_queued", tin, code, year, quarter);
   },
+  /** This TIN's state on the Buwiz account, worded by BIR (`ebirforms_account_tins`); null when the read failed.
+   *  `refresh` is "Check again". */
+  accountState: async (tin: string, refresh = false): Promise<Gate | null> => {
+    const r: any = await buwiz.call("ebirforms_account_tins", { ticket: BRANCH, tin, ...(refresh ? { refresh: true } : {}) });
+    const row = r?.result?.rows?.[0];
+    return row && typeof row === "object" ? (row as Gate) : null;
+  },
+  /** Where a step's button opens on account.buwiz.com (`ebirforms_account_tin_link`). */
+  accountLink: async (tin: string, step: string): Promise<string> => {
+    const r: any = await buwiz.call("ebirforms_account_tin_link", { ticket: BRANCH, tin, step });
+    return String(r?.result?.url || "");
+  },
   /** A shape that is not an object is "unreadable"; so is a slot the host cannot address. */
   sendState: async (tin: string, code: string, year: number, slot: number | null): Promise<SendState | "unreadable"> => {
     if (!addressable(slot)) return "unreadable";
@@ -108,6 +120,9 @@ const H = {
 
 /** Where a queued return is on its way to the BIR (`queued_send_state`); `claim` names the current send attempt. */
 type SendState = { stage: string | null; reason: string | null; claim: string | null; releasable: boolean };
+/** One TIN's state on the Buwiz account as BIR words it: `chip`, `line` and `step.label` are shown as they come
+ *  (null when the TIN is active or its state is not known); `can_queue` is false only for a state that cannot send. */
+type Gate = { state: string; chip: string | null; line: string | null; next: string | null; step: { kind: string; label: string } | null; can_queue: boolean; note?: string | null };
 /** A state read: undefined while it loads, "unreadable" when the call failed (then Cancel queue stays). */
 type SendRead = SendState | "unreadable" | undefined;
 const RELEASE_REASON = "abandoned_no_bir_filing";

@@ -25,8 +25,9 @@ use crate::cards;
 use crate::jcs;
 use crate::scope;
 use crate::server::{
-    ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS, CALENDAR_GET,
-    PRINT_PREVIEW, RESOLVE, TAXPAYERS_LIST, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
+    ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS,
+    ACCOUNT_TIN_LINK, ACCOUNT_TINS, CALENDAR_GET, PRINT_PREVIEW, RESOLVE, TAXPAYERS_LIST,
+    TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
 /// The protocol this plugin speaks: the SDK's (1.0.0).
@@ -56,7 +57,8 @@ pub(crate) const CALENDAR_SOURCE: &str = include_str!("../../../apps/ebirforms/c
 /// Buwiz sign-in (account.buwiz.com's device flow).
 pub(crate) const REGISTER_ID: &str = "register";
 pub(crate) const REGISTER_SOURCE: &str = include_str!("../../../apps/ebirforms/register.tsx");
-/// The only page the Sign-in app opens.
+/// The only page the Sign-in app opens, and where a TIN's step buttons
+/// (Add it, Verify it, Fix it) open: one origin, the Bot asks on every press.
 const ACCOUNT_SITE: &str = "https://account.buwiz.com";
 /// The next returns due, as a card in the chat.
 pub(crate) const DEADLINES_ID: &str = "deadlines";
@@ -175,10 +177,19 @@ fn host_tools(functions: &[&str]) -> Vec<String> {
 /// and one `ebirforms_app_<function>` per function.
 pub(crate) fn forms_tools() -> Vec<String> {
     // TAXPAYERS_LIST: the picker of an open with no taxpayer (or one gone)
-    let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, TAXPAYERS_LIST]
-        .iter()
-        .map(|tool| tool.to_string())
-        .collect();
+    // ACCOUNT_TINS, ACCOUNT_TIN_LINK: the TIN's state on the Buwiz account
+    // under Queue, and where its step opens
+    let mut tools: Vec<String> = [
+        TICKET_SUBJECT,
+        TICKET_ISSUE,
+        PRINT_PREVIEW,
+        TAXPAYERS_LIST,
+        ACCOUNT_TINS,
+        ACCOUNT_TIN_LINK,
+    ]
+    .iter()
+    .map(|tool| tool.to_string())
+    .collect();
     tools.extend(host_tools(scope::FORMS));
     tools
 }
@@ -222,8 +233,8 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
             None,
             json!({
                 "tools": forms_tools(),
-                // the Tax profile button
-                "open": { "apps": [TAX_PROFILE_ID] },
+                // the Tax profile button, and a TIN's step on account.buwiz.com
+                "open": { "apps": [TAX_PROFILE_ID], "external": [ACCOUNT_SITE] },
                 // Ask the assistant: the taxpayer, or this return
                 "attach": ["taxprofile", "taxform"],
                 // the print preview in the Bot's document view

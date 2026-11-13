@@ -28,6 +28,11 @@ pub const ACCOUNT_URL_ENV: &str = "EBIRFORMS_ACCOUNT_URL";
 pub(crate) const CLIENT_ID: &str = "buwiz-ebirforms";
 /// Seconds between polls when the server named none.
 const INTERVAL: i64 = 5;
+/// How old the account's TIN list may be for a screen to show it, in seconds.
+pub(crate) const SCREEN_AGE: i64 = 60;
+/// How old it may be to refuse a Queue press on it: a person who just fixed
+/// a TIN on the site is not held to a minute-old list.
+pub(crate) const QUEUE_AGE: i64 = 15;
 /// How old it may be for an assistant's answer (the Sending queue card).
 pub(crate) const ASSISTANT_AGE: i64 = 300;
 
@@ -118,6 +123,12 @@ impl Account {
     /// at most). Signed out: no request. Never a TIN in a log line.
     pub(crate) fn tins(&self, max_age: i64) -> TinsRead {
         self.runtime.block_on(self.submission.account_tins(max_age))
+    }
+
+    /// "Check again": a new read, unless one ended in the last 15 seconds.
+    pub(crate) fn refresh_tins(&self) -> TinsRead {
+        self.runtime
+            .block_on(self.submission.refresh_account_tins())
     }
 
     /// `ebirforms_account_status`: who is signed in, or the code waiting.
