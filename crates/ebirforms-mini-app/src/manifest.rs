@@ -36,7 +36,7 @@ pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
 /// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0
 /// release; 0.4.0 adds the TIN state tools and the account link).
-pub(crate) const VERSION: &str = "0.3.3";
+pub(crate) const VERSION: &str = "0.4.0";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -702,6 +702,98 @@ mod tests {
             assert!(
                 !CARD_DATES_SOURCE.contains(banned),
                 "card-dates mentions {banned}"
+            );
+        }
+    }
+
+    /// What 0.4.0 asks of the person that 0.3.3 did not, app by app: the
+    /// install review lists exactly these lines. Each app's permissions
+    /// without them hash to what 0.3.3 shipped (built from its source
+    /// at ee36f87), so nothing else was added, removed or changed.
+    #[test]
+    fn added_permissions_since_0_3_3_are_exactly_these() {
+        const EXTERNAL: &str = "https://account.buwiz.com";
+        // (app, tools added, origin added to open.external)
+        let added: [(&str, &[&str], bool); 4] = [
+            (
+                "forms",
+                &["ebirforms_account_tins", "ebirforms_account_tin_link"],
+                true,
+            ),
+            (
+                "tax-profile",
+                &["ebirforms_account_tins", "ebirforms_account_tin_link"],
+                true,
+            ),
+            ("card-dates", &["ebirforms_account_tin_link"], true),
+            ("card-people", &["ebirforms_account_tins"], false),
+        ];
+        // sha256(JCS(permissions)) of every app in the 0.3.3 manifest
+        let shipped = [
+            (
+                "forms",
+                "5fc93f64a160939b886a6b5b541d790c9efeff3ddd64de3a43112b56ed94d860",
+            ),
+            (
+                "tax-profile",
+                "7f79e34cd776c89da515d8a3a3bd5a07e89275e373e00b8b2f399396f3ba0240",
+            ),
+            (
+                "calendar",
+                "9ae1859f22cf21d9810b346652f03b6f0ca0c02d163d9ca1c811851c554918d1",
+            ),
+            (
+                "deadlines",
+                "417f697ea1a4f4edbbb713e378403b7aef419d7fa9916f15ce72097c0f58be0d",
+            ),
+            (
+                "register",
+                "d7022d238fac0115ada05c8c51949d7fc63ac1b9ec7f5ad0d09a679918cd0d47",
+            ),
+            (
+                "card-dates",
+                "951acce95864b2f3270cb5ce1a502b8195eb5ede979ca04a763f9eaaca7b844b",
+            ),
+            (
+                "card-calc",
+                "5831b952078e4602ea424e56035219192f772158a6e854d8a4aefe8014bbbf3f",
+            ),
+            (
+                "card-people",
+                "6b7d8e12b3f4a2c5c7387c66b59f2ad7bd906d8d0f0dd65ab31e2e929c3966c6",
+            ),
+        ];
+        let m = unsigned();
+        let apps = m["apps"].as_array().unwrap();
+        assert_eq!(apps.len(), shipped.len());
+        for (id, digest) in shipped {
+            let mut entry = apps
+                .iter()
+                .find(|app| app["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is shipped"))
+                .clone();
+            let (tools, external) = added
+                .iter()
+                .find(|(app, ..)| *app == id)
+                .map_or((&[][..], false), |(_, tools, external)| (*tools, *external));
+            let permissions = entry["permissions"].as_object_mut().unwrap();
+            let held = permissions["tools"].as_array_mut().unwrap();
+            for tool in tools {
+                let at = held
+                    .iter()
+                    .position(|held| held == tool)
+                    .unwrap_or_else(|| panic!("{id} lacks {tool}"));
+                held.remove(at);
+            }
+            if external {
+                let open = permissions["open"].as_object_mut().unwrap();
+                assert_eq!(open["external"], json!([EXTERNAL]), "{id}");
+                open.remove("external");
+            }
+            assert_eq!(
+                permissions_digest(&entry).unwrap(),
+                digest,
+                "{id}: its permissions are not 0.3.3's plus the added lines"
             );
         }
     }
