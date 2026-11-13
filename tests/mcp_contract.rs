@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bir_app_core::{BirApp, BranchFacts, NewTaxpayer};
+use bir_app_core::{BirApp, BranchFacts, NewTaxpayer, OpenReturn, SendStage};
 use ebirforms_mini_app::{ManifestSource, Server};
 use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::{Value, json};
@@ -214,6 +214,26 @@ fn the_bot_contract_over_a_scratch_database() {
         tool("ebirforms_form_dismiss")["inputSchema"]["properties"],
         json!({})
     );
+    // a stuck send's state is read-only; releasing it changes a return. The
+    // Forms app is granted both, no other app is
+    assert_eq!(
+        tool("ebirforms_app_queued_send_state")["annotations"]["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        tool("ebirforms_app_release_abandoned_claim")["annotations"]["readOnlyHint"],
+        false
+    );
+    for name in [
+        "ebirforms_app_queued_send_state",
+        "ebirforms_app_release_abandoned_claim",
+    ] {
+        assert_eq!(
+            tool(name)["_meta"]["buwiz/audience"],
+            json!(["app"]),
+            "{name}"
+        );
+    }
     let resources = bot.send("resources/list", json!({}))["result"]["resources"].clone();
     let uris: Vec<&str> = resources
         .as_array()
@@ -244,6 +264,23 @@ fn the_bot_contract_over_a_scratch_database() {
         )
         .unwrap();
     assert_eq!(manifest["id"], "app.buwiz.ebirforms");
+    for entry in manifest["apps"].as_array().unwrap() {
+        let granted: Vec<&str> = entry["permissions"]["tools"]
+            .as_array()
+            .map(|tools| tools.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        for name in [
+            "ebirforms_app_queued_send_state",
+            "ebirforms_app_release_abandoned_claim",
+        ] {
+            assert_eq!(
+                granted.contains(&name),
+                entry["id"] == "forms",
+                "{name} for {}",
+                entry["id"]
+            );
+        }
+    }
     let forms =
         bot.send("resources/read", json!({ "uri": "buwiz-app://forms" }))["result"]["contents"][0]
             .clone();
@@ -776,6 +813,89 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert!(drafts.iter().all(|row| row["tin"] == ticket));
 
+    // releasing a stuck send changes a return: only the person's own press
+    // reaches it, never the AI's press, a resolve or a routine call
+    let release_args = json!({ "args_json": json!([tin, "2551Q", 2026, 3, "abandoned_no_bir_filing", null]).to_string(), "ticket": ticket });
+    let refused = bot.call_as(
+        json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } }),
+        "ebirforms_app_release_abandoned_claim",
+        release_args.clone(),
+    );
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("the person's own click"),
+        "{refused}"
+    );
+    // Which assertion proves the Write class: the AI-press refusal above, with
+    // the person's own call succeeding below (`released: false`, the draft
+    // answer). The origin refusals here hold for every app-only tool.
+    for origin in ["resolve", "routine"] {
+        let refused = bot.call_as(
+            json!({ "origin": origin }),
+            "ebirforms_app_release_abandoned_claim",
+            release_args.clone(),
+        );
+        assert_eq!(refused["isError"], true, "{origin}: {refused}");
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{origin}: {refused}"
+        );
+    }
+    // the assistant (agent origin) is refused both tools
+    for name in [
+        "ebirforms_app_release_abandoned_claim",
+        "ebirforms_app_queued_send_state",
+    ] {
+        let refused = bot.agent(name, release_args.clone());
+        assert_eq!(refused["isError"], true, "{name}: {refused}");
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {refused}"
+        );
+    }
+    // a ticket for another taxpayer reaches neither tool
+    for (name, args) in [
+        (
+            "ebirforms_app_release_abandoned_claim",
+            json!([other_tin, "2551Q", 2026, 3, "abandoned_no_bir_filing", null]),
+        ),
+        (
+            "ebirforms_app_queued_send_state",
+            json!([other_tin, "2551Q", 2026, 3]),
+        ),
+    ] {
+        let refused = bot.call_as(
+            forms_app.clone(),
+            name,
+            json!({ "args_json": args.to_string(), "ticket": ticket }),
+        );
+        assert!(
+            error_text(&refused).contains("outside this app's scope"),
+            "{name}: {refused}"
+        );
+    }
+    // a plain saved draft has nothing to release and no send state
+    let released = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_release_abandoned_claim",
+        release_args,
+    );
+    assert_eq!(
+        result_of(&released),
+        &json!({ "released": false, "status": "Draft" }),
+        "{released}"
+    );
+    let state = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_queued_send_state",
+        json!({ "args_json": json!([tin, "2551Q", 2026, 3]).to_string(), "ticket": ticket }),
+    );
+    assert_eq!(
+        result_of(&state),
+        &json!({ "stage": null, "reason": null, "claim": null, "releasable": false }),
+        "{state}"
+    );
+
     // signed out of Buwiz: nothing is queued or sent
     let queued = bot.call_as(
         forms_app.clone(),
@@ -840,6 +960,157 @@ fn the_bot_contract_over_a_scratch_database() {
         (Some("card-dates"), Some("penalty"))
     );
     assert!(card.get("ticket").is_none());
+
+    // a queued return the worker left claimed a moment ago (the facade's demo
+    // send-stage hook): its state shows the claim, and no release goes through
+    let opened = app
+        .open_return(&OpenReturn {
+            tin: tin.clone(),
+            form_code: "0619E".into(),
+            year: 2026,
+            period: 1,
+            key: None,
+        })
+        .expect("open 0619E");
+    let checked = app.validate("0619E", &opened.draft).expect("validate");
+    assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+    let stored = app.save("0619E", &checked.draft).expect("save");
+    let id = app
+        .queue_return("0619E", &stored.draft.unwrap_or(checked.draft))
+        .expect("queue");
+    app.demo_set_send_stage(
+        id,
+        &SendStage::NeedsAttention {
+            reason: "Needs attention: dropped".into(),
+        },
+    )
+    .expect("a claimed needs-attention state");
+    let at = json!([tin, "0619E", 2026, 1]);
+    let state = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_queued_send_state",
+        json!({ "args_json": at.to_string(), "ticket": ticket }),
+    );
+    let state = result_of(&state).clone();
+    assert_eq!(state["stage"], "NeedsAttention", "{state}");
+    assert_eq!(state["reason"], "Needs attention: dropped", "{state}");
+    assert!(state["claim"].as_str().is_some(), "{state}");
+    assert_eq!(state["releasable"], false, "{state}");
+    let release = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_release_abandoned_claim",
+        json!({ "args_json": json!([tin, "0619E", 2026, 1, "abandoned_no_bir_filing", state["claim"]]).to_string(), "ticket": ticket }),
+    );
+    assert!(error_text(&release).contains("moments ago"), "{release}");
+    let rows = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_list_returns",
+        json!({ "args_json": json!(["all"]).to_string(), "ticket": ticket }),
+    );
+    let row = result_of(&rows)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["form_code"] == "0619E")
+        .cloned()
+        .expect("the queued 0619E is listed");
+    assert_eq!(row["status"], "Queued", "{row}");
+
+    // two entries of one as-needed form (1800, entry-numbered): the list gives
+    // each its key (`return_key` 1 and 2, `period` 0 for both), and a slot
+    // addresses exactly that entry. Entry 2 is claimed (demo needs-attention):
+    // its key shows the claim, entry 1's shows none, and a release aimed at
+    // entry 1 with entry 2's claim is refused and changes neither
+    let opened = app
+        .open_return(&OpenReturn {
+            tin: tin.clone(),
+            form_code: "1800".into(),
+            year: 2026,
+            period: 1,
+            key: None,
+        })
+        .expect("open 1800");
+    for entry in [1i64, 2] {
+        let mut draft = opened.draft.clone();
+        draft.0["open_ended_key"] = json!(entry);
+        draft.0["donation_month"] = json!(3);
+        draft.0["donation_day"] = json!(15);
+        draft.0["donation_year"] = json!(2026);
+        draft.0["donees"] = json!([{ "name": "Synthetic Donee", "tin": "000000000000" }]);
+        let checked = app.validate("1800", &draft).expect("validate");
+        assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+        app.save("1800", &draft).expect("save entry");
+    }
+    let mut entry_ids = vec![];
+    for entry in [1i64, 2] {
+        let again = app
+            .open_return(&OpenReturn {
+                tin: tin.clone(),
+                form_code: "1800".into(),
+                year: 2026,
+                period: entry,
+                key: Some(entry),
+            })
+            .expect("reopen entry");
+        assert_eq!(again.stored_period, Some(entry));
+        entry_ids.push(app.queue_return("1800", &again.draft).expect("queue entry"));
+    }
+    app.demo_set_send_stage(
+        entry_ids[1],
+        &SendStage::NeedsAttention {
+            reason: "Needs attention: dropped".into(),
+        },
+    )
+    .expect("entry 2 claimed");
+    let rows = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_list_returns",
+        json!({ "args_json": json!(["all"]).to_string(), "ticket": ticket }),
+    );
+    let mut keys: Vec<(i64, i64)> = result_of(&rows)
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["form_code"] == "1800")
+        .map(|row| {
+            (
+                row["period"].as_i64().unwrap(),
+                row["return_key"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [(0, 1), (0, 2)],
+        "the list's period cannot tell the entries apart"
+    );
+    let state_at = |bot: &mut Bot, slot: i64| {
+        let state = bot.call_as(
+            forms_app.clone(),
+            "ebirforms_app_queued_send_state",
+            json!({ "args_json": json!([tin, "1800", 2026, slot]).to_string(), "ticket": ticket }),
+        );
+        result_of(&state).clone()
+    };
+    let second = state_at(&mut bot, 2);
+    assert_eq!(second["stage"], "NeedsAttention", "{second}");
+    let claim = second["claim"].clone();
+    assert!(claim.as_str().is_some(), "{second}");
+    let first = state_at(&mut bot, 1);
+    assert_eq!(first["claim"], Value::Null, "{first}");
+    assert_eq!(first["stage"], "Queued", "{first}");
+    let misaimed = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_release_abandoned_claim",
+        json!({ "args_json": json!([tin, "1800", 2026, 1, "abandoned_no_bir_filing", claim]).to_string(), "ticket": ticket }),
+    );
+    assert!(
+        error_text(&misaimed).contains("changed since you looked"),
+        "{misaimed}"
+    );
+    assert_eq!(state_at(&mut bot, 2), second, "entry 2 is unchanged");
+    assert_eq!(state_at(&mut bot, 1), first, "entry 1 is unchanged");
 
     // the account tools are -32601 (protocol 1.0, 10.1): eBIRForms declares
     // no accounts, a pushed token is never echoed, and a push is never taken

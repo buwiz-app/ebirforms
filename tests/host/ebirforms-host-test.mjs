@@ -163,6 +163,8 @@ async function main() {
     const cardSource = await post("/v1/host/apps/source", { plugin: PLUGIN, app: "deadlines" });
     check("Deadlines source is served with its signed fingerprint", cardSource.status === 200 && cardSource.json.ok === true
       && cardSource.json.source?.length > 0 && cardSource.json.fingerprint === signed.apps.find((a) => a.id === "deadlines").fingerprint);
+    const formsTools = signed.apps.find((a) => a.id === "forms").permissions.tools;
+    check("Forms is granted the stuck-send state and release tools", ["ebirforms_app_queued_send_state", "ebirforms_app_release_abandoned_claim"].every((t) => formsTools.includes(t)));
     const env1 = envelope(forms, "ebirforms_app_screen_forms_index", { args: [] });
     const call = await post("/v1/host/call", env1);
     check("signed Forms read returns the form catalogue", call.status === 200 && call.json.ok === true

@@ -112,6 +112,10 @@ pub(crate) static FUNCTIONS: &[(&str, Rule, Access)] = &[
     ),
     ("queue_form_draft", Rule::Tin(0), Access::Queue),
     ("cancel_queued", Rule::Tin(0), Access::Write),
+    ("queued_send_state", Rule::Tin(0), Access::Read),
+    // puts a stuck return back to Draft (never back in the queue); a write, so
+    // only a person's own press reaches it
+    ("release_abandoned_claim", Rule::Tin(0), Access::Write),
     // Tax Profile: reference lists, then the taxpayer, its branches, tax
     // years, forms and templates
     ("tax_year_bounds", Rule::Free, Access::Read),
@@ -166,6 +170,8 @@ pub(crate) static FORMS: &[&str] = &[
     "screen_form_cancel_queue",
     "queue_form_draft",
     "cancel_queued",
+    "queued_send_state",
+    "release_abandoned_claim",
 ];
 
 /// The functions the Tax Profile app calls (`apps/ebirforms/tax-profile.tsx`).

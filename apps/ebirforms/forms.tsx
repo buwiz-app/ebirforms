@@ -85,12 +85,38 @@ const H = {
   queue: (code: string, draft: any) => bir<number>("screen_form_queue", code, draft),
   cancelQueue: (code: string, draft: any) => bir<null>("screen_form_cancel_queue", code, draft),
   queuePeriod: (tin: string, code: string, year: number, quarter: number | null) => bir<number>("queue_form_draft", tin, code, year, quarter),
-  cancelQueued: (tin: string, code: string, year: number, quarter: number | null) => bir<null>("cancel_queued", tin, code, year, quarter),
+  // every call that takes a slot goes through `addressable`: a slot the host cannot address would act on another return
+  cancelQueued: async (tin: string, code: string, year: number, quarter: number | null) => {
+    if (!addressable(quarter)) throw new Error("Open the return to cancel its queue.");
+    return bir<null>("cancel_queued", tin, code, year, quarter);
+  },
+  /** A shape that is not an object is "unreadable"; so is a slot the host cannot address. */
+  sendState: async (tin: string, code: string, year: number, slot: number | null): Promise<SendState | "unreadable"> => {
+    if (!addressable(slot)) return "unreadable";
+    const r: unknown = await bir<unknown>("queued_send_state", tin, code, year, slot);
+    return r && typeof r === "object" && !Array.isArray(r) ? (r as SendState) : "unreadable";
+  },
+  releaseClaim: async (tin: string, code: string, year: number, slot: number | null, claim: string | null) => {
+    if (!addressable(slot)) throw new Error("This return cannot be released from here. Open the return.");
+    return bir<{ released: boolean; status: string | null }>("release_abandoned_claim", tin, code, year, slot, RELEASE_REASON, claim);
+  },
 };
 
 // =====================================================================
 // Types
 // =====================================================================
+
+/** Where a queued return is on its way to the BIR (`queued_send_state`); `claim` names the current send attempt. */
+type SendState = { stage: string | null; reason: string | null; claim: string | null; releasable: boolean };
+/** A state read: undefined while it loads, "unreadable" when the call failed (then Cancel queue stays). */
+type SendRead = SendState | "unreadable" | undefined;
+const RELEASE_REASON = "abandoned_no_bir_filing";
+/** The host narrows a return's slot to a byte, so a stored key above this (a late transaction date, MMDD) cannot be addressed. */
+const MAX_SLOT = 255;
+/** Whether the host can address a stored return by this slot (null: the period-less default). */
+const addressable = (slot: number | null) => slot == null || (Number.isInteger(slot) && slot >= 0 && slot <= MAX_SLOT);
+/** How long a send-state read may take before the return is treated as unreadable (Cancel queue shows). */
+const SEND_READ_MS = 4000;
 
 type Field = { k: string; l: string; t: string; c?: any; r?: any; m?: number; w?: boolean; o?: any[]; pool?: { keys: string[] }; grp?: string; rg?: number };
 type Col = { l: string; t: string; c?: any; w?: boolean; o?: any[] };
@@ -145,6 +171,7 @@ interface FS extends Opts {
   removal: { r: any; edits: Edits; typed: Edits; draft: any } | null; chosenFrom: Edits;
   editSeq: number; validateSeq: number; chain: Promise<unknown>;
   picker: Picker | null; printResult: { sample: boolean; error: string } | null;
+  sendState: SendRead; releaseArmed: boolean; releasing: boolean; storedPeriod: number | null;
 }
 
 // =====================================================================
@@ -498,6 +525,7 @@ function newState(opts: Opts): FS {
     submittedAt: null, confirmedAt: null, amends: null, filedOriginal: null, filedOriginalView: null,
     removal: null, chosenFrom: {}, editSeq: 0, validateSeq: 0, chain: Promise.resolve(),
     picker: null, printResult: null,
+    sendState: undefined, releaseArmed: false, releasing: false, storedPeriod: null,
   };
 }
 
@@ -550,6 +578,7 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
       s.loading = false;
       takeOpened(s, r);
       bump();
+      loadSendState(s, token);
       then?.(null);
       recordNotesWhenShown(s, token);
       if (s.submitAsk && s.editable && !s.sample) validate(s);
@@ -564,6 +593,7 @@ function openForm(opts: Opts, then: ((error: string | null) => void) | null = nu
 }
 
 function takeOpened(s: FS, r: any) {
+  s.storedPeriod = r.stored_period ?? null;
   s.draft = r.draft;
   s.status = r.status;
   s.editable = r.editable && !s.viewOnly;
@@ -1502,13 +1532,82 @@ async function queue(s: FS) {
 async function cancelQueue(s: FS) {
   if (s.sample) return toast(SAMPLE_NOTE);
   try {
-    if (usesPeriodPath(s)) await H.cancelQueued(s.tin, s.code, s.year, s.period || null);
+    if (usesPeriodPath(s)) await H.cancelQueued(s.tin, s.code, s.year, openedSlot(s));
     else await H.cancelQueue(s.code, s.draft);
     toast("Queue cancelled. The return is an editable draft again.");
     reload(s);
   } catch (e) {
     toast(errText(e), "danger");
   }
+}
+
+/**
+ * The slot the host addresses a stored return by (`cancel_queued`, `queued_send_state`, `release_abandoned_claim`):
+ * its stored key, which is not the page period for an entry-numbered or date-keyed form. The opened return's
+ * `stored_period`, else the page period; the list row's `return_key`, else its `period`. A stored key is used as
+ * given (0 is a real key, so `??`); only when there is none does the page period stand in, and there 0 means "no
+ * period" (null), as the pre-existing cancel call treated it.
+ */
+const openedSlot = (s: FS): number | null => s.storedPeriod ?? (s.period || null);
+const rowSlot = (r: any): number | null => r.return_key ?? (r.period || null);
+
+/** The row a listed return's send state is kept under. */
+const sendKey = (r: any) => `${r.tin}|${r.form_code}|${r.taxable_year}|${r.period || 0}|${r.return_key ?? ""}`;
+
+/**
+ * Read a send state, answering `settle` with it. No answer within `SEND_READ_MS` settles "unreadable" (so Cancel
+ * queue shows); an answer that comes later settles again and may replace that.
+ */
+function readSendState(tin: string, code: string, year: number, slot: number | null, settle: (st: SendState | "unreadable") => void) {
+  let answered = false;
+  setTimeout(() => {
+    if (!answered) settle("unreadable");
+  }, SEND_READ_MS);
+  H.sendState(tin, code, year, slot)
+    .catch(() => "unreadable" as const)
+    .then((st) => {
+      answered = true;
+      settle(st);
+    });
+}
+
+/** Read a queued return's send state (the shown return only); a failed or slow read keeps Cancel queue. */
+function loadSendState(s: FS, token: number) {
+  if (s.sample || s.filedOriginalView || s.status !== "Queued") return;
+  s.sendState = undefined;
+  s.releaseArmed = false;
+  bump();
+  readSendState(s.tin, s.code, s.year, openedSlot(s), (st) => {
+    if (!live(s, token) || s.releasing) return;
+    s.sendState = st;
+    s.releaseArmed = false;
+    bump();
+  });
+}
+
+/** Release a stuck send to a draft, with the claim of the state that was shown. */
+async function releaseStuck(
+  at: { tin: string; code: string; year: number; slot: number | null },
+  st: SendState,
+  settled: () => void,
+) {
+  try {
+    const r = await H.releaseClaim(at.tin, at.code, at.year, at.slot, st.claim);
+    toast(r.released ? "Released. The return is an editable draft again." : "Nothing to release. The return was already updated.");
+  } catch (e) {
+    toast(errText(e), "danger");
+  }
+  settled();
+}
+
+function releaseOpened(s: FS) {
+  const st = s.sendState;
+  if (!st || st === "unreadable" || s.releasing) return;
+  s.releasing = true;
+  s.releaseArmed = false;
+  bump();
+  // the return is opened again whatever the answer: it may have been sent or released elsewhere
+  releaseStuck({ tin: s.tin, code: s.code, year: s.year, slot: openedSlot(s) }, st, () => reload(s));
 }
 
 /** Whether this return has left Draft: its print preview is the filing record. */
@@ -2669,6 +2768,61 @@ function SubmitConfirm(p: { s: FS }) {
   );
 }
 
+/**
+ * What a Queued return offers, from its send state: Cancel queue when nothing
+ * has claimed it (or the state cannot be read), the armed Release when the
+ * host says a release would go through, else a line saying why neither.
+ */
+function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () => boolean; arm: (on: boolean) => void; cancel: () => void; release: (st: SendState) => void; ghost?: boolean }) {
+  const mode = () => {
+    const st = p.st();
+    if (st === undefined) return "loading";
+    if (st === "unreadable") return "cancel";
+    if (st.releasable === true) return "release";
+    if (st.stage === "Sending") return "sending";
+    return st.claim != null ? "wait" : "cancel";
+  };
+  const readable = () => {
+    const st = p.st();
+    return st && st !== "unreadable" ? st : null;
+  };
+  return (
+    <>
+      <If when={mode() === "cancel"}>
+        <Btn label="Cancel queue" variant={p.ghost ? "ghost" : undefined} onPress={p.cancel} />
+      </If>
+      <If when={mode() === "release"}>
+        <If when={p.armed()}>
+          <View class="gap-1 flex-1">
+            <Text class={`text-xs ${C.fg2}`}>Release only if nothing reached the BIR. Check your email for a BIR confirmation first. The return goes back to a draft.</Text>
+            <If when={Boolean(readable()?.reason)}>
+              <Text class={`text-xs ${C.fg2}`}>{readable()?.reason || ""}</Text>
+            </If>
+          </View>
+          <Btn
+            label="Release to draft"
+            variant="danger"
+            onPress={() => {
+              const st = readable();
+              if (st && !p.busy()) p.release(st);
+            }}
+          />
+          <Btn label="Keep it" variant="ghost" onPress={() => p.arm(false)} />
+        </If>
+        <If when={!p.armed()}>
+          <Btn label="Release stuck send…" variant={p.ghost ? "ghost" : undefined} disabled={p.busy()} onPress={() => p.arm(true)} />
+        </If>
+      </If>
+      <If when={mode() === "sending"}>
+        <Text class={`text-xs ${C.fg2}`}>Sending to the BIR now…</Text>
+      </If>
+      <If when={mode() === "wait"}>
+        <Text class={`text-xs ${C.fg2}`}>This send is not finished or cannot be released yet. Open the return again in a few minutes. If it stays this way, quit and reopen the app, then open the return again.</Text>
+      </If>
+    </>
+  );
+}
+
 /** The top bar: back to the forms, the form's code, and its actions (the head's actions in form_page.js). */
 function FormBar(p: { s: FS }) {
   const s = p.s;
@@ -2698,7 +2852,14 @@ function FormBar(p: { s: FS }) {
         <Btn label="Save" variant="primary" onPress={() => saveSample(s)} disabled={busy()} />
       </If>
       <If when={(rev(), !s.filedOriginalView && !s.sample && s.status === "Queued")}>
-        <Btn label="Cancel queue" onPress={() => cancelQueue(s)} />
+        <QueueActions
+          st={() => (rev(), s.sendState)}
+          armed={() => (rev(), s.releaseArmed)}
+          busy={() => (rev(), s.releasing)}
+          arm={(on) => { s.releaseArmed = on; bump(); }}
+          cancel={() => cancelQueue(s)}
+          release={() => releaseOpened(s)}
+        />
       </If>
       <If when={(rev(), !s.filedOriginalView && !s.sample && s.status !== "Queued" && s.editable)}>
         <Btn label={(rev(), s.checking ? "Checking…" : "Check")} onPress={() => check(s)} disabled={busy()} />
@@ -2854,6 +3015,12 @@ const picker = (() => {
   const ydError = signal("");
   const soon = signal<any[]>([]);
   const returns = signal<any[]>([]);
+  /** The send state of each Queued return in `returns`, by `sendKey`; the one whose Release is armed. */
+  const sends = signal<Record<string, SendRead>>({});
+  const armedKey = signal<string | null>(null);
+  /** The row whose release call is running. */
+  const releasing = signal<string | null>(null);
+  let sendsSeq = 0;
   const listsError = signal("");
   /** The form row shown open (a deep link with only `form_code` opens on it). */
   const sel = signal<string | null>(null);
@@ -2889,9 +3056,26 @@ const picker = (() => {
       const today = new Date();
       const [near, rows] = await Promise.all([H.deadlines(isoDate(addDays(today, -30)), isoDate(addDays(today, 30))), H.returns("all")]);
       soon.set(near.filter((d) => d.tin === tin && (daysUntil(d.due_date) >= 0 || d.status === "Not started" || d.status === "Draft")));
-      returns.set(rows.filter((r) => r.tin === tin));
+      const mine = rows.filter((r) => r.tin === tin);
+      returns.set(mine);
+      loadSends(mine);
     } catch (e) {
+      armedKey.set(null);
       listsError.set(errText(e));
+    }
+  }
+
+  /** Read the send state of every Queued return listed (quietly), each stored as its own read settles; a failed or slow read keeps its Cancel queue. */
+  function loadSends(rows: any[]) {
+    const seq = ++sendsSeq;
+    armedKey.set(null);
+    for (const r of rows.filter((r) => r.status === "Queued")) {
+      const key = sendKey(r);
+      readSendState(r.tin, r.form_code, r.taxable_year, rowSlot(r), (st) => {
+        if (seq !== sendsSeq) return;
+        if (armedKey() === key) armedKey.set(null);
+        sends.set({ ...sends(), [key]: st });
+      });
     }
   }
 
@@ -2939,7 +3123,7 @@ const picker = (() => {
     wantYear = y;
   }
 
-  return { data, error, busy, year, yd, ydError, soon, returns, listsError, sel, load, selectYear, refresh, focus };
+  return { data, error, busy, year, yd, ydError, soon, returns, sends, armedKey, releasing, listsError, sel, load, selectYear, refresh, focus };
 })();
 
 function FormsPicker() {
@@ -3070,15 +3254,30 @@ function FormsPicker() {
         <Text class={`text-xs ${C.fg2}`}>{`Updated ${shortDate(r.updated_at)}`}</Text>
       </View>
       <If when={r.status === "Queued"}>
-        <Btn label="Cancel queue" variant="ghost" onPress={async () => {
-          try {
-            await H.cancelQueued(r.tin, r.form_code, r.taxable_year, r.period || null);
-            toast("Queue cancelled. The return is an editable draft again.");
-            picker.refresh();
-          } catch (e) {
-            toast(errText(e), "danger");
-          }
-        }} />
+        <QueueActions
+          ghost
+          st={() => picker.sends()[sendKey(r)]}
+          armed={() => picker.armedKey() === sendKey(r)}
+          busy={() => picker.releasing() === sendKey(r)}
+          arm={(on) => picker.armedKey.set(on ? sendKey(r) : null)}
+          cancel={async () => {
+            try {
+              await H.cancelQueued(r.tin, r.form_code, r.taxable_year, rowSlot(r));
+              toast("Queue cancelled. The return is an editable draft again.");
+              picker.refresh();
+            } catch (e) {
+              toast(errText(e), "danger");
+            }
+          }}
+          release={(st) => {
+            const key = sendKey(r);
+            if (picker.releasing()) return;
+            picker.releasing.set(key);
+            picker.armedKey.set(null);
+            const finish = () => (picker.releasing.set(null), picker.refresh());
+            releaseStuck({ tin: r.tin, code: r.form_code, year: r.taxable_year, slot: rowSlot(r) }, st, finish);
+          }}
+        />
       </If>
       <Chip text={r.status} tone={statusTone(r.status)} />
       <Btn label="Open" variant="ghost" onPress={() => openForm({ tin: r.tin, code: r.form_code, year: r.taxable_year, period: r.period, ...(r.return_key != null ? { returnKey: r.return_key } : {}) })} />
