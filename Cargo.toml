@@ -21,10 +21,10 @@ lto = "thin"
 # eBIRForms' domain crates, pinned by commit (no tags or semver yet). Only
 # bir-app-core's BirApp facade is a supported surface; bir-core is reached
 # through its re-export.
-bir-app-core = { git = "https://github.com/eBIRForms/eBIRForms", rev = "e60e090bc40d13d2782822b5c8f51fc26d51376c" }
+bir-app-core = { git = "https://github.com/eBIRForms/eBIRForms", rev = "b6d00d3848673dc8ac0eb3f1021e18e6a4ce92e1" }
 # The submission client (device sign-in, device key, sealed sends, receipts),
 # at the same commit
-bir-submit = { git = "https://github.com/eBIRForms/eBIRForms", rev = "e60e090bc40d13d2782822b5c8f51fc26d51376c" }
+bir-submit = { git = "https://github.com/eBIRForms/eBIRForms", rev = "b6d00d3848673dc8ac0eb3f1021e18e6a4ce92e1" }
 serde_json = "1"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }

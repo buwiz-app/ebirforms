@@ -85,15 +85,21 @@ const H = {
   queue: (code: string, draft: any) => bir<number>("screen_form_queue", code, draft),
   cancelQueue: (code: string, draft: any) => bir<null>("screen_form_cancel_queue", code, draft),
   queuePeriod: (tin: string, code: string, year: number, quarter: number | null) => bir<number>("queue_form_draft", tin, code, year, quarter),
-  cancelQueued: (tin: string, code: string, year: number, quarter: number | null) => bir<null>("cancel_queued", tin, code, year, quarter),
-  /** A shape that is not an object is "unreadable"; so is a slot the host cannot address (it narrows slots to a byte). */
+  // every call that takes a slot goes through `addressable`: a slot the host cannot address would act on another return
+  cancelQueued: async (tin: string, code: string, year: number, quarter: number | null) => {
+    if (!addressable(quarter)) throw new Error("Open the return to cancel its queue.");
+    return bir<null>("cancel_queued", tin, code, year, quarter);
+  },
+  /** A shape that is not an object is "unreadable"; so is a slot the host cannot address. */
   sendState: async (tin: string, code: string, year: number, slot: number | null): Promise<SendState | "unreadable"> => {
-    if (slot != null && slot > MAX_SLOT) return "unreadable";
+    if (!addressable(slot)) return "unreadable";
     const r: unknown = await bir<unknown>("queued_send_state", tin, code, year, slot);
     return r && typeof r === "object" && !Array.isArray(r) ? (r as SendState) : "unreadable";
   },
-  releaseClaim: (tin: string, code: string, year: number, slot: number | null, claim: string | null) =>
-    bir<{ released: boolean; status: string | null }>("release_abandoned_claim", tin, code, year, slot, RELEASE_REASON, claim),
+  releaseClaim: async (tin: string, code: string, year: number, slot: number | null, claim: string | null) => {
+    if (!addressable(slot)) throw new Error("This return cannot be released from here. Open the return.");
+    return bir<{ released: boolean; status: string | null }>("release_abandoned_claim", tin, code, year, slot, RELEASE_REASON, claim);
+  },
 };
 
 // =====================================================================
@@ -107,6 +113,10 @@ type SendRead = SendState | "unreadable" | undefined;
 const RELEASE_REASON = "abandoned_no_bir_filing";
 /** The host narrows a return's slot to a byte, so a stored key above this (a late transaction date, MMDD) cannot be addressed. */
 const MAX_SLOT = 255;
+/** Whether the host can address a stored return by this slot (null: the period-less default). */
+const addressable = (slot: number | null) => slot == null || (Number.isInteger(slot) && slot >= 0 && slot <= MAX_SLOT);
+/** How long a send-state read may take before the return is treated as unreadable (Cancel queue shows). */
+const SEND_READ_MS = 4000;
 
 type Field = { k: string; l: string; t: string; c?: any; r?: any; m?: number; w?: boolean; o?: any[]; pool?: { keys: string[] }; grp?: string; rg?: number };
 type Col = { l: string; t: string; c?: any; w?: boolean; o?: any[] };
@@ -1522,7 +1532,7 @@ async function queue(s: FS) {
 async function cancelQueue(s: FS) {
   if (s.sample) return toast(SAMPLE_NOTE);
   try {
-    if (usesPeriodPath(s)) await H.cancelQueued(s.tin, s.code, s.year, s.period || null);
+    if (usesPeriodPath(s)) await H.cancelQueued(s.tin, s.code, s.year, openedSlot(s));
     else await H.cancelQueue(s.code, s.draft);
     toast("Queue cancelled. The return is an editable draft again.");
     reload(s);
@@ -1534,7 +1544,9 @@ async function cancelQueue(s: FS) {
 /**
  * The slot the host addresses a stored return by (`cancel_queued`, `queued_send_state`, `release_abandoned_claim`):
  * its stored key, which is not the page period for an entry-numbered or date-keyed form. The opened return's
- * `stored_period`, else the page period; the list row's `return_key`, else its `period`. Never `||`: 0 is a key.
+ * `stored_period`, else the page period; the list row's `return_key`, else its `period`. A stored key is used as
+ * given (0 is a real key, so `??`); only when there is none does the page period stand in, and there 0 means "no
+ * period" (null), as the pre-existing cancel call treated it.
  */
 const openedSlot = (s: FS): number | null => s.storedPeriod ?? (s.period || null);
 const rowSlot = (r: any): number | null => r.return_key ?? (r.period || null);
@@ -1542,38 +1554,50 @@ const rowSlot = (r: any): number | null => r.return_key ?? (r.period || null);
 /** The row a listed return's send state is kept under. */
 const sendKey = (r: any) => `${r.tin}|${r.form_code}|${r.taxable_year}|${r.period || 0}|${r.return_key ?? ""}`;
 
-/** Read a queued return's send state (the shown return only); a failed read keeps Cancel queue. */
-async function loadSendState(s: FS, token: number) {
+/**
+ * Read a send state, answering `settle` with it. No answer within `SEND_READ_MS` settles "unreadable" (so Cancel
+ * queue shows); an answer that comes later settles again and may replace that.
+ */
+function readSendState(tin: string, code: string, year: number, slot: number | null, settle: (st: SendState | "unreadable") => void) {
+  let answered = false;
+  setTimeout(() => {
+    if (!answered) settle("unreadable");
+  }, SEND_READ_MS);
+  H.sendState(tin, code, year, slot)
+    .catch(() => "unreadable" as const)
+    .then((st) => {
+      answered = true;
+      settle(st);
+    });
+}
+
+/** Read a queued return's send state (the shown return only); a failed or slow read keeps Cancel queue. */
+function loadSendState(s: FS, token: number) {
   if (s.sample || s.filedOriginalView || s.status !== "Queued") return;
   s.sendState = undefined;
   s.releaseArmed = false;
   bump();
-  try {
-    const st = await H.sendState(s.tin, s.code, s.year, openedSlot(s));
-    if (!live(s, token)) return;
+  readSendState(s.tin, s.code, s.year, openedSlot(s), (st) => {
+    if (!live(s, token) || s.releasing) return;
     s.sendState = st;
-  } catch {
-    if (!live(s, token)) return;
-    s.sendState = "unreadable";
-  }
-  bump();
+    s.releaseArmed = false;
+    bump();
+  });
 }
 
 /** Release a stuck send to a draft, with the claim of the state that was shown. */
 async function releaseStuck(
   at: { tin: string; code: string; year: number; slot: number | null },
   st: SendState,
-  done: () => void,
-  again: () => void,
+  settled: () => void,
 ) {
   try {
     const r = await H.releaseClaim(at.tin, at.code, at.year, at.slot, st.claim);
     toast(r.released ? "Released. The return is an editable draft again." : "Nothing to release. The return was already updated.");
-    done();
   } catch (e) {
     toast(errText(e), "danger");
-    again();
   }
+  settled();
 }
 
 function releaseOpened(s: FS) {
@@ -1583,7 +1607,7 @@ function releaseOpened(s: FS) {
   s.releaseArmed = false;
   bump();
   // the return is opened again whatever the answer: it may have been sent or released elsewhere
-  releaseStuck({ tin: s.tin, code: s.code, year: s.year, slot: openedSlot(s) }, st, () => reload(s), () => reload(s));
+  releaseStuck({ tin: s.tin, code: s.code, year: s.year, slot: openedSlot(s) }, st, () => reload(s));
 }
 
 /** Whether this return has left Draft: its print preview is the filing record. */
@@ -3041,24 +3065,17 @@ const picker = (() => {
     }
   }
 
-  /** Read the send state of every Queued return listed (quietly); a failed read keeps its Cancel queue. */
-  async function loadSends(rows: any[]) {
+  /** Read the send state of every Queued return listed (quietly), each stored as its own read settles; a failed or slow read keeps its Cancel queue. */
+  function loadSends(rows: any[]) {
     const seq = ++sendsSeq;
     armedKey.set(null);
-    const queued = rows.filter((r) => r.status === "Queued");
-    const read: Record<string, SendRead> = {};
-    await Promise.all(
-      queued.map(async (r) => {
-        try {
-          read[sendKey(r)] = await H.sendState(r.tin, r.form_code, r.taxable_year, rowSlot(r));
-        } catch {
-          read[sendKey(r)] = "unreadable";
-        }
-      }),
-    );
-    if (seq === sendsSeq) {
-      armedKey.set(null);
-      sends.set(read);
+    for (const r of rows.filter((r) => r.status === "Queued")) {
+      const key = sendKey(r);
+      readSendState(r.tin, r.form_code, r.taxable_year, rowSlot(r), (st) => {
+        if (seq !== sendsSeq) return;
+        if (armedKey() === key) armedKey.set(null);
+        sends.set({ ...sends(), [key]: st });
+      });
     }
   }
 
@@ -3244,8 +3261,6 @@ function FormsPicker() {
           busy={() => picker.releasing() === sendKey(r)}
           arm={(on) => picker.armedKey.set(on ? sendKey(r) : null)}
           cancel={async () => {
-            // the host cannot address a key above a byte: it would act on another return
-            if ((rowSlot(r) ?? 0) > MAX_SLOT) return toast("Open the return to cancel its queue.", "danger");
             try {
               await H.cancelQueued(r.tin, r.form_code, r.taxable_year, rowSlot(r));
               toast("Queue cancelled. The return is an editable draft again.");
@@ -3260,7 +3275,7 @@ function FormsPicker() {
             picker.releasing.set(key);
             picker.armedKey.set(null);
             const finish = () => (picker.releasing.set(null), picker.refresh());
-            releaseStuck({ tin: r.tin, code: r.form_code, year: r.taxable_year, slot: rowSlot(r) }, st, finish, finish);
+            releaseStuck({ tin: r.tin, code: r.form_code, year: r.taxable_year, slot: rowSlot(r) }, st, finish);
           }}
         />
       </If>
