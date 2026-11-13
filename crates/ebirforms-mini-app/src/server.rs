@@ -489,7 +489,12 @@ impl Server {
             RDO_LOOKUP => rdo_lookup(app, arguments),
             ATC_LOOKUP => answers::atc_lookup(arguments),
             PENALTY_ESTIMATE => answers::penalty_estimate(arguments, today),
-            QUEUE_LIST => answers::queue_list(app, arguments, today, self.account.signed_in()),
+            QUEUE_LIST => {
+                // the account's TIN list is asked only if a row needs it
+                let read = || self.account.tins(crate::account::ASSISTANT_AGE);
+                let live = answers::Live::new(&read, crate::account::now());
+                answers::queue_list(app, arguments, today, self.account.signed_in(), &live)
+            }
             DRAFTS_LIST => drafts_list(app, arguments),
             FORM_OPEN => self.form_open(app, arguments, today),
             FORM_FIELDS => self.form_fields(arguments),

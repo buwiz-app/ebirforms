@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bir_app_core::{BirApp, BranchFacts, NewTaxpayer, OpenReturn, SendStage};
+use bir_app_core::{BirApp, BranchFacts, NewTaxpayer, OpenReturn, SendStage, TinRefusal};
 use ebirforms_mini_app::{ManifestSource, Server};
 use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::{Value, json};
@@ -892,7 +892,11 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert_eq!(
         result_of(&state),
-        &json!({ "stage": null, "reason": null, "claim": null, "releasable": false }),
+        &json!({
+            "stage": null, "reason": null, "claim": null, "releasable": false,
+            // the state's words, for a return Buwiz refused for its TIN
+            "chip": null, "line": null, "next": null, "step": null,
+        }),
         "{state}"
     );
 
@@ -1111,6 +1115,57 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert_eq!(state_at(&mut bot, 2), second, "entry 2 is unchanged");
     assert_eq!(state_at(&mut bot, 1), first, "entry 1 is unchanged");
+
+    // Buwiz refused the 0619E for its TIN: it is a draft again, listed in the
+    // queue answer's own group with the state's chip and line, never a TIN
+    app.demo_set_send_stage(
+        id,
+        &SendStage::Refused {
+            code: TinRefusal::Unverified,
+            reason: "Not sent (nothing reached BIR): this TIN is not verified yet (tin_unverified)"
+                .into(),
+        },
+    )
+    .expect("a refused draft");
+    let listed = bot.agent("ebirforms_queue_list", json!({}));
+    let list = result_of(&listed).clone();
+    let drafts = list["back_to_draft"].as_array().unwrap();
+    assert_eq!(drafts.len(), 1, "{list}");
+    let refused = &drafts[0];
+    assert_eq!(refused["stage"], "refused");
+    assert_eq!(refused["chip"], "Not verified");
+    assert_eq!(
+        refused["line"],
+        "This TIN is on your Buwiz account but not verified yet."
+    );
+    assert_eq!(refused["draft_note"], "Back to a draft. Nothing was sent.");
+    assert_eq!(
+        refused["step"],
+        json!({ "kind": "verify", "label": "Verify it" })
+    );
+    assert_eq!(refused["form"], "0619E");
+    assert!(
+        refused["key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("tkt_"))
+    );
+    assert!(
+        list["waiting"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["form"] != "0619E"),
+        "a draft is not waiting: {list}"
+    );
+    let digits = regex::Regex::new(r"[0-9]{9}").unwrap();
+    assert!(
+        !digits.is_match(&list.to_string()),
+        "no TIN in the queue answer: {list}"
+    );
+    assert!(
+        !list.to_string().contains("not verified yet (tin_"),
+        "the stored server text stays out: {list}"
+    );
 
     // the account tools are -32601 (protocol 1.0, 10.1): eBIRForms declares
     // no accounts, a pushed token is never echoed, and a push is never taken

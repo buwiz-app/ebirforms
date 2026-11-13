@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bir_submit::secrets::FileStore;
-use bir_submit::{BuwizTransport, PollOutcome, SignInStatus, Submission, SubmitConfig};
+use bir_submit::{BuwizTransport, PollOutcome, SignInStatus, Submission, SubmitConfig, TinsRead};
 use serde_json::{Value, json};
 
 /// Where the Buwiz API lives: https, or http on this machine (a local
@@ -28,6 +28,8 @@ pub const ACCOUNT_URL_ENV: &str = "EBIRFORMS_ACCOUNT_URL";
 pub(crate) const CLIENT_ID: &str = "buwiz-ebirforms";
 /// Seconds between polls when the server named none.
 const INTERVAL: i64 = 5;
+/// How old it may be for an assistant's answer (the Sending queue card).
+pub(crate) const ASSISTANT_AGE: i64 = 300;
 
 /// The sign-in state of this process.
 pub(crate) struct Account {
@@ -51,7 +53,7 @@ fn private_url(url: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1")
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| {
@@ -109,6 +111,13 @@ impl Account {
             self.submission.sign_in_status(),
             SignInStatus::SignedIn { .. }
         )
+    }
+
+    /// The account's TINs and their states: from memory when the last read
+    /// is younger than `max_age` seconds, else one request (bearer only, 5 s
+    /// at most). Signed out: no request. Never a TIN in a log line.
+    pub(crate) fn tins(&self, max_age: i64) -> TinsRead {
+        self.runtime.block_on(self.submission.account_tins(max_age))
     }
 
     /// `ebirforms_account_status`: who is signed in, or the code waiting.
@@ -199,6 +208,10 @@ mod tests {
         polls: usize,
         devices: usize,
         logouts: Vec<String>,
+        /// What the TIN list route answers (`None`: no such route), and the
+        /// request lines and bearers it saw.
+        profiles: Option<(u16, Value)>,
+        tins: Vec<(String, String)>,
     }
 
     /// A one-thread HTTP server with account.buwiz.com's sign-in routes and
@@ -273,6 +286,13 @@ mod tests {
                     ["POST", "/api/devices"] => {
                         seen.devices += 1;
                         (200, json!({ "id": "dev_1" }))
+                    }
+                    ["GET", path] if path.starts_with("/api/tax-profiles") => {
+                        seen.tins.push((line.trim().to_string(), bearer.clone()));
+                        match seen.profiles.clone() {
+                            Some(answer) => answer,
+                            None => (404, json!({ "error": { "code": "not_found" } })),
+                        }
                     }
                     ["POST", "/api/auth/logout"] => {
                         seen.logouts.push(bearer.clone());
@@ -364,6 +384,121 @@ mod tests {
         );
         assert_eq!(seen.lock().unwrap().logouts, ["bwa_one"]);
         assert!(!account.signed_in());
+    }
+
+    /// The account's list as the server answers it with `include=all`:
+    /// synthetic taxpayers, one per state (the shared golden example).
+    fn profiles() -> Value {
+        json!({ "include": "all", "profiles": [
+            { "id": "i1", "tin": "000-123-453-00000", "registered_name": "SYNTHETIC ONE", "status": "approved", "can_send": true, "permissions": [] },
+            { "id": "i2", "tin": "000-123-454-00000", "registered_name": "SYNTHETIC TWO", "status": "paused", "can_send": false, "permissions": [] },
+            { "id": "i3", "tin": "000-123-455-00000", "registered_name": "SYNTHETIC THREE", "status": "unverified", "can_send": false, "permissions": [],
+              "action": { "label": "Verify to send", "url": "https://account.buwiz.com/tins/claims/i3/verify" } },
+            { "id": "i4", "tin": "000-123-456-00000", "registered_name": "SYNTHETIC FOUR", "status": "pending", "can_send": false, "permissions": [] },
+            { "id": "i5", "tin": "000-123-457-00000", "registered_name": "SYNTHETIC FIVE", "status": "needs_fix", "can_send": false, "permissions": [],
+              "reasons": ["A photo is too blurry to read."], "note": "Retake it in daylight." },
+        ] })
+    }
+
+    /// An account signed in against the mock, which answers `profiles()`.
+    fn signed_in(dir: &std::path::Path, base: &str, seen: &Arc<Mutex<Seen>>) -> Account {
+        seen.lock().unwrap().profiles = Some((200, profiles()));
+        let mut account = Account::at(dir.to_path_buf(), base);
+        account.start().unwrap();
+        account.poll().unwrap();
+        account.poll().unwrap();
+        assert!(account.signed_in());
+        account
+    }
+
+    #[test]
+    fn tins_come_back_by_state_and_the_server_saw_include_all_pending() {
+        use bir_app_core::BirApp;
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = mock();
+        let account = signed_in(dir.path(), &base, &seen);
+        let list = account.tins(ASSISTANT_AGE).expect("the list");
+        assert!(list.complete && !list.stale);
+        let states: Vec<_> = [
+            "000123453",
+            "000123454",
+            "000123455",
+            "000123456",
+            "000123457",
+            "000123458",
+        ]
+        .iter()
+        .map(|tin| {
+            let gate = BirApp::tin_gate(tin, &[Ok(list.clone())], now());
+            gate.statement.map_or("active", |s| s.state.name())
+        })
+        .collect();
+        // the sixth TIN is not on a complete list
+        assert_eq!(
+            states,
+            [
+                "active",
+                "paused",
+                "not_verified",
+                "waiting_for_review",
+                "sent_back",
+                "not_on_account"
+            ]
+        );
+        let seen_by_mock = seen;
+        {
+            let seen = seen_by_mock.lock().unwrap();
+            assert_eq!(seen.tins.len(), 1, "one request");
+            assert_eq!(
+                seen.tins[0].0,
+                "GET /api/tax-profiles?include=all,pending HTTP/1.1"
+            );
+            assert!(seen.tins[0].1.starts_with("bwa_"), "the signed-in bearer");
+        }
+        // a second read inside its age costs no request
+        account.tins(ASSISTANT_AGE).expect("from memory");
+        assert_eq!(seen_by_mock.lock().unwrap().tins.len(), 1);
+    }
+
+    #[test]
+    fn an_unreachable_server_reads_offline_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = mock();
+        drop(signed_in(dir.path(), &base, &seen));
+        // the same sign-in (its files), the server gone
+        let account = Account::at(dir.path().to_path_buf(), "http://127.0.0.1:9");
+        assert!(account.signed_in());
+        assert!(matches!(
+            account.tins(ASSISTANT_AGE),
+            Err(bir_submit::TinsError::Offline)
+        ));
+    }
+
+    #[test]
+    fn signed_out_asks_nothing_and_signing_out_forgets_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = mock();
+        let account = Account::at(dir.path().to_path_buf(), &base);
+        assert!(matches!(
+            account.tins(ASSISTANT_AGE),
+            Err(bir_submit::TinsError::SignedOut)
+        ));
+        assert!(
+            seen.lock().unwrap().tins.is_empty(),
+            "no request when signed out"
+        );
+        let mut account = signed_in(dir.path(), &base, &seen);
+        account.tins(ASSISTANT_AGE).expect("the list");
+        account.sign_out().unwrap();
+        assert!(matches!(
+            account.tins(ASSISTANT_AGE),
+            Err(bir_submit::TinsError::SignedOut)
+        ));
+        assert_eq!(
+            seen.lock().unwrap().tins.len(),
+            1,
+            "the list was not asked again"
+        );
     }
 
     #[test]
