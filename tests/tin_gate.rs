@@ -674,6 +674,19 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         drafts[0]["line"],
         "Buwiz sent this TIN back for a fix: A photo is too blurry to read."
     );
+    // the Sending queue card's button: the link of the return's own ticket (the card app
+    // may call only the link tool), the row's own page for the fix
+    let card_link = bot.app(
+        "card-dates",
+        "ebirforms_account_tin_link",
+        json!({ "ticket": drafts[0]["key"], "step": "fix" }),
+    );
+    assert_eq!(result_of(&card_link)["url"], FIX_URL, "{card_link}");
+    let card_tins = bot.app("card-dates", "ebirforms_account_tins", json!({}));
+    assert!(
+        error_text(&card_tins).contains("permissions"),
+        "{card_tins}"
+    );
     // and the card the assistant's answer carries holds the same
     assert!(
         queue_list["_meta"]["buwiz/open"]["props"]["snapshot"]["back_to_draft"][0]["line"]

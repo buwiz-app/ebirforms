@@ -4,7 +4,10 @@
 // (ebirforms_calendar_get); what filing late costs (penalty, from eBIRForms'
 // penalty engine, ebirforms_penalty_estimate) and the sending queue (queue,
 // ebirforms_queue_list). Buttons open the return in BIR Forms or the full
-// Calendar; nothing here changes eBIRForms' data, queues or sends.
+// Calendar, or the Buwiz account page of a refused return's TIN (Add it,
+// Verify it, Fix it: ebirforms_account_tin_link); nothing here changes
+// eBIRForms' data, queues or sends. A TIN's state is shown as BIR words it
+// (`chip`, `line`, `step.label`): no sentence about one is written here.
 
 import { signal, computed, Text, View, Scroll, Input } from "nsh";
 import { buwiz } from "buwiz";
@@ -462,9 +465,14 @@ function Penalty() {
 
 // ------------------------------------------------------------ queue
 
+/** A TIN state's tone as the kit knows it. */
+const tinTone = (tone: unknown): Tone => (tone === "danger" ? "danger" : tone === "warning" ? "warn" : "info");
+
 /** A queued or sent return's chip and the line under it. */
 function stageOf(r: any): [string, Tone, string] {
   const since = shortDate(String(r.since || "").slice(0, 10));
+  // Buwiz refused it for its TIN: BIR's chip and line, with the draft note once it is a draft again
+  if (r.chip && r.line) return [String(r.chip), tinTone(r.tone), [r.line, r.draft_note].filter(Boolean).join(" ")];
   switch (r.stage) {
     case "sending":
       return ["Sending", "info", "Being sent to the BIR now"];
@@ -488,9 +496,17 @@ function stageOf(r: any): [string, Tone, string] {
   }
 }
 
+/** A refused return's step button: the Buwiz account page it opens, from the return's own ticket (the Bot asks first). */
+const openStep = (r: any) =>
+  act(async () => {
+    const link = answerOf(await buwiz.call("ebirforms_account_tin_link", { ticket: r.key, step: r.step.kind }));
+    if (link?.url) await buwiz.open({ url: String(link.url) });
+  });
+
 function Queue() {
   const s = () => snap() || {};
   const waiting = () => (s().waiting || []) as any[];
+  const back = () => (s().back_to_draft || []) as any[];
   const sent = () => (s().sent || []) as any[];
   const row = (r: any) => {
     const [chip, tone, sub] = stageOf(r);
@@ -499,18 +515,21 @@ function Queue() {
         right={
           <View class="flex-row gap-2 items-center">
             <Chip text={chip} tone={tone} />
+            <If when={Boolean(r.step && r.step.label)}><Btn label={String(r.step?.label || "")} primary onPress={() => openStep(r)} /></If>
             <Btn label="Open" onPress={() => openApp("forms", r.key, { form: r.form, period: r.period, action: "view" })} />
           </View>
         } />
     );
   };
   return (
-    <Card title="Sending queue" sub={`${waiting().length} waiting · ${sent().length} sent in the last 30 days`}>
+    <Card title="Sending queue" sub={`${waiting().length} waiting${back().length ? ` · ${back().length} back to a draft` : ""} · ${sent().length} sent in the last 30 days`}>
       <If when={s().sending === false && waiting().length > 0}>
         <Text class={`text-xs ${K.warn}`}>This computer isn't signed in to Buwiz, so nothing is sent yet. Sign in from the Sign-in app.</Text>
       </If>
-      <If when={waiting().length + sent().length === 0}><Empty text="Nothing is waiting, and nothing was sent in the last 30 days." /></If>
+      <If when={waiting().length + back().length + sent().length === 0}><Empty text="Nothing is waiting, and nothing was sent in the last 30 days." /></If>
       <Each of={waiting()} key={(r) => r.key}>{(r) => row(r())}</Each>
+      <If when={back().length > 0}><Text class={`text-xs font-semibold pt-1 ${K.fg2}`}>Back to a draft</Text></If>
+      <Each of={back()} key={(r) => r.key}>{(r) => row(r())}</Each>
       <Each of={sent()} key={(r) => r.key}>{(r) => row(r())}</Each>
     </Card>
   );

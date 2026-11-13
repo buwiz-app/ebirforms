@@ -293,8 +293,10 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
         CARD_DATES_ID | CARD_CALC_ID | CARD_PEOPLE_ID => {
             let mut permissions = json!({ "tools": cards::refresh_tools(id) });
             if id == CARD_DATES_ID {
-                // Open (a return in Forms) and Open the Calendar
-                permissions["open"] = json!({ "apps": [FORMS_ID, CALENDAR_ID] });
+                // Open (a return in Forms), Open the Calendar, and the Sending
+                // queue's Add it, Verify it and Fix it on account.buwiz.com
+                permissions["open"] =
+                    json!({ "apps": [FORMS_ID, CALENDAR_ID], "external": [ACCOUNT_SITE] });
             }
             if id == CARD_PEOPLE_ID {
                 // a row opens its taxpayer's Tax Profile; New taxpayer, its form
