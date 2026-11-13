@@ -30,6 +30,8 @@ const PAUSED: &str = "000333446";
 const PENDING: &str = "000555664";
 const ABSENT: &str = "000777887";
 const FOREIGN_LINK: &str = "000999915";
+/// The server says it can send although its status is pending.
+const INFO_ONLY: &str = "000444444";
 
 const VERIFY_URL: &str = "https://account.buwiz.com/tins/claims/c1/verify";
 const FIX_URL: &str = "https://account.buwiz.com/tins/claims/c3/fix";
@@ -68,6 +70,7 @@ fn complete_list() -> Value {
             "action": { "label": "Fix and send again", "url": FIX_URL } })),
         row(PAUSED, "paused", false, json!({})),
         row(PENDING, "pending", false, json!({})),
+        row(INFO_ONLY, "pending", true, json!({})),
         row(FOREIGN_LINK, "needs_fix", false, json!({
             "action": { "label": "Fix", "url": "https://evil.example/fix" } })),
     ] })
@@ -216,6 +219,7 @@ fn name_of(root: &str) -> String {
         PAUSED => "Paused",
         PENDING => "Pending",
         ABSENT => "Absent",
+        INFO_ONLY => "Info Only",
         _ => "Foreign Link",
     };
     format!("Synthetic {state} Trading")
@@ -281,6 +285,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         PENDING,
         ABSENT,
         FOREIGN_LINK,
+        INFO_ONLY,
     ]
     .into_iter()
     .map(|root| (root, create(&app, root)))
@@ -354,7 +359,7 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         );
         assert_eq!(row["chip"], Value::Null);
     }
-    assert_eq!(result_of(&signed_out)["rows"].as_array().unwrap().len(), 7);
+    assert_eq!(result_of(&signed_out)["rows"].as_array().unwrap().len(), 8);
     assert!(
         mock.lock().unwrap().requests.is_empty(),
         "signed out asks nothing"
@@ -631,6 +636,25 @@ fn the_account_states_reach_the_apps_and_the_gate() {
     assert_eq!(queued["isError"], false, "{queued}");
     assert_eq!(status_of(&mut bot, APPROVED), "Queued");
 
+    // ---- a state shown as information only: the server says it can send, so
+    // Queue is never off and the gate never refuses, whatever the status says
+    let info = row_of(
+        &bot.app("forms", "ebirforms_account_tins", json!({})),
+        &ticket_of(INFO_ONLY),
+    );
+    assert_eq!(info["can_queue"], true, "{info}");
+    assert_eq!(
+        info["state"], "waiting_for_review",
+        "shown as information: {info}"
+    );
+    saved_0619e(&app, &tin_of(INFO_ONLY));
+    let sent = queue(&mut bot, INFO_ONLY);
+    assert_eq!(
+        sent["isError"], false,
+        "a TIN that can send is queued: {sent}"
+    );
+    assert_eq!(status_of(&mut bot, INFO_ONLY), "Queued");
+
     // ---- what the assistant reads of a refusal: the chip and the line,
     // and never staff's note or a TIN
     let id = app
@@ -670,10 +694,9 @@ fn the_account_states_reach_the_apps_and_the_gate() {
         .clone();
     assert_eq!(drafts.len(), 1, "{queue_list}");
     assert_eq!(drafts[0]["chip"], "Sent back");
-    assert_eq!(
-        drafts[0]["line"],
-        "Buwiz sent this TIN back for a fix: A photo is too blurry to read."
-    );
+    // the list was read before the refusal, so it only confirms the state: the
+    // stored refusal stands, in its plain sentence (no reasons, no note)
+    assert_eq!(drafts[0]["line"], "Buwiz sent this TIN back for a fix.");
     // the Sending queue card's button: the link of the return's own ticket (the card app
     // may call only the link tool), the row's own page for the fix
     let card_link = bot.app(

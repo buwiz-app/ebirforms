@@ -15,9 +15,6 @@ use bir_app_core::{
 use bir_submit::{TinsError, TinsRead};
 use serde_json::{Map, Value, json};
 
-/// The only place the apps' step links go.
-pub(crate) const ACCOUNT_PAGE: &str = "https://account.buwiz.com/";
-
 /// A step's button as JSON: `{kind, label}`.
 fn step_json(step: Option<TinStep>) -> Value {
     step.map_or(
@@ -128,10 +125,12 @@ fn gate_state(gate: &QueueGate) -> &'static str {
     }
 }
 
-/// Whether `url` is a page of the Buwiz account site, and only that: https,
-/// that host, no whitespace or control character.
+/// Whether `url` is a page of the Buwiz account site, and only that: the
+/// crates' one rule (`pinned_account_url`: https, that host exactly, no user
+/// name, the default port), and no whitespace or control character.
 pub(crate) fn account_url(url: &str) -> bool {
-    url.starts_with(ACCOUNT_PAGE) && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+    bir_submit::tins::pinned_account_url(url).is_some()
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// Where a step opens for the TIN `key`: "Add it" carries the TIN; Verify and
@@ -194,9 +193,14 @@ mod tests {
         }
         for url in [
             "",
-            "https://account.buwiz.com",
             "http://account.buwiz.com/tins",
             "https://account.buwiz.com.evil.example/tins",
+            "https://account.buwiz.com.evil.example",
+            "https://account.buwiz.com@evil.example/tins",
+            "https://account.buwiz.com:evil@evil.example/",
+            "https://user@account.buwiz.com/tins",
+            "https://account.buwiz.com:8443/tins",
+            "https://evilaccount.buwiz.com/tins",
             "https://evil.example/https://account.buwiz.com/",
             "https://account.buwiz.com/tins now",
             "https://account.buwiz.com/tins\n",

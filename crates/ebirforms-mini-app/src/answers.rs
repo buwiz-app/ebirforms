@@ -331,16 +331,35 @@ fn stored_refusal(stage: &SendStage) -> Option<TinStatement> {
     Some(BirApp::tin_statement_for_refusal(code, None))
 }
 
+/// Whether the list `gate` was read after the refusal at `refused_at`.
+fn newer_than(refused_at: Option<i64>, gate: &QueueGate) -> bool {
+    match (refused_at, gate.checked_at) {
+        (None, _) => true,
+        (Some(at), Some(read)) => read > at,
+        (Some(_), None) => true,
+    }
+}
+
 /// A return's stage as the card reads it. `gate`: what the account's list
 /// says now about the return's TIN. `false`: the row is not shown (a
 /// refusal the list says is fixed since).
-fn stage(stage: Option<&SendStage>, gate: &QueueGate, out: &mut Value) -> bool {
+fn stage(
+    stage: Option<&SendStage>,
+    gate: &QueueGate,
+    refused_at: Option<i64>,
+    out: &mut Value,
+) -> bool {
     // A refusal for the TIN (stored), as the account's list says it stands
     // now. The stored words are the state's own sentence: the server's text
     // in the stored reason is not copied, so the fixed reasons of a sent-back
     // TIN come from the list's row or not at all.
     if let Some(stored) = stage.and_then(stored_refusal) {
-        let shown = BirApp::effective_statement(Some(stored), gate);
+        // a list read before the refusal says nothing about it; a TIN the list
+        // lets send (whatever its status) is not held back by a stored refusal
+        let shown =
+            BirApp::effective_statement_since(Some(stored), refused_at, gate).filter(|_| {
+                !(gate.can_queue && gate.unknown.is_none() && newer_than(refused_at, gate))
+            });
         return match (stage, shown) {
             (Some(SendStage::Refused { .. }), Some(statement)) => {
                 out["stage"] = json!("refused");
@@ -461,7 +480,7 @@ pub(crate) fn queue_list(
         } else {
             live.none()
         };
-        stage(sent_stage, &gate, &mut out);
+        stage(sent_stage, &gate, None, &mut out);
         if row.status == "Queued" {
             waiting.push(out);
         } else {
@@ -527,7 +546,12 @@ fn back_to_draft(
             "label": format!("{form} · {}", period.label()),
             "since": refused.row.updated_at,
         });
-        if stage(Some(&refused.stage), &live.gate(&refused.row.tin), &mut out) {
+        if stage(
+            Some(&refused.stage),
+            &live.gate(&refused.row.tin),
+            refused.refused_at(),
+            &mut out,
+        ) {
             rows.push(out);
         }
     }
@@ -717,6 +741,7 @@ mod tests {
                 receipt: None,
             }),
             &no_state(),
+            None,
             &mut bare,
         );
         assert_eq!(bare["stage"], "sent");
@@ -736,6 +761,7 @@ mod tests {
                     receipt: Some(receipt),
                 }),
                 &no_state(),
+                None,
                 &mut row,
             );
             assert_eq!(row["receipt"], true);
@@ -837,7 +863,12 @@ mod tests {
                 "the server's own sentence"
             };
             let mut row = json!({});
-            assert!(stage(Some(&refused(code, message)), &no_state(), &mut row));
+            assert!(stage(
+                Some(&refused(code, message)),
+                &no_state(),
+                None,
+                &mut row
+            ));
             assert_eq!(row["stage"], "refused", "{code:?}");
             assert_eq!(row["state"], state);
             assert_eq!(row["chip"], chip);
@@ -857,6 +888,7 @@ mod tests {
         assert!(stage(
             Some(&refused(TinRefusal::NotActive, "x")),
             &gate,
+            None,
             &mut row
         ));
         assert_eq!(row["state"], "not_allowed");
@@ -881,6 +913,7 @@ mod tests {
                 "Not sent (nothing reached BIR): this TIN is not active on your account (tin_not_active)",
             )),
             &no_state(),
+            None,
             &mut row,
         );
         assert_eq!(row["stage"], "failed");
@@ -896,6 +929,7 @@ mod tests {
                 "Not sent (nothing reached BIR): the network is down",
             )),
             &no_state(),
+            None,
             &mut plain,
         );
         assert_eq!(plain["stage"], "failed");
@@ -915,6 +949,7 @@ mod tests {
         assert!(!stage(
             Some(&refused(TinRefusal::Unverified, "x")),
             &active,
+            None,
             &mut row
         ));
         // a queued return that failed with a TIN code is asked again at once
@@ -926,10 +961,37 @@ mod tests {
                 next_retry_at: Some("2099-01-01T00:00:00Z".into()),
             }),
             &active,
+            None,
             &mut waiting
         ));
         assert_eq!(waiting["stage"], "queued");
         assert!(waiting.get("chip").is_none() && waiting.get("reason").is_none());
+    }
+
+    #[test]
+    fn a_list_read_before_the_refusal_does_not_hide_it() {
+        let active = gate_of(account_row("approved", true, json!({})));
+        let stored = refused(TinRefusal::Unverified, "x");
+        // read at 1000: a refusal written at 2000 stands, one written at 500 is answered
+        let mut row = json!({});
+        assert!(stage(Some(&stored), &active, Some(2_000), &mut row));
+        assert_eq!(row["chip"], "Not verified", "{row}");
+        let mut row = json!({});
+        assert!(!stage(Some(&stored), &active, Some(500), &mut row));
+    }
+
+    #[test]
+    fn a_tin_the_server_lets_send_is_never_held_back_by_a_statement() {
+        // pending, but can_send: the gate answers can_queue with a statement
+        let info = gate_of(account_row("pending", true, json!({})));
+        assert!(info.can_queue && info.statement.is_some(), "{info:?}");
+        let mut row = json!({});
+        assert!(!stage(
+            Some(&refused(TinRefusal::Pending, "x")),
+            &info,
+            None,
+            &mut row
+        ));
     }
 
     #[test]
@@ -939,6 +1001,7 @@ mod tests {
         assert!(stage(
             Some(&refused(TinRefusal::NotActive, "x")),
             &live,
+            None,
             &mut row
         ));
         assert_eq!(row["chip"], "Paused");
@@ -960,7 +1023,7 @@ mod tests {
         );
         for gate in [&live, &no_state()] {
             let mut row = json!({});
-            stage(Some(&stored), gate, &mut row);
+            stage(Some(&stored), gate, None, &mut row);
             let text = row.to_string();
             assert!(
                 !text.contains("JUANA") && !text.contains("daylight"),
@@ -974,7 +1037,7 @@ mod tests {
         }
         // with the list's row, the line holds its fixed reasons only
         let mut row = json!({});
-        stage(Some(&stored), &live, &mut row);
+        stage(Some(&stored), &live, None, &mut row);
         assert_eq!(
             row["line"],
             "Buwiz sent this TIN back for a fix: A photo is too blurry to read."

@@ -1651,7 +1651,8 @@ function tinNotice(s: FS) {
   if (g && g.state === "active") return null;
   const st = s.sendState && s.sendState !== "unreadable" ? s.sendState : null;
   const draftNote = st?.draft_note || null;
-  if (g && g.can_queue === false && g.line) return { chip: g.chip || "", tone: g.tone, line: g.line, note: g.note || null, draftNote, step: g.step };
+  // a state the server lets send is information only: shown, and Queue stays on (gateBlocks reads can_queue)
+  if (g && g.line) return { chip: g.chip || "", tone: g.tone, line: g.line, note: g.note || null, draftNote, step: g.step };
   if (st && st.line) return { chip: st.chip || "", tone: st.tone, line: st.line, note: null, draftNote, step: st.step_button || null };
   return null;
 }
