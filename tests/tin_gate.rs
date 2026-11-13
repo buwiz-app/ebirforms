@@ -181,12 +181,11 @@ fn serve(listener: TcpListener, mock: Arc<Mutex<Mock>>) {
                 _ => (404, json!({ "error": { "code": "not_found" } })),
             };
             let text = answer.to_string();
-            write!(
+            let _ = write!(
                 stream,
                 "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
                 text.len()
-            )
-            .unwrap();
+            );
         }
     });
 }

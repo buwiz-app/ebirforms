@@ -360,12 +360,12 @@ mod tests {
                 };
                 drop(seen);
                 let text = answer.to_string();
-                write!(
+                // a client that gave up (a timeout) has closed its end
+                let _ = write!(
                     stream,
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
                     text.len()
-                )
-                .unwrap();
+                );
             }
         });
         (base, seen)
