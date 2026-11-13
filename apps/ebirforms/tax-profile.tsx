@@ -905,6 +905,11 @@ function Opened() {
   );
 }
 
+/** One TIN's state on the Buwiz account as BIR words it (`ebirforms_account_tins`): `chip`, `line`, `step.label`
+ *  and `note` are shown as they come; chip is null when the TIN is active or its state is not known. */
+interface TinGate { ticket: string; chip: string | null; tone: string | null; line: string | null; step: { kind: string; label: string } | null; note?: string | null }
+const tinTone = (tone: string | null | undefined): "danger" | "warning" | "accent" => (tone === "danger" ? "danger" : tone === "warning" ? "warning" : "accent");
+
 /** A saved taxpayer as `ebirforms_taxpayers_list` answers it: the same rows
  *  as the Tax profiles card. */
 interface TaxpayerRow { ticket: string; name: string; tin_display: string; taxpayer_type: string; rdo_code: string; rdo_office: string }
@@ -918,6 +923,18 @@ const NOT_HERE = "This taxpayer isn't in eBIRForms. It may have been deleted, or
 function Picker(p: { notice?: string } = {}) {
   const rows = signal<TaxpayerRow[] | null>(null);
   const failed = signal("");
+  /** The state chips by taxpayer ticket: only taxpayers whose TIN is not active. */
+  const chips = signal<Record<string, TinGate>>({});
+  const loadChips = () => {
+    buwiz
+      .call!("ebirforms_account_tins", {})
+      .then((r: any) => {
+        const found: Record<string, TinGate> = {};
+        for (const g of Array.isArray(r?.result?.rows) ? r.result.rows : []) if (g?.ticket && g.chip) found[String(g.ticket)] = g;
+        chips.set(found);
+      })
+      .catch(() => chips.set({}));
+  };
   const load = () => {
     failed.set("");
     buwiz
@@ -927,6 +944,7 @@ function Picker(p: { notice?: string } = {}) {
         rows.set(list);
         // none saved: straight to the form (unless there is a notice to read)
         if (!list.length && !p.notice) adding.set(true);
+        else loadChips();
       })
       .catch((e) => failed.set(errorText(e)));
   };
@@ -969,6 +987,9 @@ function Picker(p: { notice?: string } = {}) {
                   <View onPress={() => void open(t().ticket)} activeStyle={{ opacity: 0.7 }} role="button" accessibilityLabel={`Open ${t().name}'s tax profile`}>
                     <Row first={i() === 0}>
                       <NameCell title={t().name} sub={[t().tin_display, t().taxpayer_type, rdo(t())].filter(Boolean).join(" · ")} />
+                      <If when={Boolean(chips()[t().ticket])}>
+                        <Chip label={chips()[t().ticket]?.chip || ""} tone={tinTone(chips()[t().ticket]?.tone)} />
+                      </If>
                       <Text class={`text-sm ${C.fg3}`}>›</Text>
                     </Row>
                   </View>
@@ -1377,6 +1398,30 @@ function Profile(p: { tin: string }) {
   });
   const head = computed(() => tp()?.branches.find((b) => b.is_head_office) || null);
   const tin = computed(() => branch()?.tin || "");
+
+  /** This branch's TIN on the Buwiz account, worded by BIR (Check again reads it anew). A failed read shows nothing. */
+  const checks = signal(0);
+  const gate = resource(
+    () => !!tin() && { tin: tin(), again: checks() },
+    async (q) => {
+      try {
+        const r: any = await buwiz.call!("ebirforms_account_tins", { ticket: TICKET, tin: q.tin, ...(q.again ? { refresh: true } : {}) });
+        return (r?.result?.rows?.[0] as TinGate | undefined) ?? null;
+      } catch {
+        return null;
+      }
+    },
+    { initialValue: null as TinGate | null },
+  );
+  /** A step's page on account.buwiz.com (the Bot asks first). */
+  const openStep = async (kind: string) => {
+    try {
+      const r: any = await buwiz.call!("ebirforms_account_tin_link", { ticket: TICKET, tin: tin(), step: kind });
+      if (r?.result?.url) await buwiz.open!({ url: String(r.result.url) });
+    } catch (e) {
+      say(errorText(e), false);
+    }
+  };
 
   const years = resource(
     () => !!tin() && { tin: tin(), v: ver() },
@@ -1813,6 +1858,21 @@ function Profile(p: { tin: string }) {
           />
           <Button label="New return" variant="primary" onPress={() => openForms("New return", tin(), root())} />
         </View>
+        <If when={Boolean(gate()?.chip)}>
+          <View class="gap-1">
+            <View class="flex-row flex-wrap items-center gap-2">
+              <Chip label={gate()?.chip || ""} tone={tinTone(gate()?.tone)} />
+              <Text class={`text-xs flex-1 ${C.fg}`} style={{ minWidth: 200 }}>{gate()?.line || ""}</Text>
+              <If when={Boolean(gate()?.step)}>
+                <Button label={gate()?.step?.label || ""} onPress={() => void openStep(gate()?.step?.kind || "")} />
+              </If>
+              <Button label="Check again" onPress={() => checks.set(checks() + 1)} />
+            </View>
+            <If when={Boolean(gate()?.note)}>
+              <Text class={`text-xs ${C.fg2}`}>{gate()?.note || ""}</Text>
+            </If>
+          </View>
+        </If>
         <Segmented
           options={[
             { value: "profile", label: "Profile" },

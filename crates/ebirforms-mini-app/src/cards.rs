@@ -18,8 +18,8 @@ use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::server::{
-    ACCOUNT_TIN_LINK, ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, RDO_LOOKUP,
-    TAXPAYERS_LIST,
+    ACCOUNT_TIN_LINK, ACCOUNT_TINS, ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST,
+    RDO_LOOKUP, TAXPAYERS_LIST,
 };
 use crate::tickets;
 
@@ -43,7 +43,8 @@ pub(crate) fn refresh_tools(app: &str) -> &'static [&'static str] {
         // ACCOUNT_TIN_LINK: where a refused return's step button opens
         "card-dates" => &[CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, ACCOUNT_TIN_LINK],
         "card-calc" => &[RDO_LOOKUP, ATC_LOOKUP],
-        "card-people" => &[TAXPAYERS_LIST],
+        // ACCOUNT_TINS: each taxpayer's state chip
+        "card-people" => &[TAXPAYERS_LIST, ACCOUNT_TINS],
         _ => &[],
     }
 }

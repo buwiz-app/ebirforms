@@ -34,7 +34,8 @@ use crate::server::{
 pub(crate) const PROTOCOL: &str = buwiz_plugin::manifest::PROTOCOL;
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
-/// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0 release).
+/// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0
+/// release; 0.4.0 adds the TIN state tools and the account link).
 pub(crate) const VERSION: &str = "0.3.3";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
@@ -243,10 +244,14 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
         ),
         TAX_PROFILE_ID => {
             // the picker of an open with no taxpayer: the saved taxpayers
+            // ACCOUNT_TINS, ACCOUNT_TIN_LINK: the state chips of the picker and
+            // the header's line, step and Check again
             let mut tools = vec![
                 TICKET_SUBJECT.to_string(),
                 TICKET_ISSUE.to_string(),
                 TAXPAYERS_LIST.to_string(),
+                ACCOUNT_TINS.to_string(),
+                ACCOUNT_TIN_LINK.to_string(),
             ];
             tools.extend(host_tools(scope::TAX_PROFILE));
             (
@@ -266,7 +271,7 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
                 json!(["full"]),
                 None,
                 // BIR Forms, and a new taxpayer's own profile (New taxpayer)
-                json!({ "tools": tools, "open": { "apps": [FORMS_ID, TAX_PROFILE_ID] }, "copy": true }),
+                json!({ "tools": tools, "open": { "apps": [FORMS_ID, TAX_PROFILE_ID], "external": [ACCOUNT_SITE] }, "copy": true }),
             )
         }
         CALENDAR_ID => {
