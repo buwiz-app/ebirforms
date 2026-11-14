@@ -213,8 +213,8 @@ async function main() {
     const forged = await post("/v1/host/call", envelope(forms, "ebirforms_app_screen_forms_index", { args: [] }, {}, generate().seed));
     check("an envelope signed by another key is refused", refused(forged, "bad_signature"));
     const names = await broker("surface");
-    const accountTools = ["status", "sign_in_start", "sign_in_poll", "sign_out"].map((s) => `ebirforms_account_${s}`);
-    check("all four account tools are absent from the assistant surface", accountTools.every((t) => !names.includes(t)));
+    const accountTools = ["status", "sign_in_start", "sign_in_poll", "sign_out", "tins", "tin_link"].map((s) => `ebirforms_account_${s}`);
+    check("all six account tools are absent from the assistant surface", accountTools.every((t) => !names.includes(t)));
     check("New taxpayer is absent from the assistant surface", !names.includes("ebirforms_app_create_taxpayer"));
     for (const tool of accountTools) {
       const agent = await broker("agent", tool);

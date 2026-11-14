@@ -6,7 +6,10 @@
 // It reads the taxpayers itself when it mounts (its props' `tool`,
 // `ebirforms_taxpayers_list`, an app's call): its props hold no taxpayer,
 // so nothing about them reaches the chat, the assistant or the Bot's log of
-// an open, and the TIN it shows is only on screen. It changes nothing.
+// an open, and the TIN it shows is only on screen. A taxpayer whose TIN is
+// not active on the Buwiz account gets BIR's chip for its state
+// (`ebirforms_account_tins`, read after the list; none when active, unknown
+// or signed out). It changes nothing.
 //
 // It does what the card kit (card-kit.tsx.in) does for the other cards
 // (the read, `buwiz.ready`, `buwiz.fit`, the card frame and rows), written
@@ -27,7 +30,20 @@ const K = {
   fg3: "text-[#1c1c1c66] dark:text-[#f5f5f566]",
   accentBg: "bg-[#1680f3] dark:bg-[#1884fc]",
   danger: "text-[#c62828] dark:text-[#ff6b6b]",
+  warn: "text-[#b26a00] dark:text-[#ffb74d]",
+  accent: "text-[#1680f3] dark:text-[#1884fc]",
 };
+const tones: Record<string, [string, string]> = {
+  danger: ["bg-[#c628281a] dark:bg-[#ff6b6b26]", K.danger],
+  warning: ["bg-[#b26a001a] dark:bg-[#ffb74d26]", K.warn],
+  info: ["bg-[#1680f31a] dark:bg-[#1884fc26]", K.accent],
+};
+
+/** A taxpayer's state chip on the Buwiz account, as BIR words it. */
+interface StateChip {
+  chip: string;
+  tone: string;
+}
 
 interface TaxpayerRow {
   ticket: string;
@@ -46,6 +62,8 @@ const answerOf = (r: any): any => (r && typeof r === "object" && "result" in r ?
 const rows = signal<TaxpayerRow[] | null>(null);
 const failure = signal("");
 const busy = signal(false);
+/** The state chips by taxpayer ticket: only taxpayers whose TIN is not active. */
+const chips = signal<Record<string, StateChip>>({});
 
 /** Tells the Bot the card's data is in: the manifest's `inline.wait_ready`
  *  holds its placeholder until then. */
@@ -63,7 +81,20 @@ async function load() {
     ready();
   }
 }
-load();
+/** The chips, once the account's list is read; a failed read leaves none. */
+async function loadChips() {
+  try {
+    const got = answerOf(await buwiz.call!("ebirforms_account_tins", {}));
+    const found: Record<string, StateChip> = {};
+    for (const r of Array.isArray(got?.rows) ? got.rows : []) {
+      if (r?.ticket && r.chip) found[String(r.ticket)] = { chip: String(r.chip), tone: String(r.tone || "info") };
+    }
+    chips.set(found);
+  } catch {
+    chips.set({});
+  }
+}
+load().then(loadChips);
 
 /** Opens Tax Profile: on a taxpayer's ticket, or on its New taxpayer form. */
 async function openProfile(ticket?: string) {
@@ -129,6 +160,11 @@ function Row(p: { t: TaxpayerRow }) {
           {[p.t.tin_display, p.t.taxpayer_type, rdo()].filter(Boolean).join(" · ")}
         </Text>
       </View>
+      <If when={Boolean(chips()[p.t.ticket])}>
+        <View class={`rounded-full px-2 py-0.5 ${(tones[chips()[p.t.ticket]?.tone] || tones.info)[0]}`}>
+          <Text class={`text-xs font-semibold ${(tones[chips()[p.t.ticket]?.tone] || tones.info)[1]}`}>{chips()[p.t.ticket]?.chip || ""}</Text>
+        </View>
+      </If>
       <Text class={`text-sm ${K.fg3}`}>›</Text>
     </View>
   );

@@ -29,7 +29,7 @@ use bir_app_core::{BirApp, FieldValue, OpenReturn, OpenedReturn, ReturnFilter};
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
-use crate::account::Account;
+use crate::account::{self, Account};
 use crate::answers;
 use crate::cards;
 use crate::manifest::{self, ManifestSource};
@@ -40,6 +40,7 @@ use crate::scope::{self, Access, Rule};
 use crate::scrub::{self, Scrubber};
 use crate::sources::{self, Source, Sources};
 use crate::tickets::{self, Subject};
+use crate::tins;
 
 pub(crate) const SERVER_NAME: &str = "ebirforms-mini-app";
 pub(crate) const LATEST_PROTOCOL: &str = "2025-06-18";
@@ -90,6 +91,10 @@ pub(crate) const ACCOUNT_STATUS: &str = "ebirforms_account_status";
 pub(crate) const ACCOUNT_SIGN_IN_START: &str = "ebirforms_account_sign_in_start";
 pub(crate) const ACCOUNT_SIGN_IN_POLL: &str = "ebirforms_account_sign_in_poll";
 pub(crate) const ACCOUNT_SIGN_OUT: &str = "ebirforms_account_sign_out";
+/// The account's TINs and their states, and the link a step opens (tins.rs):
+/// for the apps that show a TIN's state, never the assistant's.
+pub(crate) const ACCOUNT_TINS: &str = "ebirforms_account_tins";
+pub(crate) const ACCOUNT_TIN_LINK: &str = "ebirforms_account_tin_link";
 const ACCOUNT_TOOLS: [&str; 4] = [
     ACCOUNT_STATUS,
     ACCOUNT_SIGN_IN_START,
@@ -323,7 +328,7 @@ impl Server {
             return Ok(self.account_tool(name, arguments));
         }
         if is_app_only(name) {
-            return Ok(self.app_tool(&app, name, arguments));
+            return Ok(self.app_tool(&app, name, arguments, caller.app.as_deref()));
         }
         // as the caller sent them (tickets), for the card the answer carries
         let sent = arguments.clone();
@@ -405,16 +410,206 @@ impl Server {
         call_result(answer.map_err(|message| format!("{name}: {message}")))
     }
 
-    fn app_tool(&mut self, app: &Arc<BirApp>, name: &str, arguments: &Map<String, Value>) -> Value {
+    fn app_tool(
+        &mut self,
+        app: &Arc<BirApp>,
+        name: &str,
+        arguments: &Map<String, Value>,
+        caller: Option<&str>,
+    ) -> Value {
         let today = taxform::today();
         let answer = match name {
             TICKET_SUBJECT => ticket_subject(app, arguments, today),
             TICKET_ISSUE => ticket_issue(app, arguments, today),
             TAXPAYERS_LIST => no_arguments(arguments).and_then(|()| taxpayers_list(app)),
+            ACCOUNT_TINS => self.account_tins(app, arguments, caller),
+            ACCOUNT_TIN_LINK => self.account_tin_link(app, arguments),
             PRINT_PREVIEW => return print_preview(app, arguments, today),
             _ => self.host_call(app, name, arguments),
         };
         call_result(answer.map_err(|message| format!("{name}: {message}")))
+    }
+
+    /// The Queue gate in the host call path (a stale screen's press): a
+    /// return whose TIN the account's list says cannot send is refused with
+    /// the state's line and nothing is queued. A list that cannot be read,
+    /// an old server's incomplete one or a state this build does not know
+    /// is no reason to refuse: the send decides. The list is at most 15
+    /// seconds old (a person who just fixed the TIN is not held to an older
+    /// one).
+    fn queue_gate(&self, function: &str, args: &[Value]) -> Result<(), String> {
+        // a queue call whose TIN cannot be read is not waved through
+        let Some(tin) = scope::queue_tin(function, args)
+            .filter(|tin| bir_app_core::TinKey::parse(tin).is_some())
+        else {
+            return Err(
+                "This return names no TIN eBIRForms can check on your Buwiz account. Nothing was queued."
+                    .to_string(),
+            );
+        };
+        let read = self
+            .account
+            .tins_within(account::QUEUE_AGE, account::GATE_WAIT);
+        let gate = tins::gate_for(&tin, &read, account::now());
+        match gate.statement {
+            Some(statement) if !gate.can_queue => {
+                Err(format!("{} Nothing was queued.", statement.line))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `ebirforms_account_tins {ticket?, tin?, refresh?}`: each TIN's state
+    /// on the Buwiz account, for a screen: with no ticket one row per saved
+    /// taxpayer (its head office, by taxpayer ticket); with a ticket one row
+    /// per branch of that taxpayer; with `tin` too, that one TIN (held to the
+    /// ticket's taxpayer), the only form that carries staff's note. A row is
+    /// `{ticket, branch, state, chip, line, next, step, can_queue}`: no TIN,
+    /// no registered name, no account email. `refresh` is "Check again".
+    fn account_tins(
+        &mut self,
+        app: &Arc<BirApp>,
+        arguments: &Map<String, Value>,
+        caller: Option<&str>,
+    ) -> Result<Value, String> {
+        reject_unknown(arguments, &["ticket", "tin", "refresh"])?;
+        // every saved taxpayer, for the apps that list them
+        if !arguments.contains_key("ticket")
+            && !matches!(
+                caller,
+                Some(manifest::CARD_PEOPLE_ID | manifest::TAX_PROFILE_ID)
+            )
+        {
+            return Err(
+                "without a `ticket` this answers the apps that list every taxpayer only".into(),
+            );
+        }
+        let ticket = text_arg(arguments, "ticket")?;
+        let tin = text_arg(arguments, "tin")?;
+        let refresh = match arguments.get("refresh") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(refresh)) => *refresh,
+            Some(_) => return Err("`refresh` must be true or false".into()),
+        };
+        // the TINs asked about: (TIN digits, with staff's note)
+        let asked: Vec<(String, bool)> = match (&ticket, &tin) {
+            (None, Some(_)) => return Err("`tin` goes with the app's `ticket`".into()),
+            (None, None) => app
+                .list_taxpayers()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|taxpayer| !taxpayer.archived)
+                .map(|taxpayer| {
+                    (
+                        format!("{}00000", tickets::digits(&taxpayer.tin_root)),
+                        false,
+                    )
+                })
+                .collect(),
+            (Some(ticket), None) => {
+                let root = tickets::subject_of(app, ticket)?.root();
+                let taxpayer = app
+                    .get_taxpayer(&root)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("the taxpayer of this ticket is no longer saved in eBIRForms")?;
+                taxpayer
+                    .branches
+                    .iter()
+                    .map(|branch| (tickets::digits(&branch.tin), false))
+                    .collect()
+            }
+            (Some(ticket), Some(tin)) => {
+                let root = tickets::subject_of(app, ticket)?.root();
+                if scope::root_of(&Value::String(tin.clone())).as_deref() != Some(root.as_str()) {
+                    return Err(
+                        "`tin` is another taxpayer's: a ticket reaches its own taxpayer only"
+                            .into(),
+                    );
+                }
+                // a branch that is saved: no ticket is made for another
+                let key = bir_app_core::TinKey::parse(tin).ok_or("`tin` is not a TIN")?;
+                let full = format!("{}{}", key.root(), key.branch());
+                let taxpayer = app
+                    .get_taxpayer(&root)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("the taxpayer of this ticket is no longer saved in eBIRForms")?;
+                if !taxpayer
+                    .branches
+                    .iter()
+                    .any(|b| tickets::digits(&b.tin) == full)
+                {
+                    return Err("no such branch is saved in eBIRForms".into());
+                }
+                vec![(full, true)]
+            }
+        };
+        let read = if refresh {
+            self.account.refresh_tins()
+        } else {
+            self.account.tins(account::SCREEN_AGE)
+        };
+        let subjects: Vec<Option<Subject>> =
+            asked.iter().map(|(tin, _)| Subject::of_tin(tin)).collect();
+        let issued = tickets::issue_all(app, &subjects)?;
+        let now = account::now();
+        let rows = asked
+            .iter()
+            .zip(issued)
+            .filter_map(|((tin, with_note), ticket)| {
+                let key = bir_app_core::TinKey::parse(tin)?;
+                Some(tins::row(
+                    &ticket?,
+                    key.branch(),
+                    tin,
+                    &read,
+                    now,
+                    *with_note,
+                ))
+            })
+            .collect();
+        Ok(tins::answer(&read, rows))
+    }
+
+    /// `ebirforms_account_tin_link {ticket, tin?, step}`: where a step's
+    /// button opens, as `{url}`, for the TIN of the ticket (or `tin`, held to
+    /// its taxpayer). Only "add" puts a TIN in the link; verify and fix open
+    /// the row's own page. It answers a page of account.buwiz.com and nothing
+    /// else, whatever the server's list said.
+    fn account_tin_link(
+        &mut self,
+        app: &Arc<BirApp>,
+        arguments: &Map<String, Value>,
+    ) -> Result<Value, String> {
+        reject_unknown(arguments, &["ticket", "tin", "step"])?;
+        let subject = tickets::subject_of(app, ticket_arg(arguments)?)?;
+        let tin = match text_arg(arguments, "tin")? {
+            Some(tin) => {
+                if scope::root_of(&Value::String(tin.clone())).as_deref()
+                    != Some(subject.root().as_str())
+                {
+                    return Err(
+                        "`tin` is another taxpayer's: a ticket reaches its own taxpayer only"
+                            .into(),
+                    );
+                }
+                tin
+            }
+            None => subject.full_tin(),
+        };
+        let step = match text_arg(arguments, "step")?.as_deref() {
+            Some("add") => bir_app_core::TinStep::Add,
+            Some("verify") => bir_app_core::TinStep::Verify,
+            Some("fix") => bir_app_core::TinStep::Fix,
+            _ => return Err("`step` must be add, verify or fix".into()),
+        };
+        // the list is read only for a step that opens the row's own page
+        let read = if step == bir_app_core::TinStep::Add {
+            Err(bir_submit::TinsError::SignedOut)
+        } else {
+            self.account.tins(account::SCREEN_AGE)
+        };
+        let url = tins::link_for(step, &tin, &read)?;
+        Ok(json!({ "url": url }))
     }
 
     /// One `ebirforms_app_<function>` call: arguments read, the ticket turned into
@@ -443,8 +638,11 @@ impl Server {
         if let Some(root) = &root {
             scope::check_args(function, rule, &args, root)?;
         }
-        if access == Access::Queue && !self.account.signed_in() {
-            return Err(owner::SIGN_IN_FIRST.to_string());
+        if access == Access::Queue {
+            if !self.account.signed_in() {
+                return Err(owner::SIGN_IN_FIRST.to_string());
+            }
+            self.queue_gate(function, &args)?;
         }
         // the New taxpayer form: checked by field, answered by ticket
         if rule == Rule::New {
@@ -460,6 +658,11 @@ impl Server {
         let value = match &root {
             Some(root) => scope::filter_result(function, rule, &args, value, root)?,
             None => value,
+        };
+        let value = if function == "queued_send_state" {
+            tins::with_button_and_note(value)
+        } else {
+            value
         };
         if rule == Rule::Rows {
             return with_tickets(app, value);
@@ -489,7 +692,15 @@ impl Server {
             RDO_LOOKUP => rdo_lookup(app, arguments),
             ATC_LOOKUP => answers::atc_lookup(arguments),
             PENALTY_ESTIMATE => answers::penalty_estimate(arguments, today),
-            QUEUE_LIST => answers::queue_list(app, arguments, today, self.account.signed_in()),
+            QUEUE_LIST => {
+                // the account's TIN list is asked only if a row needs it
+                let read = || {
+                    self.account
+                        .tins_within(crate::account::ASSISTANT_AGE, crate::account::GATE_WAIT)
+                };
+                let live = answers::Live::new(&read, crate::account::now());
+                answers::queue_list(app, arguments, today, self.account.signed_in(), &live)
+            }
             DRAFTS_LIST => drafts_list(app, arguments),
             FORM_OPEN => self.form_open(app, arguments, today),
             FORM_FIELDS => self.form_fields(arguments),
@@ -956,7 +1167,15 @@ pub(crate) fn app_tool_name(function: &str) -> String {
 }
 
 fn is_app_only(name: &str) -> bool {
-    [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, TAXPAYERS_LIST].contains(&name)
+    [
+        TICKET_SUBJECT,
+        TICKET_ISSUE,
+        PRINT_PREVIEW,
+        TAXPAYERS_LIST,
+        ACCOUNT_TINS,
+        ACCOUNT_TIN_LINK,
+    ]
+    .contains(&name)
         || ACCOUNT_TOOLS.contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
@@ -972,7 +1191,15 @@ fn is_app_only(name: &str) -> bool {
 /// calls, and the app-only tools here refuse those callers there anyway.
 fn read_only(name: &str) -> bool {
     READ_ONLY.contains(&name)
-        || [TICKET_SUBJECT, TICKET_ISSUE, TAXPAYERS_LIST, ACCOUNT_STATUS].contains(&name)
+        || [
+            TICKET_SUBJECT,
+            TICKET_ISSUE,
+            TAXPAYERS_LIST,
+            ACCOUNT_STATUS,
+            ACCOUNT_TINS,
+            ACCOUNT_TIN_LINK,
+        ]
+        .contains(&name)
         || name
             .strip_prefix(APP_PREFIX)
             .and_then(scope::find)
@@ -2752,6 +2979,35 @@ fn tool_list() -> Value {
             true,
         ),
     ];
+    tools.push(app_only(
+        ACCOUNT_TINS,
+        "each TIN's state on the Buwiz account (active, not on the account, not verified, waiting for review, sent back, paused, account banned, can't send) as a chip, one line, what to do next and the step's button label, for the Tax profiles card, the tax profile header and the Forms app. No `ticket`: one row per saved taxpayer. `ticket`: one row per branch of that taxpayer. `ticket` and `tin`: that one TIN, with staff's note. `refresh`: Check again. Never a TIN, a registered name or an email.",
+        json!({
+            "type": "object",
+            "properties": {
+                "ticket": { "type": "string" },
+                "tin": { "type": "string" },
+                "refresh": { "type": "boolean" }
+            },
+            "additionalProperties": false
+        }),
+        true,
+    ));
+    tools.push(app_only(
+        ACCOUNT_TIN_LINK,
+        "where a step's button opens on account.buwiz.com, as `{url}`: `step` add (carries the TIN), verify or fix (the row's own page), for the ticket's taxpayer (or its `tin`). Only a page of account.buwiz.com is ever answered.",
+        json!({
+            "type": "object",
+            "properties": {
+                "ticket": { "type": "string" },
+                "tin": { "type": "string" },
+                "step": { "type": "string", "enum": ["add", "verify", "fix"] }
+            },
+            "required": ["ticket", "step"],
+            "additionalProperties": false
+        }),
+        true,
+    ));
     for (name, description, read_only) in [
         (
             ACCOUNT_STATUS,

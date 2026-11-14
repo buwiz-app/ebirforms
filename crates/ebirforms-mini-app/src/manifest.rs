@@ -25,16 +25,18 @@ use crate::cards;
 use crate::jcs;
 use crate::scope;
 use crate::server::{
-    ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS, CALENDAR_GET,
-    PRINT_PREVIEW, RESOLVE, TAXPAYERS_LIST, TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
+    ACCOUNT_SIGN_IN_POLL, ACCOUNT_SIGN_IN_START, ACCOUNT_SIGN_OUT, ACCOUNT_STATUS,
+    ACCOUNT_TIN_LINK, ACCOUNT_TINS, CALENDAR_GET, PRINT_PREVIEW, RESOLVE, TAXPAYERS_LIST,
+    TICKET_ISSUE, TICKET_SUBJECT, app_tool_name,
 };
 
 /// The protocol this plugin speaks: the SDK's (1.0.0).
 pub(crate) const PROTOCOL: &str = buwiz_plugin::manifest::PROTOCOL;
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
-/// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0 release).
-pub(crate) const VERSION: &str = "0.3.3";
+/// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0
+/// release; 0.4.0 adds the TIN state tools and the account link).
+pub(crate) const VERSION: &str = "0.4.0";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -56,7 +58,8 @@ pub(crate) const CALENDAR_SOURCE: &str = include_str!("../../../apps/ebirforms/c
 /// Buwiz sign-in (account.buwiz.com's device flow).
 pub(crate) const REGISTER_ID: &str = "register";
 pub(crate) const REGISTER_SOURCE: &str = include_str!("../../../apps/ebirforms/register.tsx");
-/// The only page the Sign-in app opens.
+/// The only page the Sign-in app opens, and where a TIN's step buttons
+/// (Add it, Verify it, Fix it) open: one origin, the Bot asks on every press.
 const ACCOUNT_SITE: &str = "https://account.buwiz.com";
 /// The next returns due, as a card in the chat.
 pub(crate) const DEADLINES_ID: &str = "deadlines";
@@ -175,10 +178,19 @@ fn host_tools(functions: &[&str]) -> Vec<String> {
 /// and one `ebirforms_app_<function>` per function.
 pub(crate) fn forms_tools() -> Vec<String> {
     // TAXPAYERS_LIST: the picker of an open with no taxpayer (or one gone)
-    let mut tools: Vec<String> = [TICKET_SUBJECT, TICKET_ISSUE, PRINT_PREVIEW, TAXPAYERS_LIST]
-        .iter()
-        .map(|tool| tool.to_string())
-        .collect();
+    // ACCOUNT_TINS, ACCOUNT_TIN_LINK: the TIN's state on the Buwiz account
+    // under Queue, and where its step opens
+    let mut tools: Vec<String> = [
+        TICKET_SUBJECT,
+        TICKET_ISSUE,
+        PRINT_PREVIEW,
+        TAXPAYERS_LIST,
+        ACCOUNT_TINS,
+        ACCOUNT_TIN_LINK,
+    ]
+    .iter()
+    .map(|tool| tool.to_string())
+    .collect();
     tools.extend(host_tools(scope::FORMS));
     tools
 }
@@ -222,8 +234,8 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
             None,
             json!({
                 "tools": forms_tools(),
-                // the Tax profile button
-                "open": { "apps": [TAX_PROFILE_ID] },
+                // the Tax profile button, and a TIN's step on account.buwiz.com
+                "open": { "apps": [TAX_PROFILE_ID], "external": [ACCOUNT_SITE] },
                 // Ask the assistant: the taxpayer, or this return
                 "attach": ["taxprofile", "taxform"],
                 // the print preview in the Bot's document view
@@ -232,10 +244,14 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
         ),
         TAX_PROFILE_ID => {
             // the picker of an open with no taxpayer: the saved taxpayers
+            // ACCOUNT_TINS, ACCOUNT_TIN_LINK: the state chips of the picker and
+            // the header's line, step and Check again
             let mut tools = vec![
                 TICKET_SUBJECT.to_string(),
                 TICKET_ISSUE.to_string(),
                 TAXPAYERS_LIST.to_string(),
+                ACCOUNT_TINS.to_string(),
+                ACCOUNT_TIN_LINK.to_string(),
             ];
             tools.extend(host_tools(scope::TAX_PROFILE));
             (
@@ -255,7 +271,7 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
                 json!(["full"]),
                 None,
                 // BIR Forms, and a new taxpayer's own profile (New taxpayer)
-                json!({ "tools": tools, "open": { "apps": [FORMS_ID, TAX_PROFILE_ID] }, "copy": true }),
+                json!({ "tools": tools, "open": { "apps": [FORMS_ID, TAX_PROFILE_ID], "external": [ACCOUNT_SITE] }, "copy": true }),
             )
         }
         CALENDAR_ID => {
@@ -282,8 +298,10 @@ fn app_spec(id: &str) -> (Value, Value, Option<Value>, Value) {
         CARD_DATES_ID | CARD_CALC_ID | CARD_PEOPLE_ID => {
             let mut permissions = json!({ "tools": cards::refresh_tools(id) });
             if id == CARD_DATES_ID {
-                // Open (a return in Forms) and Open the Calendar
-                permissions["open"] = json!({ "apps": [FORMS_ID, CALENDAR_ID] });
+                // Open (a return in Forms), Open the Calendar, and the Sending
+                // queue's Add it, Verify it and Fix it on account.buwiz.com
+                permissions["open"] =
+                    json!({ "apps": [FORMS_ID, CALENDAR_ID], "external": [ACCOUNT_SITE] });
             }
             if id == CARD_PEOPLE_ID {
                 // a row opens its taxpayer's Tax Profile; New taxpayer, its form
@@ -640,6 +658,144 @@ mod tests {
                 "ebirforms_calendar_get",
             ]
         );
+    }
+
+    /// The words of a TIN's state are written once, in eBIRForms' table, and
+    /// reach a screen as `chip`, `line`, `next` and the step's `label`: no app
+    /// source holds one of its sentences (its text would drift from the Rust
+    /// side and from the desktop app's).
+    #[test]
+    fn no_app_source_writes_a_tin_state_sentence() {
+        use bir_app_core::{BirApp, TinRefusal};
+        let mut sentences = vec![BirApp::DRAFT_NOTE.to_string()];
+        for code in TinRefusal::ALL {
+            let statement = BirApp::tin_statement_for_refusal(code, None);
+            sentences.push(statement.line);
+            sentences.push(statement.next);
+        }
+        // the list's one state no refusal names
+        sentences.push("This Buwiz account is not allowed to send this TIN.".into());
+        sentences.push("Sign in to Buwiz first".into());
+        for app in &APPS {
+            for sentence in &sentences {
+                assert!(
+                    !app.source.contains(sentence.as_str()),
+                    "{} writes a state sentence: {sentence}",
+                    app.id
+                );
+            }
+        }
+    }
+
+    /// The Sending queue card only reads: its only calls are its card's
+    /// reads and the link a step opens, never one that queues, cancels or
+    /// releases a return.
+    #[test]
+    fn card_dates_still_has_no_queue_or_cancel_calls() {
+        for banned in [
+            "queue_form_draft",
+            "screen_form_queue",
+            "cancel_queue",
+            "release_abandoned_claim",
+            "ebirforms_app_",
+        ] {
+            assert!(
+                !CARD_DATES_SOURCE.contains(banned),
+                "card-dates mentions {banned}"
+            );
+        }
+    }
+
+    /// What 0.4.0 asks of the person that 0.3.3 did not, app by app: the
+    /// install review lists exactly these lines. Each app's permissions
+    /// without them hash to what 0.3.3 shipped (built from its source
+    /// at ee36f87), so nothing else was added, removed or changed.
+    #[test]
+    fn added_permissions_since_0_3_3_are_exactly_these() {
+        const EXTERNAL: &str = "https://account.buwiz.com";
+        // (app, tools added, origin added to open.external)
+        let added: [(&str, &[&str], bool); 4] = [
+            (
+                "forms",
+                &["ebirforms_account_tins", "ebirforms_account_tin_link"],
+                true,
+            ),
+            (
+                "tax-profile",
+                &["ebirforms_account_tins", "ebirforms_account_tin_link"],
+                true,
+            ),
+            ("card-dates", &["ebirforms_account_tin_link"], true),
+            ("card-people", &["ebirforms_account_tins"], false),
+        ];
+        // sha256(JCS(permissions)) of every app in the 0.3.3 manifest
+        let shipped = [
+            (
+                "forms",
+                "5fc93f64a160939b886a6b5b541d790c9efeff3ddd64de3a43112b56ed94d860",
+            ),
+            (
+                "tax-profile",
+                "7f79e34cd776c89da515d8a3a3bd5a07e89275e373e00b8b2f399396f3ba0240",
+            ),
+            (
+                "calendar",
+                "9ae1859f22cf21d9810b346652f03b6f0ca0c02d163d9ca1c811851c554918d1",
+            ),
+            (
+                "deadlines",
+                "417f697ea1a4f4edbbb713e378403b7aef419d7fa9916f15ce72097c0f58be0d",
+            ),
+            (
+                "register",
+                "d7022d238fac0115ada05c8c51949d7fc63ac1b9ec7f5ad0d09a679918cd0d47",
+            ),
+            (
+                "card-dates",
+                "951acce95864b2f3270cb5ce1a502b8195eb5ede979ca04a763f9eaaca7b844b",
+            ),
+            (
+                "card-calc",
+                "5831b952078e4602ea424e56035219192f772158a6e854d8a4aefe8014bbbf3f",
+            ),
+            (
+                "card-people",
+                "6b7d8e12b3f4a2c5c7387c66b59f2ad7bd906d8d0f0dd65ab31e2e929c3966c6",
+            ),
+        ];
+        let m = unsigned();
+        let apps = m["apps"].as_array().unwrap();
+        assert_eq!(apps.len(), shipped.len());
+        for (id, digest) in shipped {
+            let mut entry = apps
+                .iter()
+                .find(|app| app["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is shipped"))
+                .clone();
+            let (tools, external) = added
+                .iter()
+                .find(|(app, ..)| *app == id)
+                .map_or((&[][..], false), |(_, tools, external)| (*tools, *external));
+            let permissions = entry["permissions"].as_object_mut().unwrap();
+            let held = permissions["tools"].as_array_mut().unwrap();
+            for tool in tools {
+                let at = held
+                    .iter()
+                    .position(|held| held == tool)
+                    .unwrap_or_else(|| panic!("{id} lacks {tool}"));
+                held.remove(at);
+            }
+            if external {
+                let open = permissions["open"].as_object_mut().unwrap();
+                assert_eq!(open["external"], json!([EXTERNAL]), "{id}");
+                open.remove("external");
+            }
+            assert_eq!(
+                permissions_digest(&entry).unwrap(),
+                digest,
+                "{id}: its permissions are not 0.3.3's plus the added lines"
+            );
+        }
     }
 
     #[test]

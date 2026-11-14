@@ -9,7 +9,8 @@
 //! text made from centavos (`"1234.50"`).
 
 use bir_app_core::bir_core::forms::taxform::{self, TaxPeriod};
-use bir_app_core::{BirApp, SendStage};
+use bir_app_core::{BirApp, QueueGate, SendStage, TinRefusal, TinState, TinStatement};
+use bir_submit::TinsRead;
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
@@ -282,14 +283,118 @@ fn queue_period(year: i64, quarter: Option<i64>, month: Option<i64>) -> Option<T
     })
 }
 
-/// A return's stage as the card reads it.
-fn stage(stage: Option<&SendStage>, out: &mut Value) {
+/// The account's TIN list, read at most once and only when a return's row
+/// needs it (`ebirforms_queue_list` of a plain queue asks Buwiz nothing).
+pub(crate) struct Live<'a> {
+    read: &'a dyn Fn() -> TinsRead,
+    cached: std::cell::OnceCell<TinsRead>,
+    now: i64,
+}
+
+impl<'a> Live<'a> {
+    pub(crate) fn new(read: &'a dyn Fn() -> TinsRead, now: i64) -> Self {
+        Self {
+            read,
+            cached: std::cell::OnceCell::new(),
+            now,
+        }
+    }
+
+    /// The answer of a return that is no TIN refusal: no state, nothing read.
+    fn none(&self) -> QueueGate {
+        BirApp::tin_gate("", &[], self.now)
+    }
+
+    /// What the list says now about the return's TIN: unknown when it could
+    /// not be read, and then nothing hides or replaces a stored refusal.
+    fn gate(&self, tin: &str) -> QueueGate {
+        let read = self.cached.get_or_init(|| (self.read)());
+        BirApp::tin_gate(tin, std::slice::from_ref(read), self.now)
+    }
+}
+
+/// Add a TIN statement's words to a card row: the chip, the one line and
+/// the step's button. Never the staff note, and never the stored reason: an
+/// assistant reads this, and only the fixed sentences may reach it.
+///
+/// A sent-back TIN reads as its plain sentence whatever the source: the fixed
+/// reasons and staff's note are for app screens only (`ebirforms_account_tins`).
+fn tin_words(statement: &TinStatement, out: &mut Value) {
+    if statement.state == TinState::SentBack {
+        let plain = BirApp::tin_statement_for_refusal(TinRefusal::NeedsFix, None);
+        crate::tins::assistant_fields(&plain, out);
+    } else {
+        crate::tins::assistant_fields(statement, out);
+    }
+}
+
+/// The words of a stored TIN refusal (a refused draft, or a queued return
+/// that failed with a TIN code), without the server's text.
+fn stored_refusal(stage: &SendStage) -> Option<TinStatement> {
+    let code = match stage {
+        SendStage::Refused { code, .. } => *code,
+        SendStage::Failed { reason, .. } => TinRefusal::from_reason(reason)?,
+        _ => return None,
+    };
+    Some(BirApp::tin_statement_for_refusal(code, None))
+}
+
+/// Whether the list `gate` was read after the refusal at `refused_at`.
+fn newer_than(refused_at: Option<i64>, gate: &QueueGate) -> bool {
+    match (refused_at, gate.checked_at) {
+        (None, _) => true,
+        (Some(at), Some(read)) => read > at,
+        (Some(_), None) => true,
+    }
+}
+
+/// A return's stage as the card reads it. `gate`: what the account's list
+/// says now about the return's TIN. `false`: the row is not shown (a
+/// refusal the list says is fixed since).
+fn stage(
+    stage: Option<&SendStage>,
+    gate: &QueueGate,
+    refused_at: Option<i64>,
+    out: &mut Value,
+) -> bool {
+    // A refusal for the TIN (stored), as the account's list says it stands
+    // now. The stored words are the state's own sentence: the server's text
+    // in the stored reason is not copied, so the fixed reasons of a sent-back
+    // TIN come from the list's row or not at all.
+    if let Some(stored) = stage.and_then(stored_refusal) {
+        // a list read before the refusal says nothing about it; a TIN the list
+        // lets send (whatever its status) is not held back by a stored refusal
+        let shown =
+            BirApp::effective_statement_since(Some(stored), refused_at, gate).filter(|_| {
+                !(gate.can_queue && gate.unknown.is_none() && newer_than(refused_at, gate))
+            });
+        return match (stage, shown) {
+            (Some(SendStage::Refused { .. }), Some(statement)) => {
+                out["stage"] = json!("refused");
+                out["draft_note"] = json!(BirApp::DRAFT_NOTE);
+                tin_words(&statement, out);
+                true
+            }
+            (Some(SendStage::Refused { .. }), None) => false,
+            // a queued return that failed with a TIN code is asked again at once
+            (_, Some(statement)) => {
+                out["stage"] = json!("failed");
+                tin_words(&statement, out);
+                true
+            }
+            (_, None) => {
+                out["stage"] = json!("queued");
+                true
+            }
+        };
+    }
     let name = match stage {
         None | Some(SendStage::Queued { .. }) => "queued",
         Some(SendStage::Sending) => "sending",
         Some(SendStage::Failed { .. }) => "failed",
         Some(SendStage::NeedsAttention { .. }) => "needs_attention",
         Some(SendStage::GaveUp { .. }) => "gave_up",
+        Some(SendStage::Refused { .. }) => "refused",
         Some(SendStage::Sent { .. }) => "sent",
         Some(SendStage::Confirmed { .. }) => "confirmed",
         Some(SendStage::Paid) => "paid",
@@ -323,15 +428,21 @@ fn stage(stage: Option<&SendStage>, out: &mut Value) {
         }
         _ => {}
     }
+    true
 }
 
 /// `ebirforms_queue_list {}`: the returns waiting to be sent to the BIR,
-/// and those sent in the last 30 days, each named by its ticket (`key`).
+/// those sent in the last 30 days, and those Buwiz refused for their TIN
+/// (back to a draft), each named by its ticket (`key`). A refused return
+/// carries the state's chip and line and its step's button, from eBIRForms'
+/// wording table and nothing else of the server's text: this answer is the
+/// assistant's, and staff's free-text note never reaches it.
 pub(crate) fn queue_list(
     app: &BirApp,
     arguments: &Map<String, Value>,
     today: NaiveDate,
     signed_in: bool,
+    live: &Live,
 ) -> Result<Value, String> {
     reject_unknown(arguments, &[])?;
     let queue = app.list_queue().map_err(|error| error.to_string())?;
@@ -370,24 +481,115 @@ pub(crate) fn queue_list(
             "label": format!("{form} · {}", period.label()),
             "since": row.updated_at,
         });
-        stage(stages.get(&row.id), &mut out);
+        let sent_stage = stages.get(&row.id);
+        let tin_refusal = sent_stage.is_some_and(|stage| stored_refusal(stage).is_some());
+        let gate = if tin_refusal {
+            live.gate(&row.tin)
+        } else {
+            live.none()
+        };
+        stage(sent_stage, &gate, seconds_of(&row.updated_at), &mut out);
         if row.status == "Queued" {
             waiting.push(out);
         } else {
             sent.push(out);
         }
     }
+    let back_to_draft = back_to_draft(app, &since, today, live)?;
     Ok(json!({
         "mode": "queue",
         "sending": signed_in,
         "waiting": waiting,
+        "back_to_draft": back_to_draft,
         "sent": sent,
         "note": if signed_in {
-            "waiting: queued in Forms, sent to the BIR in the background. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
+            "waiting: queued in Forms, sent to the BIR in the background. back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line and what its step button does, and do not suggest sending it again or retrying. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
         } else {
-            "This computer is not signed in to Buwiz, so nothing is sent: the user signs in in the Sign-in app (ebirforms_app_open `register`). The user queues and cancels in the Forms app."
+            "This computer is not signed in to Buwiz, so nothing is sent: the user signs in in the Sign-in app (ebirforms_app_open `register`). back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line, and do not suggest retrying. The user queues and cancels in the Forms app."
         },
     }))
+}
+
+/// The returns Buwiz refused for their TIN, now drafts, from the last 30
+/// days: each by ticket with the chip, line and step of the state the
+/// account says now (a return whose TIN is active since is left out).
+fn back_to_draft(
+    app: &BirApp,
+    since: &str,
+    today: NaiveDate,
+    live: &Live,
+) -> Result<Vec<Value>, String> {
+    let refused: Vec<_> = app
+        .refused_returns()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|refused| refused.row.updated_at.as_str() >= since)
+        .filter_map(|refused| {
+            let form = taxform::form_code_of(&refused.row.form_code)?;
+            let period = refused_period(&refused.row)?;
+            Some((refused, form, period))
+        })
+        .collect();
+    let subjects: Vec<Option<Subject>> = refused
+        .iter()
+        .map(|(refused, form, period)| {
+            Some(Subject::Return(taxform::canonical_value(
+                &refused.row.tin,
+                form,
+                *period,
+            )))
+        })
+        .collect();
+    let keys = tickets::issue_all(app, &subjects)?;
+    let mut rows = Vec::new();
+    for ((refused, form, period), key) in refused.into_iter().zip(keys) {
+        let taxpayer = Subject::of_tin(&refused.row.tin)
+            .and_then(|subject| Subject::Taxpayer(subject.root()).title(app, today))
+            .unwrap_or_default();
+        let mut out = json!({
+            "key": key.unwrap_or_default(),
+            "taxpayer": taxpayer,
+            "form": form,
+            "period": period.canonical(),
+            "label": format!("{form} · {}", period.label()),
+            "since": refused.row.updated_at,
+        });
+        if stage(
+            Some(&refused.stage),
+            &live.gate(&refused.row.tin),
+            refused.refused_at(),
+            &mut out,
+        ) {
+            rows.push(out);
+        }
+    }
+    Ok(rows)
+}
+
+/// The period of a listed return, as its form is filed: by `queue_period`,
+/// as the waiting rows have it, so a period outside the form's range (month
+/// 0 or 13, quarter 5) falls back to the year and never panics.
+fn refused_period(row: &bir_app_core::ReturnRow) -> Option<TaxPeriod> {
+    let index = Some(row.period);
+    Some(match taxform::cadence(&row.form_code)? {
+        taxform::Cadence::Monthly => queue_period(row.taxable_year, None, index)?,
+        taxform::Cadence::Quarterly => queue_period(row.taxable_year, index, None)?,
+        taxform::Cadence::Annual | taxform::Cadence::AsNeeded => {
+            queue_period(row.taxable_year, None, None)?
+        }
+    })
+}
+
+/// A stored time (`updated_at`) in seconds since the epoch.
+fn seconds_of(text: &str) -> Option<i64> {
+    let text = text.trim();
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|at| at.timestamp())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+                .map(|at| at.and_utc().timestamp())
+        })
+        .ok()
 }
 
 #[cfg(test)]
@@ -558,6 +760,8 @@ mod tests {
                 at: at.clone(),
                 receipt: None,
             }),
+            &no_state(),
+            None,
             &mut bare,
         );
         assert_eq!(bare["stage"], "sent");
@@ -576,12 +780,347 @@ mod tests {
                     at: at.clone(),
                     receipt: Some(receipt),
                 }),
+                &no_state(),
+                None,
                 &mut row,
             );
             assert_eq!(row["receipt"], true);
             assert_eq!(row["dry_run"], dry_run, "{mode}");
             assert!(row.get("receipt_note").is_none());
         }
+    }
+
+    // ------------------------------------------------ a TIN's state on a row
+
+    use bir_submit::AccountTins;
+
+    /// The synthetic TIN of the repo's fixtures.
+    const TIN: &str = "000123453";
+
+    /// A gate that knows nothing: the list could not be read.
+    fn no_state() -> QueueGate {
+        BirApp::tin_gate("", &[], 0)
+    }
+
+    /// The gate for [`TIN`] from an account list with this one row.
+    fn gate_of(row: Value) -> QueueGate {
+        let list = AccountTins::parse(&json!({ "include": "all", "profiles": [row] }), 1_000);
+        BirApp::tin_gate(TIN, &[Ok(list)], 1_000)
+    }
+
+    fn account_row(status: &str, can_send: bool, extra: Value) -> Value {
+        let mut row = json!({
+            "tin": "000-123-453-00000", "registered_name": "SYNTHETIC TAXPAYER ONE",
+            "status": status, "can_send": can_send,
+        });
+        row.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        row
+    }
+
+    fn refused(code: TinRefusal, message: &str) -> SendStage {
+        SendStage::Refused {
+            code,
+            reason: format!(
+                "Not sent (nothing reached BIR): {message} ({})",
+                code.code()
+            ),
+        }
+    }
+
+    #[test]
+    fn a_refused_return_reads_its_state_line_and_step() {
+        let draft_note = "Back to a draft. Nothing was sent.";
+        let cases = [
+            (
+                TinRefusal::NotActive,
+                "not_on_account",
+                "Not on your Buwiz account",
+                "This TIN is not on your Buwiz account.",
+                Some(("add", "Add it")),
+            ),
+            (
+                TinRefusal::Unverified,
+                "not_verified",
+                "Not verified",
+                "This TIN is on your Buwiz account but not verified yet.",
+                Some(("verify", "Verify it")),
+            ),
+            (
+                TinRefusal::Pending,
+                "waiting_for_review",
+                "Waiting for review",
+                "Buwiz is reviewing this TIN. You can send it once it is approved.",
+                None,
+            ),
+            (
+                TinRefusal::NeedsFix,
+                "sent_back",
+                "Sent back",
+                "Buwiz sent this TIN back for a fix.",
+                Some(("fix", "Fix it")),
+            ),
+            (
+                TinRefusal::Paused,
+                "paused",
+                "Paused",
+                "Buwiz staff paused this TIN. It can't send until they turn it back on.",
+                None,
+            ),
+            (
+                TinRefusal::AccountBanned,
+                "account_banned",
+                "Account banned",
+                "This Buwiz account is banned, so nothing can be sent.",
+                None,
+            ),
+        ];
+        for (code, state, chip, line, step) in cases {
+            let message = if code == TinRefusal::NeedsFix {
+                "Sent back for a fix: A photo is too blurry to read."
+            } else {
+                "the server's own sentence"
+            };
+            let mut row = json!({});
+            assert!(stage(
+                Some(&refused(code, message)),
+                &no_state(),
+                None,
+                &mut row
+            ));
+            assert_eq!(row["stage"], "refused", "{code:?}");
+            assert_eq!(row["state"], state);
+            assert_eq!(row["chip"], chip);
+            assert_eq!(row["line"], line);
+            assert_eq!(row["draft_note"], draft_note);
+            match step {
+                Some((kind, label)) => {
+                    assert_eq!(row["step"], json!({ "kind": kind, "label": label }))
+                }
+                None => assert_eq!(row["step"], Value::Null),
+            }
+            assert!(row.get("reason").is_none(), "no stored text: {row}");
+        }
+        // the seventh state is the list's alone: an approved TIN this login may not send
+        let gate = gate_of(account_row("approved", false, json!({})));
+        let mut row = json!({});
+        assert!(stage(
+            Some(&refused(TinRefusal::NotActive, "x")),
+            &gate,
+            None,
+            &mut row
+        ));
+        assert_eq!(row["state"], "not_allowed");
+        assert_eq!(row["chip"], "Can't send");
+        assert_eq!(
+            row["line"],
+            "This Buwiz account is not allowed to send this TIN."
+        );
+        assert_eq!(row["step"], Value::Null);
+    }
+
+    #[test]
+    fn a_legacy_failed_row_with_a_tin_code_reads_the_line_not_the_retry_text() {
+        let failed = |reason: &str| SendStage::Failed {
+            reason: reason.into(),
+            attempts: 2,
+            next_retry_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        let mut row = json!({});
+        stage(
+            Some(&failed(
+                "Not sent (nothing reached BIR): this TIN is not active on your account (tin_not_active)",
+            )),
+            &no_state(),
+            None,
+            &mut row,
+        );
+        assert_eq!(row["stage"], "failed");
+        assert_eq!(row["chip"], "Not on your Buwiz account");
+        assert_eq!(row["line"], "This TIN is not on your Buwiz account.");
+        for key in ["reason", "attempts", "next_try", "draft_note"] {
+            assert!(row.get(key).is_none(), "{key}: {row}");
+        }
+        // a failure that is no TIN refusal keeps today's reading
+        let mut plain = json!({});
+        stage(
+            Some(&failed(
+                "Not sent (nothing reached BIR): the network is down",
+            )),
+            &no_state(),
+            None,
+            &mut plain,
+        );
+        assert_eq!(plain["stage"], "failed");
+        assert_eq!(
+            plain["reason"],
+            "Not sent (nothing reached BIR): the network is down"
+        );
+        assert_eq!(plain["attempts"], 2);
+        assert_eq!(plain["next_try"], "2099-01-01T00:00:00Z");
+        assert!(plain.get("chip").is_none(), "{plain}");
+    }
+
+    #[test]
+    fn a_refused_row_is_hidden_when_the_live_state_is_active() {
+        let active = gate_of(account_row("approved", true, json!({})));
+        let mut row = json!({});
+        assert!(!stage(
+            Some(&refused(TinRefusal::Unverified, "x")),
+            &active,
+            None,
+            &mut row
+        ));
+        // a queued return that failed with a TIN code is asked again at once
+        let mut waiting = json!({});
+        assert!(stage(
+            Some(&SendStage::Failed {
+                reason: "Not sent (nothing reached BIR): x (tin_unverified)".into(),
+                attempts: 1,
+                next_retry_at: Some("2099-01-01T00:00:00Z".into()),
+            }),
+            &active,
+            None,
+            &mut waiting
+        ));
+        assert_eq!(waiting["stage"], "queued");
+        assert!(waiting.get("chip").is_none() && waiting.get("reason").is_none());
+    }
+
+    #[test]
+    fn a_list_read_before_the_refusal_does_not_hide_it() {
+        let active = gate_of(account_row("approved", true, json!({})));
+        let stored = refused(TinRefusal::Unverified, "x");
+        // read at 1000: a refusal written at 2000 stands, one written at 500 is answered
+        let mut row = json!({});
+        assert!(stage(Some(&stored), &active, Some(2_000), &mut row));
+        assert_eq!(row["chip"], "Not verified", "{row}");
+        let mut row = json!({});
+        assert!(!stage(Some(&stored), &active, Some(500), &mut row));
+    }
+
+    #[test]
+    fn a_tin_the_server_lets_send_is_never_held_back_by_a_statement() {
+        // pending, but can_send: the gate answers can_queue with a statement
+        let info = gate_of(account_row("pending", true, json!({})));
+        assert!(info.can_queue && info.statement.is_some(), "{info:?}");
+        let mut row = json!({});
+        assert!(!stage(
+            Some(&refused(TinRefusal::Pending, "x")),
+            &info,
+            None,
+            &mut row
+        ));
+    }
+
+    #[test]
+    fn the_live_state_wins_over_the_stored_refusal() {
+        let live = gate_of(account_row("paused", false, json!({})));
+        let mut row = json!({});
+        assert!(stage(
+            Some(&refused(TinRefusal::NotActive, "x")),
+            &live,
+            None,
+            &mut row
+        ));
+        assert_eq!(row["chip"], "Paused");
+        assert_eq!(row["state"], "paused");
+    }
+
+    #[test]
+    fn staff_text_never_reaches_a_row() {
+        let note = "Retake it in daylight, JUANA DELA CRUZ";
+        let live = gate_of(account_row(
+            "needs_fix",
+            false,
+            json!({ "reasons": ["A photo is too blurry to read."], "note": note }),
+        ));
+        // an old stored message that carries a staff sentence
+        let stored = refused(
+            TinRefusal::NeedsFix,
+            "Sent back for a fix: A photo is too blurry to read. Staff: do not tell JUANA",
+        );
+        for gate in [&live, &no_state()] {
+            let mut row = json!({});
+            stage(Some(&stored), gate, None, &mut row);
+            let text = row.to_string();
+            assert!(
+                !text.contains("JUANA") && !text.contains("daylight"),
+                "{text}"
+            );
+            assert!(!text.contains("Staff:"), "{text}");
+            assert!(
+                row.get("note").is_none() && row.get("next").is_none(),
+                "{text}"
+            );
+        }
+        // the assistant gets the plain sentence, from the list's row too: the
+        // fixed reasons are for app screens
+        let mut row = json!({});
+        stage(Some(&stored), &live, None, &mut row);
+        assert_eq!(row["line"], "Buwiz sent this TIN back for a fix.");
+    }
+
+    #[test]
+    fn a_poisoned_reason_in_the_list_never_reaches_a_row() {
+        let live = gate_of(account_row(
+            "needs_fix",
+            false,
+            json!({ "reasons": ["Name does not match MARIA CLARA."], "note": "x" }),
+        ));
+        assert!(
+            live.statement.as_ref().unwrap().line.contains("MARIA"),
+            "the screens' own line does carry the reasons"
+        );
+        for stage_in in [
+            refused(TinRefusal::NeedsFix, "x"),
+            SendStage::Failed {
+                reason: "Not sent (nothing reached BIR): x (tin_needs_fix)".into(),
+                attempts: 1,
+                next_retry_at: None,
+            },
+        ] {
+            let mut row = json!({});
+            stage(Some(&stage_in), &live, None, &mut row);
+            assert!(!row.to_string().contains("MARIA"), "{row}");
+            assert_eq!(row["line"], "Buwiz sent this TIN back for a fix.");
+        }
+    }
+
+    #[test]
+    fn a_refused_row_with_a_bad_period_does_not_crash_and_reads_as_a_year() {
+        let row = |form: &str, period: i64| bir_app_core::ReturnRow {
+            id: 1,
+            tin: "000123453".into(),
+            taxpayer_name: String::new(),
+            branch_name: String::new(),
+            form_code: form.into(),
+            taxable_year: 2026,
+            period,
+            period_label: String::new(),
+            status: "Draft".into(),
+            updated_at: "2026-11-01 00:00:00".into(),
+            return_key: None,
+            extra: Map::new(),
+        };
+        for bad in [0, 13, -1, 300] {
+            let monthly = refused_period(&row("0619E", bad)).unwrap();
+            assert_eq!(monthly, TaxPeriod::Year(2026), "month {bad}");
+            assert!(!taxform::canonical_value("000123453", "0619E", monthly).is_empty());
+        }
+        assert_eq!(
+            refused_period(&row("2551Q", 5)),
+            Some(TaxPeriod::Year(2026))
+        );
+        assert_eq!(
+            refused_period(&row("0619E", 3)),
+            Some(TaxPeriod::Month {
+                year: 2026,
+                month: 3
+            })
+        );
+        assert_eq!(seconds_of("2026-11-01 00:00:00"), Some(1_793_491_200));
     }
 
     #[test]

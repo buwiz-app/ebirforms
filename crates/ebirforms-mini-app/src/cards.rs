@@ -10,13 +10,16 @@
 //! due, this week, this month, late returns) over the filing calendar, and
 //! `card-calc` (an RDO). Round 2 adds the penalty estimate and the sending
 //! queue to `card-dates`, and an ATC to `card-calc`. Every card only reads:
-//! none can queue, send or cancel. `props.card` says which card an app draws.
+//! none can queue, send or cancel. A card may open the Buwiz account page of a
+//! TIN (the Sending queue card's Add it, Verify it and Fix it, through
+//! `ebirforms_account_tin_link`). `props.card` says which card an app draws.
 
 use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::server::{
-    ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, RDO_LOOKUP, TAXPAYERS_LIST,
+    ACCOUNT_TIN_LINK, ACCOUNT_TINS, ATC_LOOKUP, CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST,
+    RDO_LOOKUP, TAXPAYERS_LIST,
 };
 use crate::tickets;
 
@@ -37,9 +40,11 @@ const KINDS: &[(&str, &str, bool)] = &[
 /// so not written in its source): all the app may call.
 pub(crate) fn refresh_tools(app: &str) -> &'static [&'static str] {
     match app {
-        "card-dates" => &[CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST],
+        // ACCOUNT_TIN_LINK: where a refused return's step button opens
+        "card-dates" => &[CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, ACCOUNT_TIN_LINK],
         "card-calc" => &[RDO_LOOKUP, ATC_LOOKUP],
-        "card-people" => &[TAXPAYERS_LIST],
+        // ACCOUNT_TINS: each taxpayer's state chip
+        "card-people" => &[TAXPAYERS_LIST, ACCOUNT_TINS],
         _ => &[],
     }
 }
@@ -339,6 +344,14 @@ mod tests {
             &mut answer,
         );
         assert_eq!(answer["_meta"]["buwiz/open"]["ticket"], ticket);
+    }
+
+    #[test]
+    fn the_deadlines_card_reads_and_opens_a_link_and_nothing_else() {
+        assert_eq!(
+            refresh_tools("card-dates"),
+            [CALENDAR_GET, PENALTY_ESTIMATE, QUEUE_LIST, ACCOUNT_TIN_LINK]
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod scrub;
 mod server;
 mod sources;
 mod tickets;
+mod tins;
 
 use std::io::{BufRead, Write};
 

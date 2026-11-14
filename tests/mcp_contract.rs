@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bir_app_core::{BirApp, BranchFacts, NewTaxpayer, OpenReturn, SendStage};
+use bir_app_core::{BirApp, BranchFacts, NewTaxpayer, OpenReturn, SendStage, TinRefusal};
 use ebirforms_mini_app::{ManifestSource, Server};
 use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::{Value, json};
@@ -647,6 +647,27 @@ fn the_bot_contract_over_a_scratch_database() {
         "permission_denied"
     );
 
+    // the TIN state tools need a certified open too (an open this process did
+    // not certify is refused), and answer a certified Forms open signed out
+    for name in ["ebirforms_account_tins", "ebirforms_account_tin_link"] {
+        let refused = bot.call_as(
+            json!({ "origin": "app", "app": "forms", "open_id": b64(&[9u8; 16]) }),
+            name,
+            json!({ "ticket": ticket, "step": "verify" }),
+        );
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {refused}"
+        );
+    }
+    let certified = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_account_tins",
+        json!({ "ticket": ticket, "tin": tin }),
+    );
+    assert_eq!(result_of(&certified)["read"], "signed_out", "{certified}");
+    assert_eq!(result_of(&certified)["rows"][0]["state"], "unknown");
+
     // the app learns its ticket's subject, and is held to it
     let subject = bot.call_as(
         forms_app.clone(),
@@ -892,7 +913,11 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert_eq!(
         result_of(&state),
-        &json!({ "stage": null, "reason": null, "claim": null, "releasable": false }),
+        &json!({
+            "stage": null, "reason": null, "claim": null, "releasable": false,
+            // the state's words, for a return Buwiz refused for its TIN
+            "chip": null, "line": null, "next": null, "step": null,
+        }),
         "{state}"
     );
 
@@ -1111,6 +1136,85 @@ fn the_bot_contract_over_a_scratch_database() {
     );
     assert_eq!(state_at(&mut bot, 2), second, "entry 2 is unchanged");
     assert_eq!(state_at(&mut bot, 1), first, "entry 1 is unchanged");
+
+    // Buwiz refused the 0619E for its TIN: it is a draft again, listed in the
+    // queue answer's own group with the state's chip and line, never a TIN
+    app.demo_set_send_stage(
+        id,
+        &SendStage::Refused {
+            code: TinRefusal::Unverified,
+            reason: "Not sent (nothing reached BIR): this TIN is not verified yet (tin_unverified)"
+                .into(),
+        },
+    )
+    .expect("a refused draft");
+    let listed = bot.agent("ebirforms_queue_list", json!({}));
+    let list = result_of(&listed).clone();
+    let drafts = list["back_to_draft"].as_array().unwrap();
+    assert_eq!(drafts.len(), 1, "{list}");
+    let refused = &drafts[0];
+    assert_eq!(refused["stage"], "refused");
+    assert_eq!(refused["chip"], "Not verified");
+    assert_eq!(
+        refused["line"],
+        "This TIN is on your Buwiz account but not verified yet."
+    );
+    assert_eq!(refused["draft_note"], "Back to a draft. Nothing was sent.");
+    assert_eq!(
+        refused["step"],
+        json!({ "kind": "verify", "label": "Verify it" })
+    );
+    assert_eq!(refused["form"], "0619E");
+    assert!(
+        refused["key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("tkt_"))
+    );
+    assert!(
+        list["waiting"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["form"] != "0619E"),
+        "a draft is not waiting: {list}"
+    );
+    // the Forms app reads the same refusal from the send state of the draft, with
+    // the draft note and its step's button worded by BIR
+    let refused_state = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_queued_send_state",
+        json!({ "args_json": json!([tin, "0619E", 2026, 1]).to_string(), "ticket": ticket }),
+    );
+    let refused_state = result_of(&refused_state);
+    assert_eq!(refused_state["stage"], "Refused", "{refused_state}");
+    assert_eq!(refused_state["chip"], "Not verified");
+    assert_eq!(
+        refused_state["line"],
+        "This TIN is on your Buwiz account but not verified yet."
+    );
+    assert_eq!(refused_state["tone"], "warning");
+    assert_eq!(
+        refused_state["reason"],
+        Value::Null,
+        "the raw server text is not for a screen"
+    );
+    assert_eq!(
+        refused_state["draft_note"],
+        "Back to a draft. Nothing was sent."
+    );
+    assert_eq!(
+        refused_state["step_button"],
+        json!({ "kind": "verify", "label": "Verify it" })
+    );
+    let digits = regex::Regex::new(r"[0-9]{9}").unwrap();
+    assert!(
+        !digits.is_match(&list.to_string()),
+        "no TIN in the queue answer: {list}"
+    );
+    assert!(
+        !list.to_string().contains("not verified yet (tin_"),
+        "the stored server text stays out: {list}"
+    );
 
     // the account tools are -32601 (protocol 1.0, 10.1): eBIRForms declares
     // no accounts, a pushed token is never echoed, and a push is never taken
