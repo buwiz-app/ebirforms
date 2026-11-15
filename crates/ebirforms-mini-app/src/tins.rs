@@ -10,7 +10,8 @@
 //! they come.
 
 use bir_app_core::{
-    BirApp, QueueGate, TinKey, TinRefusal, TinState, TinStatement, TinStep, TinTone,
+    BirApp, QueueGate, SendStage, TinKey, TinRefusal, TinState, TinStatement, TinStep, TinTone,
+    queue_line,
 };
 use bir_submit::{TinsError, TinsRead};
 use serde_json::{Map, Value, json};
@@ -69,6 +70,22 @@ pub(crate) fn with_button_and_note(mut state: Value) -> Value {
     }
     if state["stage"] == "Refused" {
         state["draft_note"] = json!(BirApp::DRAFT_NOTE);
+    }
+    // the sentence for a queued return the queue holds back, from the crates'
+    // own words (the host gives no time, so only the stages that need none)
+    let held = match (state["stage"].as_str(), state["reason"].as_str()) {
+        (Some("NeedsYou"), Some(reason)) => Some(SendStage::NeedsYou {
+            reason: reason.to_owned(),
+        }),
+        (Some("Behind"), reason) => Some(SendStage::Behind {
+            reason: reason.map(str::to_owned),
+            next_retry_at: None,
+        }),
+        (Some("Paused"), _) => Some(SendStage::Paused),
+        _ => None,
+    };
+    if let Some(line) = held.and_then(|stage| queue_line(&stage, chrono::Utc::now())) {
+        state["queue_line"] = json!(line);
     }
     // the chip's tone, from the stored reason's code; the server's sentence
     // itself stays out of a screen (the line says it), whatever the stage
@@ -190,6 +207,27 @@ pub(crate) fn answer(read: &TinsRead, rows: Vec<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_back_send_state_carries_its_sentence() {
+        let needs = with_button_and_note(
+            json!({ "stage": "NeedsYou", "reason": "no connection", "line": null }),
+        );
+        let line = needs["queue_line"].as_str().unwrap();
+        assert!(line.contains("press Retry"), "{line}");
+        assert!(needs["line"].is_null(), "the TIN line stays the TIN's");
+        let paused = with_button_and_note(json!({ "stage": "Paused", "reason": null }));
+        assert_eq!(
+            paused["queue_line"],
+            "Your queue is paused · press Auto to send"
+        );
+        let behind = with_button_and_note(json!({ "stage": "Behind", "reason": null }));
+        assert_eq!(behind["queue_line"], "Goes right after the one above.");
+        for stage in ["Queued", "Sending", "Failed", "Sent"] {
+            let plain = with_button_and_note(json!({ "stage": stage, "reason": "x" }));
+            assert!(plain.get("queue_line").is_none(), "{stage}");
+        }
+    }
 
     #[test]
     fn only_a_page_of_the_account_site_is_a_link() {
