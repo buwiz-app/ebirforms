@@ -1698,7 +1698,10 @@ async function releaseStuck(
 /** The person's Retry on a stopped ("Needs you") return: one press, then its words as they came (going now, or when it may be pressed again). Never with "try anyway". */
 let retrying = false;
 async function pressRetry(at: { tin: string; code: string; year: number; slot: number | null }, settled: () => void) {
-  if (retrying) return;
+  if (retrying) {
+    toast("Still working on the last Retry.", "info");
+    return;
+  }
   retrying = true;
   try {
     const r = await H.retryQueued(at.tin, at.code, at.year, at.slot);

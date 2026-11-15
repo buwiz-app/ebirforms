@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bir_app_core::bir_core::forms::agent::AgentFormKind;
 use bir_app_core::bir_core::forms::taxform::{self, TaxPeriod};
@@ -175,6 +176,7 @@ pub struct Server {
     form: Option<OpenForm>,
     account: Account,
     sources: Sources,
+    queue_started: AtomicBool,
 }
 
 impl Server {
@@ -201,8 +203,13 @@ impl Server {
     }
 
     /// The queue: queued returns go out through Buwiz while signed in.
-    /// `open_own` starts it; a test over `with_app` starts it here.
+    /// `open_own` starts it; a test over `with_app` starts it here. A second
+    /// call does nothing (the flag stays set if the worker failed to start: a
+    /// retry would only fail the same way and log again).
     pub fn start_queue(&self) {
+        if self.queue_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
         if let Ok(app) = &self.app
             && let Err(error) = app.start_queue_worker(self.account.transport())
         {
@@ -235,6 +242,7 @@ impl Server {
             form: None,
             sources: Sources::in_dir(&dir),
             account: Account::in_dir(dir),
+            queue_started: AtomicBool::new(false),
         }
     }
 

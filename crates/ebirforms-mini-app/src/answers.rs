@@ -15,6 +15,7 @@ use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::tickets::{self, Subject};
+use crate::tins::PAUSED_LINE;
 
 /// The longest list a lookup answers.
 const MATCHES_MAX: usize = 20;
@@ -355,8 +356,8 @@ fn newer_than(refused_at: Option<i64>, gate: &QueueGate) -> bool {
 /// A return the queue holds back (behind another, slowed down, still waiting,
 /// needing the person, paused) stays queued; its `line` is the crates' own
 /// sentence for it ([`bir_app_core::queue_line`], read at `now`, seconds since
-/// the epoch), and `next_try` and `reason` are the stage's, as for a failed
-/// send.
+/// the epoch; for a paused queue, [`PAUSED_LINE`]), and `next_try` is the
+/// stage's, as for a failed send. The stored reason of these stages stays out.
 fn stage(
     stage: Option<&SendStage>,
     gate: &QueueGate,
@@ -397,7 +398,10 @@ fn stage(
     }
     // a return with no stored stage is a plain queued one
     out["stage"] = json!(stage.map_or("queued", SendStage::name));
-    if let Some(line) = stage.and_then(|stage| {
+    if matches!(stage, Some(SendStage::Paused)) {
+        // the crates' sentence names an Auto switch this app does not have
+        out["line"] = json!(PAUSED_LINE);
+    } else if let Some(line) = stage.and_then(|stage| {
         let at = chrono::DateTime::from_timestamp(now, 0)?;
         bir_app_core::queue_line(stage, at)
     }) {
@@ -416,35 +420,20 @@ fn stage(
             out["attempts"] = json!(attempts);
             out["next_try"] = json!(next_retry_at);
         }
-        Some(SendStage::Behind {
-            reason,
-            next_retry_at,
-        }) => {
-            out["reason"] = json!(reason);
-            out["next_try"] = json!(next_retry_at);
-        }
-        Some(SendStage::SlowedDown {
-            reason,
-            next_retry_at,
-        }) => {
-            out["reason"] = json!(reason);
-            out["next_try"] = json!(next_retry_at);
-        }
-        Some(SendStage::StillWaiting {
-            since,
-            reason,
-            next_retry_at,
-        }) => {
-            // `since` is already the row's own time: this one is when it was queued
-            out["waiting_since"] = json!(since);
-            out["reason"] = json!(reason);
-            out["next_try"] = json!(next_retry_at);
-        }
+        // the row's `line` carries the plain words: the stored reason stays out
         Some(
-            SendStage::NeedsYou { reason }
-            | SendStage::NeedsAttention { reason }
-            | SendStage::GaveUp { reason },
+            SendStage::Behind { next_retry_at, .. }
+            | SendStage::SlowedDown { next_retry_at, .. }
+            | SendStage::StillWaiting { next_retry_at, .. },
         ) => {
+            if let Some(SendStage::StillWaiting { since, .. }) = stage {
+                // `since` is already the row's own time: this one is when it was queued
+                out["waiting_since"] = json!(since);
+            }
+            out["next_try"] = json!(next_retry_at);
+        }
+        Some(SendStage::NeedsYou { .. }) => {}
+        Some(SendStage::NeedsAttention { reason } | SendStage::GaveUp { reason }) => {
             out["reason"] = json!(reason);
         }
         Some(SendStage::Sent { at, receipt }) => {
@@ -540,7 +529,7 @@ pub(crate) fn queue_list(
         "back_to_draft": back_to_draft,
         "sent": sent,
         "note": if signed_in {
-            "waiting: queued in Forms, sent to the BIR in the background, one at a time. A waiting row may carry a `line` (the plain sentence for its stage: say it as it is, with its time) and a `next_try`; stage behind, slowed_down, still_waiting and paused are still queued and tried again by themselves (paused: the person switched the queue off until Auto), and needs_you stopped trying by itself: the person fixes the cause and presses Retry in the Forms app. Only the person can press it: you cannot, and never offer to. Never suggest resending. back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line and what its step button does, and do not suggest sending it again or retrying. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
+            "waiting: queued in Forms, sent to the BIR in the background, one at a time. A waiting row may carry a `line` (the plain sentence for its stage: say it as it is, with its time) and a `next_try`; stage behind, slowed_down, still_waiting and paused are still queued and tried again by themselves (paused: the queue is switched off and nothing is sent until it is switched back on), and needs_you stopped trying by itself: the person fixes the cause and presses Retry in the Forms app. Only the person can press it: you cannot, and never offer to. Never suggest resending. back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line and what its step button does, and do not suggest sending it again or retrying. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
         } else {
             "This computer is not signed in to Buwiz, so nothing is sent: the user signs in in the Sign-in app (ebirforms_app_open `register`). back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line, and do not suggest retrying. The user queues and cancels in the Forms app."
         },
@@ -862,7 +851,7 @@ mod tests {
             next_retry_at: Some(IN_30_MIN.into()),
         });
         assert_eq!(row["stage"], "slowed_down");
-        assert_eq!(row["reason"], "no connection");
+        assert!(row.get("reason").is_none());
         assert_eq!(row["next_try"], IN_30_MIN);
         let line = row["line"].as_str().unwrap();
         assert!(line.contains("Tries again in about 30 min."), "{line}");
@@ -881,19 +870,19 @@ mod tests {
             row["since"], "2026-10-30 08:00:00",
             "the row's own time stays"
         );
-        assert_eq!(row["reason"], "no connection");
+        assert!(row.get("reason").is_none());
         assert_eq!(row["next_try"], IN_30_MIN);
         let line = row["line"].as_str().unwrap();
         assert!(line.starts_with("Still waiting after 48 hours."), "{line}");
     }
 
     #[test]
-    fn a_return_that_needs_you_says_so_and_its_reason() {
+    fn a_return_that_needs_you_says_so_without_the_stored_reason() {
         let row = read(SendStage::NeedsYou {
             reason: "no connection".into(),
         });
         assert_eq!(row["stage"], "needs_you");
-        assert_eq!(row["reason"], "no connection");
+        assert!(row.get("reason").is_none());
         let line = row["line"].as_str().unwrap();
         assert!(line.contains("press Retry"), "{line}");
     }
@@ -902,7 +891,8 @@ mod tests {
     fn a_paused_queue_reads_paused() {
         let row = read(SendStage::Paused);
         assert_eq!(row["stage"], "paused");
-        assert_eq!(row["line"], "Your queue is paused · press Auto to send");
+        assert_eq!(row["line"], PAUSED_LINE);
+        assert!(!PAUSED_LINE.contains("Auto"));
         assert!(row.get("next_try").is_none());
     }
 

@@ -478,15 +478,15 @@ function stageOf(r: any): [string, Tone, string] {
       return ["Sending", "info", "Being sent to the BIR now"];
     // a return the queue holds back is still queued: the server's line says why and when (it tries again by itself)
     case "behind":
-      return ["Queued", "info", String(r.line || "Goes right after the one above.")];
+      return ["Queued", "info", String(r.line || "")];
     case "slowed_down":
-      return ["Slowed", "warn", String(r.line || "Returns are getting in for others. The problem may be your own connection.")];
+      return ["Slowed", "warn", String(r.line || "")];
     case "still_waiting":
-      return ["Waiting", "warn", String(r.line || "Still waiting. It keeps trying by itself; you can cancel it or file another way.")];
+      return ["Waiting", "warn", String(r.line || "")];
     case "paused":
-      return ["Paused", "plain", String(r.line || "Your queue is paused. Nothing is sent until it is switched back on.")];
+      return ["Paused", "plain", String(r.line || "")];
     case "needs_you":
-      return ["Needs you", "danger", String(r.line || "This return keeps being refused. It stopped trying by itself; fix the cause, then press Retry.")];
+      return ["Needs you", "danger", String(r.line || "")];
     case "failed":
       // the server's line carries the time of the next try; without one it still tries again by itself
       if (r.line) return ["Retrying", "warn", String(r.line)];

@@ -55,9 +55,15 @@ pub(crate) fn assistant_fields(statement: &TinStatement, out: &mut Value) {
 }
 
 /// What a paused queue reads in the Forms app: the crates' sentence names an
-/// Auto switch this app does not have. The card's fallback says the same.
+/// Auto switch this app does not have.
 pub(crate) const PAUSED_LINE: &str =
     "Your queue is paused. Nothing is sent until it is switched back on.";
+
+/// What a return still waiting reads in the Forms app: the crates' sentence
+/// counts the hours since it was queued, and the host's send state gives no
+/// time, so a count here could be false.
+pub(crate) const STILL_WAITING_LINE: &str =
+    "Still waiting. It keeps trying by itself; you can cancel it or file another way.";
 
 /// A return's send state (`queued_send_state`) for the Forms app: when it
 /// carries a TIN refusal's `step` (a kind), its `step_button` (`{kind, label}`
@@ -83,12 +89,21 @@ pub(crate) fn with_button_and_note(mut state: Value) -> Value {
     if state["stage"] == "Paused" {
         state["queue_line"] = json!(PAUSED_LINE);
     }
+    // StillWaiting: the crates' line needs the time it was queued (not given)
+    if state["stage"] == "StillWaiting" {
+        state["queue_line"] = json!(STILL_WAITING_LINE);
+    }
     let held = match (state["stage"].as_str(), state["reason"].as_str()) {
         (Some("NeedsYou"), Some(reason)) => Some(SendStage::NeedsYou {
             reason: reason.to_owned(),
         }),
         (Some("Behind"), reason) => Some(SendStage::Behind {
             reason: reason.map(str::to_owned),
+            next_retry_at: None,
+        }),
+        // with no time given, the crates' line reads "It tries again by itself."
+        (Some("SlowedDown"), reason) => Some(SendStage::SlowedDown {
+            reason: reason.unwrap_or_default().to_owned(),
             next_retry_at: None,
         }),
         _ => None,
@@ -230,6 +245,14 @@ mod tests {
         assert!(!PAUSED_LINE.contains("Auto"), "the app has no Auto switch");
         let behind = with_button_and_note(json!({ "stage": "Behind", "reason": null }));
         assert_eq!(behind["queue_line"], "Goes right after the one above.");
+        let slowed = with_button_and_note(json!({ "stage": "SlowedDown", "reason": "x" }));
+        assert_eq!(
+            slowed["queue_line"],
+            "Returns are getting in for others. The problem may be your own connection. It tries again by itself."
+        );
+        let waiting = with_button_and_note(json!({ "stage": "StillWaiting", "reason": null }));
+        assert_eq!(waiting["queue_line"], STILL_WAITING_LINE);
+        assert!(!STILL_WAITING_LINE.contains("hours"), "no time is known");
         for stage in ["Queued", "Sending", "Failed", "Sent"] {
             let plain = with_button_and_note(json!({ "stage": stage, "reason": "x" }));
             assert!(plain.get("queue_line").is_none(), "{stage}");

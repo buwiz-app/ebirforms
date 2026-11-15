@@ -220,7 +220,7 @@ fn a_return_that_was_not_sent_stays_queued_and_reads_when_it_tries_again() {
     };
     let stage = row["stage"].as_str().unwrap();
     assert!(
-        ["queued", "failed", "behind", "slowed_down", "still_waiting"].contains(&stage),
+        ["queued", "failed", "slowed_down"].contains(&stage),
         "{row}"
     );
     let line = row["line"].as_str().unwrap_or_default();
