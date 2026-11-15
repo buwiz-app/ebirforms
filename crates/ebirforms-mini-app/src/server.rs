@@ -196,13 +196,18 @@ impl Server {
             tracing::warn!("{problem}");
         }
         let server = Self::new(app, db_path, manifest, true);
-        // the queue: queued returns go out through Buwiz while signed in
-        if let Ok(app) = &server.app
-            && let Err(error) = app.start_queue_worker(server.account.transport())
+        server.start_queue();
+        server
+    }
+
+    /// The queue: queued returns go out through Buwiz while signed in.
+    /// `open_own` starts it; a test over `with_app` starts it here.
+    pub fn start_queue(&self) {
+        if let Ok(app) = &self.app
+            && let Err(error) = app.start_queue_worker(self.account.transport())
         {
             tracing::warn!("the sending queue did not start: {error}");
         }
-        server
     }
 
     /// A server over `app` (whose file is `db_path`). `require_provision`:

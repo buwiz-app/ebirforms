@@ -123,6 +123,8 @@ type SendState = {
   stage: string | null; reason: string | null; claim: string | null; releasable: boolean;
   /** A return Buwiz refused for its TIN, in BIR's words: the chip, its tone, the line, the step's button and, once it is a draft again, the draft note. */
   chip?: string | null; tone?: string | null; line?: string | null; step_button?: { kind: string; label: string } | null; draft_note?: string | null;
+  /** The sentence for a queued return the queue holds back (`NeedsYou`, `Paused`, `Behind`), from eBIRForms' own words; it is never a TIN's line. */
+  queue_line?: string | null;
 };
 /** One TIN's state on the Buwiz account as BIR words it: `chip`, `line` and `step.label` are shown as they come
  *  (null when the TIN is active or its state is not known); `can_queue` is false only for a state that cannot send. */
@@ -2878,6 +2880,9 @@ function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () =>
   return (
     <>
       <If when={mode() === "cancel"}>
+        <If when={Boolean(readable()?.queue_line)}>
+          <Text class={`text-xs ${readable()?.stage === "NeedsYou" ? C.danger : C.fg2}`}>{readable()?.queue_line || ""}</Text>
+        </If>
         <Btn label="Cancel queue" variant={p.ghost ? "ghost" : undefined} onPress={p.cancel} />
       </If>
       <If when={mode() === "release"}>

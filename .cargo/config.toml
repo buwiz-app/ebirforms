@@ -1,0 +1,5 @@
+[env]
+# The queue worker's thread (bir-app-core's start_queue_worker) takes the
+# default stack size, which a debug build's send path overflows; the queue
+# test runs it. Release builds do not need this.
+RUST_MIN_STACK = "33554432"

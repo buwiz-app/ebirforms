@@ -42,6 +42,10 @@ pub(crate) const SCREEN_WAIT: u64 = 8;
 /// thread must not stall behind a slow account server.
 pub(crate) const GATE_WAIT: u64 = 4;
 
+/// How this app names itself in the `buwiz-client` header of every request
+/// (with the plugin's version).
+const CLIENT_NAME: &str = "mini";
+
 /// The sign-in state of this process.
 pub(crate) struct Account {
     submission: Submission,
@@ -99,8 +103,12 @@ impl Account {
             .enable_all()
             .build()
             .expect("a runtime for the account client");
+        let submission = Submission::with(config, Box::new(FileStore::new(dir)));
+        // every request names this app to the server, from the first one
+        // (the queue's too: its transport shares the client)
+        submission.set_client(CLIENT_NAME, crate::manifest::VERSION);
         Self {
-            submission: Submission::with(config, Box::new(FileStore::new(dir))),
+            submission,
             runtime,
             interval: INTERVAL,
         }
@@ -264,6 +272,8 @@ mod tests {
         tins: Vec<(String, String)>,
         /// Seconds the list route waits before it answers.
         delay: u64,
+        /// The `buwiz-client` header of every request, in order.
+        clients: Vec<Option<String>>,
     }
 
     /// A one-thread HTTP server with account.buwiz.com's sign-in routes and
@@ -282,6 +292,7 @@ mod tests {
                 reader.read_line(&mut line).unwrap();
                 let mut length = 0;
                 let mut bearer = String::new();
+                let mut client = None;
                 loop {
                     let mut header = String::new();
                     reader.read_line(&mut header).unwrap();
@@ -295,6 +306,9 @@ mod tests {
                         "authorization" => {
                             bearer = value.trim().trim_start_matches("Bearer ").to_string()
                         }
+                        name if name == bir_submit::CLIENT_HEADER => {
+                            client = Some(value.trim().to_string())
+                        }
                         _ => {}
                     }
                 }
@@ -302,6 +316,7 @@ mod tests {
                 reader.read_exact(&mut body).unwrap();
                 let body = String::from_utf8(body).unwrap();
                 let mut seen = state.lock().unwrap();
+                seen.clients.push(client);
                 let route: Vec<&str> = line.split_whitespace().take(2).collect();
                 let (status, answer) = match route[..] {
                     ["POST", "/auth/device/start"] => {
@@ -464,6 +479,21 @@ mod tests {
         account.poll().unwrap();
         assert!(account.signed_in());
         account
+    }
+
+    #[test]
+    fn every_request_names_the_client_mini_with_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, seen) = mock();
+        let account = signed_in(dir.path(), &base, &seen);
+        account.tins(ASSISTANT_AGE).expect("the list");
+        let want = format!("mini/{}", crate::manifest::VERSION);
+        let seen = seen.lock().unwrap();
+        // the sign-in (start, polls, me, device key) and the list
+        assert!(seen.clients.len() >= 5, "{:?}", seen.clients);
+        for client in &seen.clients {
+            assert_eq!(client.as_deref(), Some(want.as_str()));
+        }
     }
 
     #[test]
