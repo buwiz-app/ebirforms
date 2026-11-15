@@ -246,6 +246,72 @@ fn a_return_that_was_not_sent_stays_queued_and_reads_when_it_tries_again() {
     );
     assert_eq!(result_of(&state)["stage"], "Failed", "{state}");
 
+    // three identical refusals stop it ("Needs you"): the person's Retry,
+    // the tool the Forms app calls, lifts the stop and it reads a waiting
+    // stage again; a second press at once waits and changes nothing
+    {
+        let worker =
+            bir_app_core::bir_core::db::Database::open(&path).expect("a second connection");
+        let id = app
+            .list_returns(bir_app_core::ReturnFilter::All)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.form_code == "0619E")
+            .expect("the queued return")
+            .id;
+        let (status, json) = worker.draft_status_and_json(id).unwrap().unwrap();
+        let mut data: Value = serde_json::from_str(&json).unwrap();
+        data["smart_queue"] = json!({ "failures": 3, "kind": "the login was refused", "same_kind": 3, "stuck": "the login was refused" });
+        data["last_error"] = "Not sent (nothing reached BIR): the login was refused".into();
+        assert!(
+            worker
+                .replace_draft_json_if_unchanged(id, &json, &status, &data.to_string())
+                .unwrap()
+        );
+    }
+    let state_args = json!({ "args": [tin, "0619E", 2026, 1], "ticket": ticket });
+    let stuck = bot.app(
+        "forms",
+        "ebirforms_app_queued_send_state",
+        state_args.clone(),
+    );
+    assert_eq!(result_of(&stuck)["stage"], "NeedsYou", "{stuck}");
+    assert!(
+        result_of(&stuck)["queue_line"]
+            .as_str()
+            .is_some_and(|line| line.contains("press Retry")),
+        "{stuck}"
+    );
+    let first = bot.app("forms", "ebirforms_app_retry_queued", state_args.clone());
+    let first = result_of(&first);
+    assert_eq!(first["pressed"], true, "{first}");
+    assert!(
+        first["words"]
+            .as_str()
+            .is_some_and(|words| !words.is_empty()),
+        "{first}"
+    );
+    let lifted = bot.app(
+        "forms",
+        "ebirforms_app_queued_send_state",
+        state_args.clone(),
+    );
+    let stage = result_of(&lifted)["stage"].as_str().unwrap();
+    assert!(
+        ["Queued", "Failed", "Behind", "Sending"].contains(&stage),
+        "{lifted}"
+    );
+    let second = bot.app("forms", "ebirforms_app_retry_queued", state_args);
+    let second = result_of(&second);
+    assert_eq!(second["pressed"], false, "{second}");
+    assert!(second["press_again_at"].is_string(), "{second}");
+    assert!(
+        second["words"]
+            .as_str()
+            .is_some_and(|words| words.starts_with("Retry was pressed")),
+        "{second}"
+    );
+
     // every request the worker and the sign-in made said who is asking
     let seen = seen.lock().unwrap();
     assert!(

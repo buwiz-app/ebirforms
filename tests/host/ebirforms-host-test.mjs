@@ -165,6 +165,8 @@ async function main() {
       && cardSource.json.source?.length > 0 && cardSource.json.fingerprint === signed.apps.find((a) => a.id === "deadlines").fingerprint);
     const formsTools = signed.apps.find((a) => a.id === "forms").permissions.tools;
     check("Forms is granted the stuck-send state and release tools", ["ebirforms_app_queued_send_state", "ebirforms_app_release_abandoned_claim"].every((t) => formsTools.includes(t)));
+    const otherTools = signed.apps.filter((a) => a.id !== "forms").flatMap((a) => a.permissions.tools || []);
+    check("Forms is granted a person's Retry and no other app is", formsTools.includes("ebirforms_app_retry_queued") && !otherTools.includes("ebirforms_app_retry_queued"));
     const env1 = envelope(forms, "ebirforms_app_screen_forms_index", { args: [] });
     const call = await post("/v1/host/call", env1);
     check("signed Forms read returns the form catalogue", call.status === 200 && call.json.ok === true

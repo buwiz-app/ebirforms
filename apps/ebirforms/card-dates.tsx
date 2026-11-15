@@ -484,7 +484,7 @@ function stageOf(r: any): [string, Tone, string] {
     case "still_waiting":
       return ["Waiting", "warn", String(r.line || "Still waiting. It keeps trying by itself; you can cancel it or file another way.")];
     case "paused":
-      return ["Paused", "plain", String(r.line || "Your queue is paused · press Auto to send")];
+      return ["Paused", "plain", String(r.line || "Your queue is paused. Nothing is sent until it is switched back on.")];
     case "needs_you":
       return ["Needs you", "danger", String(r.line || "This return keeps being refused. It stopped trying by itself; fix the cause, then press Retry.")];
     case "failed":

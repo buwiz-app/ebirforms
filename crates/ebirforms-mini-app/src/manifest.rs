@@ -746,7 +746,11 @@ mod tests {
         let added: [(&str, &[&str], bool); 4] = [
             (
                 "forms",
-                &["ebirforms_account_tins", "ebirforms_account_tin_link"],
+                &[
+                    "ebirforms_account_tins",
+                    "ebirforms_account_tin_link",
+                    "ebirforms_app_retry_queued",
+                ],
                 true,
             ),
             (

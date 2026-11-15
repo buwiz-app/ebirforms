@@ -224,9 +224,14 @@ fn the_bot_contract_over_a_scratch_database() {
         tool("ebirforms_app_release_abandoned_claim")["annotations"]["readOnlyHint"],
         false
     );
+    assert_eq!(
+        tool("ebirforms_app_retry_queued")["annotations"]["readOnlyHint"],
+        false
+    );
     for name in [
         "ebirforms_app_queued_send_state",
         "ebirforms_app_release_abandoned_claim",
+        "ebirforms_app_retry_queued",
     ] {
         assert_eq!(
             tool(name)["_meta"]["buwiz/audience"],
@@ -272,6 +277,7 @@ fn the_bot_contract_over_a_scratch_database() {
         for name in [
             "ebirforms_app_queued_send_state",
             "ebirforms_app_release_abandoned_claim",
+            "ebirforms_app_retry_queued",
         ] {
             assert_eq!(
                 granted.contains(&name),
@@ -905,6 +911,55 @@ fn the_bot_contract_over_a_scratch_database() {
         result_of(&released),
         &json!({ "released": false, "status": "Draft" }),
         "{released}"
+    );
+    // a person's Retry is the same kind of call: refused for the AI's press, a
+    // resolve, a routine and the assistant; refused for another taxpayer's
+    // ticket; and for a return that is not queued the library's own refusal
+    // comes back as a plain message
+    let retry_args =
+        json!({ "args_json": json!([tin, "2551Q", 2026, 3]).to_string(), "ticket": ticket });
+    let refused = bot.call_as(
+        json!({ "origin": "app", "app": "forms", "open_id": open_id, "press": { "by": "ai", "who": "agent.broker" } }),
+        "ebirforms_app_retry_queued",
+        retry_args.clone(),
+    );
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("the person's own click"),
+        "{refused}"
+    );
+    for origin in ["resolve", "routine"] {
+        let refused = bot.call_as(
+            json!({ "origin": origin }),
+            "ebirforms_app_retry_queued",
+            retry_args.clone(),
+        );
+        assert_eq!(refused["isError"], true, "{origin}: {refused}");
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{origin}: {refused}"
+        );
+    }
+    let refused = bot.agent("ebirforms_app_retry_queued", retry_args.clone());
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["structuredContent"]["code"], "permission_denied",
+        "{refused}"
+    );
+    let refused = bot.call_as(
+        forms_app.clone(),
+        "ebirforms_app_retry_queued",
+        json!({ "args_json": json!([other_tin, "2551Q", 2026, 3]).to_string(), "ticket": ticket }),
+    );
+    assert!(
+        error_text(&refused).contains("outside this app's scope"),
+        "{refused}"
+    );
+    let refused = bot.call_as(forms_app.clone(), "ebirforms_app_retry_queued", retry_args);
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(
+        error_text(&refused).contains("Only a queued return can be sent again."),
+        "{refused}"
     );
     let state = bot.call_as(
         forms_app.clone(),

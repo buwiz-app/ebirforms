@@ -116,6 +116,9 @@ pub(crate) static FUNCTIONS: &[(&str, Rule, Access)] = &[
     // puts a stuck return back to Draft (never back in the queue); a write, so
     // only a person's own press reaches it
     ("release_abandoned_claim", Rule::Tin(0), Access::Write),
+    // a person's Retry on a stopped ("Needs you") return, never with "try
+    // anyway"; a write, so only a person's own press reaches it
+    ("retry_queued", Rule::Tin(0), Access::Write),
     // Tax Profile: reference lists, then the taxpayer, its branches, tax
     // years, forms and templates
     ("tax_year_bounds", Rule::Free, Access::Read),
@@ -172,6 +175,7 @@ pub(crate) static FORMS: &[&str] = &[
     "cancel_queued",
     "queued_send_state",
     "release_abandoned_claim",
+    "retry_queued",
 ];
 
 /// The functions the Tax Profile app calls (`apps/ebirforms/tax-profile.tsx`).
@@ -399,6 +403,23 @@ mod tests {
         for function in FORMS.iter().chain(TAX_PROFILE).chain(CALENDAR) {
             assert!(find(function).is_some(), "{function} has no rule");
         }
+    }
+
+    /// A person's Retry is a TIN-scoped write (refused for resolve, routine
+    /// and AI-pressed calls), for the Forms app and no other.
+    #[test]
+    fn retry_queued_is_a_tin_write_for_forms_only() {
+        let (name, rule, access) = find("retry_queued").expect("a rule");
+        assert_eq!(name, "retry_queued");
+        assert!(matches!(rule, Rule::Tin(0)));
+        assert!(matches!(access, Access::Write));
+        assert!(FORMS.contains(&"retry_queued"));
+        for other in [TAX_PROFILE, CALENDAR] {
+            assert!(!other.contains(&"retry_queued"));
+        }
+        assert!(crate::manifest::FORMS_SOURCE.contains("\"retry_queued\""));
+        assert!(!crate::manifest::TAX_PROFILE_SOURCE.contains("retry_queued"));
+        assert!(!crate::manifest::CALENDAR_SOURCE.contains("retry_queued"));
     }
 
     #[test]
