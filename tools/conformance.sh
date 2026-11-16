@@ -1,59 +1,62 @@
 #!/usr/bin/env bash
-# tools/bot/conformance.sh — run the Buwiz Bot's plugin conformance tool
-# (buwiz-plugin-test) against the release build of ebirforms-mini-app.
+# tools/conformance.sh: the SDK's plugin conformance runner (buwiz-plugin-test)
+# against the release build of ebirforms-mini-app, under a throwaway key and a
+# per-run trust file. Nothing here touches the Keychain, a broker's data or the
+# release key.
 #
-# The same steps as Books' tools/bot/conformance.sh, then the runner:
+# Steps 1-5, then the runner:
 #   1. build the release binary;
 #   2. a fresh 0700 temp dir outside the repo;
 #   3. a throwaway ed25519 test key (buwiz-plugin-test --keygen);
-#   4. a per-run trust file mapping a TEST key id to that key, approving
+#   4. a per-run trust file mapping a TEST key id to that key and approving
 #      app.buwiz.ebirforms under it (never gc-2026-01);
 #   5. the manifest generated under the test key id and signed with the test
-#      key file (--key-file, never --keychain) by `buwiz-broker sign-manifest`
-#      when BUWIZ_BROKER_BIN names a broker build, else by the Bot's
-#      server/src/v1/sign-manifest.mjs (same arguments, byte-identical output);
+#      key file by `buwiz-broker sign-manifest` when BUWIZ_BROKER_BIN names a
+#      broker build, else by the SDK's sign-manifest.mjs (same arguments);
 #   then buwiz-plugin-test --manifest <signed> --key-file <test key>, whose
 #   own in-process broker uses a temp trust store of the same shape.
 #
 # The release manifest keeps publisher.key_id gc-2026-01; only the owner
-# signs that one (the Bot's SDK README step 10). Nothing here touches the
-# Keychain, the Bot's or the broker's data folder, or the Bot's trust.json.
+# signs that one, with tools/release/publish.sh and the broker.
 #
-# Usage: tools/bot/conformance.sh [extra buwiz-plugin-test args, e.g. --json]
-# Env:   BUWIZ_BOT_DIR (default /Volumes/goldcoders/buwiz-bot/buwiz-bot): a Buwiz Bot
-#          checkout at protocol 1.0 (buwiz-bot main bf7cead0 or later)
-#        BUWIZ_BROKER_BIN (a buwiz-broker binary from buwiz-bot; signs in place
-#          of server/src/v1/sign-manifest.mjs)
+# Usage: tools/conformance.sh [runner args, e.g. --json]
+# Env:   BUWIZ_SDK_DIR (required): a buwiz-sdk checkout
+#          (https://github.com/buwiz-app/buwiz-sdk) at the revision this repo
+#          pins (tools/sdk-pin.sh), with its dependencies installed (bun install)
+#        BUWIZ_BROKER_BIN (a buwiz-broker binary; signs in place of the SDK's
+#          sign-manifest.mjs)
 #        EBIRFORMS_TEST_KEY_ID (default ebirforms-test-01)
 #        KEEP_TMP=1 keeps the temp dir (it holds a test key; delete it after)
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BOT_DIR="${BUWIZ_BOT_DIR:-/Volumes/goldcoders/buwiz-bot/buwiz-bot}"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SDK="${BUWIZ_SDK_DIR:-}"
 KEY_ID="${EBIRFORMS_TEST_KEY_ID:-ebirforms-test-01}"
 PLUGIN_ID="app.buwiz.ebirforms"
-RUNNER="$BOT_DIR/server/sdk/mini-app/bin/buwiz-plugin-test.mjs"
+RUNNER="$SDK/packages/conformance/bin/buwiz-plugin-test.mjs"
+SIGNER="$SDK/packages/conformance/src/v1/sign-manifest.mjs"
+
+die() { echo "conformance: $*" >&2; exit 2; }
+[ -n "$SDK" ] || die "set BUWIZ_SDK_DIR to a buwiz-sdk checkout (git clone https://github.com/buwiz-app/buwiz-sdk; cd buwiz-sdk; bun install)"
 if [ -n "${BUWIZ_BROKER_BIN:-}" ]; then
-  [ -x "$BUWIZ_BROKER_BIN" ] || { echo "conformance: BUWIZ_BROKER_BIN $BUWIZ_BROKER_BIN is not executable" >&2; exit 2; }
+  [ -x "$BUWIZ_BROKER_BIN" ] || die "BUWIZ_BROKER_BIN $BUWIZ_BROKER_BIN is not executable"
   SIGN=("$BUWIZ_BROKER_BIN" sign-manifest)
-  SIGNER=""
 else
-  SIGNER="$BOT_DIR/server/src/v1/sign-manifest.mjs"
   SIGN=(node "$SIGNER")
 fi
-
-if [ "$KEY_ID" = "gc-2026-01" ]; then
-  echo "conformance: the test key id must not be gc-2026-01" >&2
-  exit 2
-fi
-for f in "$RUNNER" ${SIGNER:+"$SIGNER"}; do
-  [ -f "$f" ] || { echo "conformance: $f not found (set BUWIZ_BOT_DIR to a Bot checkout at protocol 1.0, or BUWIZ_BROKER_BIN for the signer)" >&2; exit 2; }
-done
-command -v node >/dev/null || { echo "conformance: node is needed to run the Bot's tools" >&2; exit 2; }
-[ -d "$BOT_DIR/server/node_modules/@modelcontextprotocol/sdk" ] && [ -d "$BOT_DIR/server/node_modules/esbuild" ] || {
-  echo "conformance: the Bot's server/node_modules lacks @modelcontextprotocol/sdk or esbuild; install them in the Bot checkout yourself" >&2
-  exit 2
-}
+[ "$KEY_ID" != "gc-2026-01" ] || die "the test key id must not be gc-2026-01"
+for f in "$RUNNER" "$SIGNER"; do [ -f "$f" ] || die "$f not found: is BUWIZ_SDK_DIR a buwiz-sdk checkout?"; done
+PIN="$("$REPO/tools/sdk-pin.sh")" || die "no single pinned buwiz-sdk revision (tools/sdk-pin.sh)"
+# the checkout must hold exactly the pinned files (a merge of the pin has another commit id)
+SDK_TREE="$(git -C "$SDK" rev-parse 'HEAD^{tree}' 2>/dev/null)" || die "$SDK is not a git checkout of buwiz-sdk"
+[ "$(git -C "$SDK" rev-parse "$PIN^{tree}" 2>/dev/null)" = "$SDK_TREE" ] ||
+  die "the SDK checkout is not the pinned revision $PIN: git -C \"\$BUWIZ_SDK_DIR\" fetch && git -C \"\$BUWIZ_SDK_DIR\" checkout $PIN"
+[ -z "$(git -C "$SDK" status --porcelain --untracked-files=all -- packages/conformance)" ] ||
+  die "the SDK checkout has changed or untracked files under packages/conformance"
+command -v node >/dev/null || die "node is needed to run the SDK's tools"
+MIN_NODE="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).engines.node)' "$SDK/packages/conformance/package.json" 2>/dev/null || echo "see packages/conformance/package.json")"
+(cd "$SDK/packages/conformance" && node --input-type=module -e 'await import("node:sqlite"); await import("esbuild"); await import("@modelcontextprotocol/sdk/client/index.js"); await import("@modelcontextprotocol/sdk/client/stdio.js")') >/dev/null 2>&1 ||
+  die "the SDK's runner cannot load node:sqlite, esbuild or @modelcontextprotocol/sdk: it needs Node $MIN_NODE (node --version), and bun install run in $SDK"
 
 # 1. the release binary
 cargo build --release --quiet -p ebirforms-mini-app --manifest-path "$REPO/Cargo.toml"
