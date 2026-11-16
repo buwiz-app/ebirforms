@@ -63,7 +63,7 @@ name = "host-seed"
 path = "../../tests/host/seed.rs"
 
 [dependencies]
-buwiz-plugin = { git = "https://github.com/buwiz-app/buwiz-sdk", rev = "e1de9c4487de6a9b6509e53ed1e990d699cad454" }
+buwiz-plugin.workspace = true
 bir-app-core.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

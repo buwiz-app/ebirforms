@@ -45,7 +45,9 @@ else
   SIGN=(node "$SIGNER")
 fi
 [ "$KEY_ID" != "gc-2026-01" ] || die "the test key id must not be gc-2026-01"
-for f in "$RUNNER" "$SIGNER"; do [ -f "$f" ] || die "$f not found: is BUWIZ_SDK_DIR a buwiz-sdk checkout?"; done
+[ -f "$RUNNER" ] || die "$RUNNER not found: is BUWIZ_SDK_DIR a buwiz-sdk checkout?"
+# the SDK's signer is needed only when it is the one that signs
+[ -n "${BUWIZ_BROKER_BIN:-}" ] || [ -f "$SIGNER" ] || die "$SIGNER not found: is BUWIZ_SDK_DIR a buwiz-sdk checkout?"
 PIN="$("$REPO/tools/sdk-pin.sh")" || die "no single pinned buwiz-sdk revision (tools/sdk-pin.sh)"
 # the checkout must hold exactly the pinned files (a merge of the pin has another commit id)
 SDK_TREE="$(git -C "$SDK" rev-parse 'HEAD^{tree}' 2>/dev/null)" || die "$SDK is not a git checkout of buwiz-sdk"

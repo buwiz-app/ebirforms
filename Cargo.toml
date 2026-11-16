@@ -25,6 +25,8 @@ bir-app-core = { git = "https://github.com/eBIRForms/eBIRForms", rev = "e40954db
 # The submission client (device sign-in, device key, sealed sends, receipts),
 # at the same commit
 bir-submit = { git = "https://github.com/eBIRForms/eBIRForms", rev = "e40954db00e87212cdeb91adadc8e58d8c78ec71" }
+# The Buwiz SDK, pinned by commit: the one place this repo names the revision
+buwiz-plugin = { git = "https://github.com/buwiz-app/buwiz-sdk", rev = "e1de9c4487de6a9b6509e53ed1e990d699cad454" }
 serde_json = "1"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
