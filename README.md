@@ -12,7 +12,7 @@ The same layout as every mini app in the `buwiz-app` org (Books is the reference
 | `crates/ebirforms-mini-app/` | The mini app: MCP server, manifest and signing, tickets, TIN scrubbing. It began as `buwiz-mcp` (eBIRForms `feat/mcp-mode` @ `f0d5afa`) and keeps that history. |
 | `apps/ebirforms/` | The app screens: `forms`, `tax-profile`, `calendar`, `deadlines` (an inline card), `register` (Buwiz Sign-in) and the answer cards (`card-dates`, `card-calc`, `card-people`: Tax profiles). |
 | `tests/` | Integration tests (the Bot contract, own data). |
-| `tools/` | `check-all.sh` (every gate), `conformance.sh` (the SDK's conformance runner), `sdk-pin.sh` (the pinned SDK revision), `bot/host-test.sh` (the Bot host test), `release/publish.sh` (a protocol 1.0 package release: binary, signed manifest and signed `plugin.json` from `package/plugin.json`), `dev-install.sh` (a local build into the running Bot). |
+| `tools/` | `check-all.sh` (every gate), `conformance.sh` (the SDK's conformance runner), `sdk-pin.sh` (the pinned SDK revision), `bot/host-test.sh` (the host test against a real broker), `release/publish.sh` (a protocol 1.0 package release: binary, signed manifest and signed `plugin.json` from `package/plugin.json`), `dev-install.sh` (a local build into the running Bot). |
 | `legacy/` | The first mini app, from `hexuria/buwiz-forms` branch `rox-mini-app-round2` @ `834e7203`, with its history. It is the reference for porting the remaining 12 apps and cards; it does not build here and is deleted once ported. |
 
 It builds on eBIRForms' domain crates (`bir-app-core`, pinned by commit in the root `Cargo.toml`). Only the
@@ -105,24 +105,23 @@ On Linux with Node 22, Rust (see `rust-toolchain.toml`), and `lsof`:
 git clone https://github.com/buwiz-app/buwiz-sdk sdk
 git -C sdk checkout --detach "$(tools/sdk-pin.sh)"
 (cd sdk && bun install)
-git clone https://github.com/buwiz-bot/buwiz-bot bot
-git -C bot checkout --detach bf7cead0a53cc86408ec739a1787c9b1c23632c6   # buwiz-bot main with nsh c66f78cb (#221)
-(cd bot/server && npm ci)
-BUWIZ_SDK_DIR="$PWD/sdk" BUWIZ_BOT_DIR="$PWD/bot" tools/check-all.sh
+BUWIZ_SDK_DIR="$PWD/sdk" BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/check-all.sh
 ```
 
 `BUWIZ_SDK_DIR` (a `buwiz-sdk` checkout at the pinned revision, `bun install` run, Node 22.13 or newer) is what the
-SDK conformance step needs; `BUWIZ_BOT_DIR` is needed only by the Bot host test. `check-all.sh` checks both before it
-starts. `tools/conformance.sh` signs with a throwaway test key, by the SDK's signer or, when `BUWIZ_BROKER_BIN` names
-a `buwiz-broker` build, by its `sign-manifest`. A release is signed only by the Bot's broker (`buwiz-broker
-sign-manifest`, through `BUWIZ_BROKER_BIN`), never by the SDK's tools.
+SDK conformance step and the host test need (the host test uses the SDK's key and JSON modules); `BUWIZ_BROKER_BIN` (an executable `buwiz-broker` binary) is what the host test starts.
+`check-all.sh` checks both before it starts. `tools/conformance.sh` signs with a throwaway test key, by the broker's
+`sign-manifest` when `BUWIZ_BROKER_BIN` is set, else by the SDK's signer. A release is signed only by the broker
+(`buwiz-broker sign-manifest`, through `BUWIZ_BROKER_BIN`), never by the SDK's tools.
 
 The gates include the Rust checks, a no-detached-signal-setters check over `apps/`, the SDK-1 import gate
 (`tools/check-nsh-imports.mjs`: every app imports from `nsh` only what the Bot's loader allows), the SDK links
-against the pinned revision, **SDK conformance** and the **Bot host test**. Run just the latter with `BUWIZ_BOT_DIR="$PWD/bot" tools/bot/host-test.sh`.
-It uses a detached Bot worktree and a throwaway broker (port 8811, override with `EBIRFORMS_HOST_PORT`,
-8810 or above), per-run trust, `ebirforms-test-01`, a file keystore, and a synthetic scratch taxpayer
-database. It never uses a keychain or signs in; the account endpoint points to loopback.
+against the pinned revision, **SDK conformance** and the **broker host test**. Run just the latter with `BUWIZ_SDK_DIR="$PWD/sdk" BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/bot/host-test.sh`.
+It starts the broker on a temporary home and data folder (port 8811 and the next one, for a scripted model on
+loopback; override with `EBIRFORMS_HOST_PORT`, 8811 through 65534), with per-run trust, `ebirforms-test-01`, a file
+keystore, and a synthetic scratch taxpayer database, installs the signed manifest and checks the host routes over
+HTTP, the assistant's tools through a chat with the scripted model. It never uses a keychain or signs in; the
+account endpoint points to loopback.
 Scratch data is deleted on exit; `KEEP_TMP=1` retains it, including test keys, for local debugging.
 
 The signed `ebirforms_status` check expects refusal: status is assistant-only in the shipped manifest.

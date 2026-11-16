@@ -591,11 +591,15 @@ fn the_bot_contract_over_a_scratch_database() {
         "{refused}"
     );
 
-    // nor sign the owner in or out of Buwiz: that is the Sign-in app's
+    // nor sign the owner in or out of Buwiz, nor read or link TINs on the
+    // account: that is the Sign-in app's and the apps'
     for name in [
         "ebirforms_account_sign_in_start",
+        "ebirforms_account_sign_in_poll",
         "ebirforms_account_sign_out",
         "ebirforms_account_status",
+        "ebirforms_account_tins",
+        "ebirforms_account_tin_link",
     ] {
         let refused = bot.agent(name, json!({}));
         assert_eq!(
