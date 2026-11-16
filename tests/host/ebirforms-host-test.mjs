@@ -1,52 +1,31 @@
 // The eBIRForms plugin against a running Buwiz broker, over its loopback HTTP
 // routes. Run via tools/bot/host-test.sh only: it starts the broker, makes the
 // signed manifest and the test key, and passes their folder, the plugin
-// binary and the broker's port here. Only Node built-ins and fetch are used.
+// binary, the ports and the broker's pid here. Only Node built-ins, fetch and
+// the SDK's protocol modules (BUWIZ_SDK_DIR) are used.
 // Never print response payloads: they can contain host tokens, tickets,
 // signatures or taxpayer details.
-import { createHash, createPrivateKey, createPublicKey, randomBytes, sign as edSign, verify as edVerify, generateKeyPairSync } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-
-// ed25519 with raw keys, as the protocol writes them: base64url, no padding
-const PKCS8 = Buffer.from("302e020100300506032b657004220420", "hex");
-const SPKI = Buffer.from("302a300506032b6570032100", "hex");
-const b64u = (buf) => Buffer.from(buf).toString("base64url");
-const privateOf = (seed) => createPrivateKey({ key: Buffer.concat([PKCS8, Buffer.from(seed, "base64url")]), format: "der", type: "pkcs8" });
-const publicOf = (pub) => createPublicKey({ key: Buffer.concat([SPKI, Buffer.from(pub, "base64url")]), format: "der", type: "spki" });
-const pubOf = (seed) => b64u(createPublicKey(privateOf(seed)).export({ format: "der", type: "spki" }).subarray(SPKI.length));
-const sign = (seed, bytes) => b64u(edSign(null, bytes, privateOf(seed)));
-const verify = (pub, bytes, sig) => {
-  try { return edVerify(null, bytes, publicOf(pub), Buffer.from(sig, "base64url")); } catch { return false; }
-};
-const generate = () => {
-  const seed = b64u(generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).subarray(PKCS8.length));
-  return { seed, pub: pubOf(seed) };
-};
-const random128 = () => b64u(randomBytes(16));
-
-// RFC 8785 for the integers, strings, arrays and objects signed objects carry
-const canon = (v) => {
-  if (v === null || typeof v === "boolean") return String(v);
-  if (typeof v === "number") {
-    if (!Number.isSafeInteger(v)) throw new Error("signed objects carry integers only");
-    return JSON.stringify(v);
-  }
-  if (typeof v === "string") return JSON.stringify(v);
-  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
-  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}`;
-};
-const signedBytes = (v) => Buffer.from(canon(v), "utf8");
-
-// the digest an app's permissions are opened under: sha256 of their JCS text
-const permsDigest = (permissions) => createHash("sha256").update(canon(permissions ?? {})).digest("hex");
+import { pathToFileURL } from "node:url";
 
 async function main() {
-  const [RUN, BIN, PORT, MODEL_PORT] = process.argv.slice(2);
-  if (!RUN || !BIN || !PORT || !MODEL_PORT || process.env.EBIRFORMS_DATA_DIR !== `${RUN}/ebirforms-data`
+  const [RUN, BIN, PORT, MODEL_PORT, BROKER_PID] = process.argv.slice(2);
+  const SDK = process.env.BUWIZ_SDK_DIR;
+  // everything the broker reads sits inside the scratch directory
+  if (!RUN || !BIN || !PORT || !MODEL_PORT || !BROKER_PID || !SDK
+      || process.env.BUWIZ_KEYSTORE !== `file:${RUN}/keys`
+      || process.env.BUWIZ_TRUST_FILE !== `${RUN}/trust.json`
+      || process.env.EBIRFORMS_DATA_DIR !== `${RUN}/ebirforms-data`
       || process.env.BUWIZ_NO_KEYCHAIN !== "1") {
     throw new Error("use the isolated shell wrapper");
   }
+  // the SDK's own protocol modules: keys, signatures, canonical JSON, permission digests
+  const sdkv1 = (name) => import(pathToFileURL(`${SDK}/packages/conformance/src/v1/${name}.mjs`).href);
+  const { generate, pubOf, random128, sign, verify } = await sdkv1("ed");
+  const { signedBytes } = await sdkv1("jcs");
+  const { permsDigest } = await sdkv1("manifest");
   const BASE = `http://127.0.0.1:${PORT}`;
   const PLUGIN = "app.buwiz.ebirforms";
   const signed = JSON.parse(readFileSync(`${RUN}/signed.json`, "utf8"));
@@ -57,14 +36,23 @@ async function main() {
   };
   const refused = (r, code) => r.status >= 400 && r.json.ok === false && r.json.code === code;
   const value = (r) => r.json.result?.structuredContent?.result;
+  const alive = () => { try { process.kill(Number(BROKER_PID), 0); return true; } catch { return false; } };
   let ready = false;
   for (let i = 0; i < 150 && !ready; i++) {
+    if (!alive()) {
+      const tail = readFileSync(`${RUN}/broker.log`, "utf8").split("\n").filter(Boolean).slice(-5).map((l) => l.slice(0, 200));
+      console.error(`the broker exited before it answered; its log ends:\n${tail.join("\n")}`);
+      throw new Error("broker exited before startup");
+    }
     if (existsSync(`${RUN}/data/host-token`)) {
       try { ready = (await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1000) })).ok; } catch {}
     }
     if (!ready) await new Promise((r) => setTimeout(r, 200));
   }
   if (!ready) throw new Error("broker startup timed out");
+  const meta = await fetch(`${BASE}/meta`, { signal: AbortSignal.timeout(5000) }).then((r) => r.json()).catch(() => ({}));
+  const digest = createHash("sha256").update(readFileSync(process.env.BUWIZ_BROKER_BIN)).digest("hex");
+  console.log(`broker: ${meta.broker ?? "unknown"} ${meta.version ?? "unknown"}, binary sha256 ${digest}`);
   const token = readFileSync(`${RUN}/data/host-token`, "utf8").trim();
   const request = async (method, path, body, auth = true) => {
     const response = await fetch(BASE + path, {
@@ -84,6 +72,8 @@ async function main() {
     if (response.status !== 200 || response.json.ok !== true) throw new Error("session open failed");
     return { ...req, ks, res: response.json };
   };
+  // actor is who the signed call acts for: "person" (the person's own act in the app) or "agent"
+  // (the assistant pressing the app); the broker derives the call's origin from it
   const envelope = (open, tool, args = {}, over = {}, signer = open.ks.seed) => {
     const env = { v: 1, typ: "buwiz-call", plugin: open.plugin, app: open.app, open_id: open.open_id, tool, args, actor: "person", ts: Date.now(), nonce: random128(), ...over };
     return { envelope: env, sig: sign(signer, signedBytes(env)) };
@@ -119,20 +109,22 @@ async function main() {
     if (allowed.status !== 200 || allowed.json.ok !== true) throw new Error("could not switch the plugin on for chats");
     // one chat: the model's tool calls in one round; the round after carries the broker's answers
     const chat = async (name, calls) => {
-      model.script(name, [calls.map(([tool, input]) => ({ type: "tool_use", name: tool, input })), [{ type: "text", text: "Done." }]]);
+      model.script(name, calls.map(([tool, input]) => ({ type: "tool_use", name: tool, input })));
       const thread = (await post("/thread/new", {})).json.id;
       const started = await post("/chat", { prompt: `[[script:${name}]] go`, thread });
+      if (!Number.isInteger(started.json.id)) throw new Error(`chat ${name} gave no job id`);
       let job = {};
       for (let i = 0; i < 150 && !job.done; i++) {
         job = (await request("GET", `/status?id=${started.json.id}`)).json;
         if (!job.done) await new Promise((r) => setTimeout(r, 100));
       }
       const rounds = model.requests.filter((r) => r.script === name).map((r) => r.body);
-      const answers = (rounds[1]?.messages?.at(-1)?.content ?? []).filter((b) => b.type === "tool_result");
+      const answers = (rounds.find((b) => hasToolResults(b))?.messages?.at(-1)?.content ?? []).filter((b) => b.type === "tool_result");
       const turns = (await request("GET", `/turns?thread=${thread}`)).json.turns ?? [];
+      if (job.done === true && !turns.some((t) => t.role === "ai")) throw new Error(`chat ${name} is done but its thread holds no reply`);
       const cards = turns.flatMap((t) => t.links ?? []).map((l) => l.card).filter(Boolean);
       const text = (a) => typeof a.content === "string" ? a.content : (a.content ?? []).map((c) => c.text ?? "").join("\n");
-      return { done: job.done === true, tools: (rounds[0]?.tools ?? []).map((t) => t.name), answers: answers.map((a) => ({ error: a.is_error === true, text: text(a) })), cards };
+      return { done: job.done === true, tools: (rounds.find((b) => !hasToolResults(b))?.tools ?? []).map((t) => t.name), answers: answers.map((a) => ({ error: a.is_error === true, text: text(a) })), cards };
     };
     const formsChat = await chat("open-forms", [["ebirforms_app_open", { app: "forms" }]]);
     check("assistant Forms open produces a full app card", formsChat.done && formsChat.answers[0]?.error === false
@@ -159,7 +151,10 @@ async function main() {
 
   const forms = await openApp("forms");
   const deadlines = await openApp("deadlines");
-  const certificate = (open) => !!open.res.cert && verify(install.json.plugin_pub, signedBytes(open.res.cert), open.res.cert_sig)
+  // the plugin's public key, derived from its key file in the scratch keystore, must be the one the broker reports
+  const pluginSeed = readFileSync(`${RUN}/keys/${PLUGIN}.key`, "utf8").trim();
+  check("the broker reports the public key of the plugin's stored key", pubOf(pluginSeed) === install.json.plugin_pub);
+  const certificate = (open) => !!open.res.cert && verify(pubOf(pluginSeed), signedBytes(open.res.cert), open.res.cert_sig)
     && open.res.cert.app === open.app && open.res.cert.open_id === open.open_id;
   check("Forms opens with a verified certificate", certificate(forms));
   check("Deadlines card opens with a verified certificate and inline placement", certificate(deadlines)
@@ -211,7 +206,8 @@ async function main() {
   const formsCreate = await post("/v1/host/call", envelope(forms, CREATE, newTaxpayer("000555666", "043")));
   check("New taxpayer is outside Forms permissions", refused(formsCreate, "permission_denied"));
   const agentCreate = await post("/v1/host/call", envelope(profile, CREATE, newTaxpayer("000777888", "043"), { actor: "agent" }));
-  check("a signed New taxpayer call acting as the agent is refused", refused(agentCreate, "permission_denied"));
+  check("a signed New taxpayer call acting as the agent is refused as a person's to run", refused(agentCreate, "permission_denied")
+    && /person's to run/.test(agentCreate.json.message ?? ""));
   const notGranted = await post("/v1/host/call", envelope(deadlines, "ebirforms_resolve", {}));
   check("a tool outside Deadlines permissions is refused", refused(notGranted, "permission_denied"));
   const forged = await post("/v1/host/call", envelope(forms, "ebirforms_app_screen_forms_index", { args: [] }, {}, generate().seed));
@@ -230,11 +226,13 @@ async function main() {
 }
 
 // a scripted stand-in for the model on loopback: Messages over SSE. A script
-// is a list of steps, one per request; a step is a list of content blocks.
+// is the tool calls it makes when asked; a request that carries tool results gets the closing answer.
 // The newest user text with [[script:<name>]] picks the script.
+// whether the request's last message carries tool results
+const hasToolResults = (body) => (body.messages?.at(-1)?.content ?? []).some?.((b) => b.type === "tool_result") === true;
+
 async function scriptedModel(port) {
   const scripts = new Map();
-  const used = new Map();
   const requests = [];
   const server = createServer((req, res) => {
     const chunks = [];
@@ -245,12 +243,10 @@ async function scriptedModel(port) {
       if (!/\/v1\/messages$/.test(req.url)) { res.writeHead(404).end("{}"); return; }
       const texts = (body.messages ?? []).filter((m) => m.role === "user").map((m) => typeof m.content === "string" ? m.content : (m.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("\n"));
       const name = texts.reverse().map((t) => /\[\[script:([\w.-]+)\]\]/.exec(t)?.[1]).find(Boolean);
-      const steps = scripts.get(name);
+      const calls = scripts.get(name);
       requests.push({ script: name, body });
-      if (!steps) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "msg_x", type: "message", role: "assistant", model: body.model, content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } })); return; }
-      const k = used.get(name) ?? 0;
-      used.set(name, k + 1);
-      const content = (steps[Math.min(k, steps.length - 1)]).map((b, i) => b.type === "tool_use" ? { ...b, id: `toolu_${k}_${i}` } : b);
+      if (!calls) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "msg_x", type: "message", role: "assistant", model: body.model, content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } })); return; }
+      const content = hasToolResults(body) ? [{ type: "text", text: "Done." }] : calls.map((b, i) => ({ ...b, id: `toolu_${i}` }));
       const stop_reason = content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn";
       const message = { id: "msg_x", type: "message", role: "assistant", model: body.model, content, stop_reason, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } };
       if (!body.stream) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(message)); return; }
@@ -275,7 +271,7 @@ async function scriptedModel(port) {
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(Number(port), "127.0.0.1", resolve); });
   return {
     requests,
-    script: (name, steps) => { scripts.set(name, steps); used.delete(name); },
+    script: (name, calls) => scripts.set(name, calls),
     close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }),
   };
 }

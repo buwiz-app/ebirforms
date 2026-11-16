@@ -109,16 +109,16 @@ BUWIZ_SDK_DIR="$PWD/sdk" BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/check-all.
 ```
 
 `BUWIZ_SDK_DIR` (a `buwiz-sdk` checkout at the pinned revision, `bun install` run, Node 22.13 or newer) is what the
-SDK conformance step needs; `BUWIZ_BROKER_BIN` (an executable `buwiz-broker` binary) is what the host test starts.
+SDK conformance step and the host test need (the host test uses the SDK's key and JSON modules); `BUWIZ_BROKER_BIN` (an executable `buwiz-broker` binary) is what the host test starts.
 `check-all.sh` checks both before it starts. `tools/conformance.sh` signs with a throwaway test key, by the broker's
 `sign-manifest` when `BUWIZ_BROKER_BIN` is set, else by the SDK's signer. A release is signed only by the broker
 (`buwiz-broker sign-manifest`, through `BUWIZ_BROKER_BIN`), never by the SDK's tools.
 
 The gates include the Rust checks, a no-detached-signal-setters check over `apps/`, the SDK-1 import gate
 (`tools/check-nsh-imports.mjs`: every app imports from `nsh` only what the Bot's loader allows), the SDK links
-against the pinned revision, **SDK conformance** and the **broker host test**. Run just the latter with `BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/bot/host-test.sh`.
+against the pinned revision, **SDK conformance** and the **broker host test**. Run just the latter with `BUWIZ_SDK_DIR="$PWD/sdk" BUWIZ_BROKER_BIN=/path/to/buwiz-broker tools/bot/host-test.sh`.
 It starts the broker on a temporary home and data folder (port 8811 and the next one, for a scripted model on
-loopback; override with `EBIRFORMS_HOST_PORT`, 8811 or above), with per-run trust, `ebirforms-test-01`, a file
+loopback; override with `EBIRFORMS_HOST_PORT`, 8811 through 65534), with per-run trust, `ebirforms-test-01`, a file
 keystore, and a synthetic scratch taxpayer database, installs the signed manifest and checks the host routes over
 HTTP, the assistant's tools through a chat with the scripted model. It never uses a keychain or signs in; the
 account endpoint points to loopback.

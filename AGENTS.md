@@ -59,7 +59,8 @@ open it), the SDK links against the pin, `tools/conformance.sh` and `tools/bot/h
 a throwaway test key (`ebirforms-test-01`, never the release key) and runs the SDK's `buwiz-plugin-test`. It needs a
 `buwiz-sdk` checkout at the revision `tools/sdk-pin.sh` prints, with `bun install` run (`BUWIZ_SDK_DIR`); the gate
 stops at once if it is not. The host test starts a `buwiz-broker` binary (`BUWIZ_BROKER_BIN`, required, executable) on a
-temporary data folder and drives it over loopback HTTP. The conformance runner comes from the SDK; a release is signed
+temporary data folder and drives it over loopback HTTP; it needs the same SDK checkout as conformance. The plugin's own
+refusal of assistant-origin calls is tested in `tests/mcp_contract.rs` and `tests/new_taxpayer.rs`. The conformance runner comes from the SDK; a release is signed
 with the broker, `buwiz-broker sign-manifest`, through `BUWIZ_BROKER_BIN`.
 
 ## Do not
