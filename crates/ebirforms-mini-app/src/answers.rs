@@ -15,6 +15,7 @@ use chrono::NaiveDate;
 use serde_json::{Map, Value, json};
 
 use crate::tickets::{self, Subject};
+use crate::tins::PAUSED_LINE;
 
 /// The longest list a lookup answers.
 const MATCHES_MAX: usize = 20;
@@ -351,10 +352,17 @@ fn newer_than(refused_at: Option<i64>, gate: &QueueGate) -> bool {
 /// A return's stage as the card reads it. `gate`: what the account's list
 /// says now about the return's TIN. `false`: the row is not shown (a
 /// refusal the list says is fixed since).
+///
+/// A return the queue holds back (behind another, slowed down, still waiting,
+/// needing the person, paused) stays queued; its `line` is the crates' own
+/// sentence for it ([`bir_app_core::queue_line`], read at `now`, seconds since
+/// the epoch; for a paused queue, [`PAUSED_LINE`]), and `next_try` is the
+/// stage's, as for a failed send. The stored reason of these stages stays out.
 fn stage(
     stage: Option<&SendStage>,
     gate: &QueueGate,
     refused_at: Option<i64>,
+    now: i64,
     out: &mut Value,
 ) -> bool {
     // A refusal for the TIN (stored), as the account's list says it stands
@@ -388,18 +396,17 @@ fn stage(
             }
         };
     }
-    let name = match stage {
-        None | Some(SendStage::Queued { .. }) => "queued",
-        Some(SendStage::Sending) => "sending",
-        Some(SendStage::Failed { .. }) => "failed",
-        Some(SendStage::NeedsAttention { .. }) => "needs_attention",
-        Some(SendStage::GaveUp { .. }) => "gave_up",
-        Some(SendStage::Refused { .. }) => "refused",
-        Some(SendStage::Sent { .. }) => "sent",
-        Some(SendStage::Confirmed { .. }) => "confirmed",
-        Some(SendStage::Paid) => "paid",
-    };
-    out["stage"] = json!(name);
+    // a return with no stored stage is a plain queued one
+    out["stage"] = json!(stage.map_or("queued", SendStage::name));
+    if matches!(stage, Some(SendStage::Paused)) {
+        // the crates' sentence names an Auto switch this app does not have
+        out["line"] = json!(PAUSED_LINE);
+    } else if let Some(line) = stage.and_then(|stage| {
+        let at = chrono::DateTime::from_timestamp(now, 0)?;
+        bir_app_core::queue_line(stage, at)
+    }) {
+        out["line"] = json!(line);
+    }
     match stage {
         Some(SendStage::Queued { next_retry_at }) => {
             out["next_try"] = json!(next_retry_at);
@@ -413,6 +420,19 @@ fn stage(
             out["attempts"] = json!(attempts);
             out["next_try"] = json!(next_retry_at);
         }
+        // the row's `line` carries the plain words: the stored reason stays out
+        Some(
+            SendStage::Behind { next_retry_at, .. }
+            | SendStage::SlowedDown { next_retry_at, .. }
+            | SendStage::StillWaiting { next_retry_at, .. },
+        ) => {
+            if let Some(SendStage::StillWaiting { since, .. }) = stage {
+                // `since` is already the row's own time: this one is when it was queued
+                out["waiting_since"] = json!(since);
+            }
+            out["next_try"] = json!(next_retry_at);
+        }
+        Some(SendStage::NeedsYou { .. }) => {}
         Some(SendStage::NeedsAttention { reason } | SendStage::GaveUp { reason }) => {
             out["reason"] = json!(reason);
         }
@@ -488,7 +508,13 @@ pub(crate) fn queue_list(
         } else {
             live.none()
         };
-        stage(sent_stage, &gate, seconds_of(&row.updated_at), &mut out);
+        stage(
+            sent_stage,
+            &gate,
+            seconds_of(&row.updated_at),
+            live.now,
+            &mut out,
+        );
         if row.status == "Queued" {
             waiting.push(out);
         } else {
@@ -503,7 +529,7 @@ pub(crate) fn queue_list(
         "back_to_draft": back_to_draft,
         "sent": sent,
         "note": if signed_in {
-            "waiting: queued in Forms, sent to the BIR in the background. back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line and what its step button does, and do not suggest sending it again or retrying. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
+            "waiting: queued in Forms, sent to the BIR in the background, one at a time. A waiting row may carry a `line` (the plain sentence for its stage: say it as it is, with its time) and a `next_try`; stage behind, slowed_down, still_waiting and paused are still queued and tried again by themselves (paused: the queue is switched off and nothing is sent until it is switched back on), and needs_you stopped trying by itself: the person fixes the cause and presses Retry in the Forms app. Only the person can press it: you cannot, and never offer to. Never suggest resending. back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line and what its step button does, and do not suggest sending it again or retrying. sent: sent in the last 30 days. dry_run comes from the return's receipt: true means the server only simulated the send. A sent return with no receipt has no dry_run: say it is not known whether it was a dry run, never that it was sent for real, and never suggest sending it again (the BIR may already have it; the user checks in the Forms app). The user queues and cancels in the Forms app."
         } else {
             "This computer is not signed in to Buwiz, so nothing is sent: the user signs in in the Sign-in app (ebirforms_app_open `register`). back_to_draft: Buwiz refused the return for its TIN, nothing was sent, and it is a draft again: say the row's line, and do not suggest retrying. The user queues and cancels in the Forms app."
         },
@@ -558,6 +584,7 @@ fn back_to_draft(
             Some(&refused.stage),
             &live.gate(&refused.row.tin),
             refused.refused_at(),
+            live.now,
             &mut out,
         ) {
             rows.push(out);
@@ -595,6 +622,9 @@ fn seconds_of(text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed clock for the waiting lines: 2026-11-01T00:00:00Z.
+    const NOW: i64 = 1_793_491_200;
 
     #[test]
     fn only_a_number_reads_as_a_rate() {
@@ -762,6 +792,7 @@ mod tests {
             }),
             &no_state(),
             None,
+            NOW,
             &mut bare,
         );
         assert_eq!(bare["stage"], "sent");
@@ -782,11 +813,112 @@ mod tests {
                 }),
                 &no_state(),
                 None,
+                NOW,
                 &mut row,
             );
             assert_eq!(row["receipt"], true);
             assert_eq!(row["dry_run"], dry_run, "{mode}");
             assert!(row.get("receipt_note").is_none());
+        }
+    }
+
+    /// The row `stage` makes of a stored stage, read at `NOW`.
+    fn read(stage_in: SendStage) -> Value {
+        let mut row = json!({ "since": "2026-10-30 08:00:00" });
+        assert!(stage(Some(&stage_in), &no_state(), None, NOW, &mut row));
+        row
+    }
+
+    /// A time half an hour after `NOW`.
+    const IN_30_MIN: &str = "2026-11-01T00:30:00Z";
+
+    #[test]
+    fn a_return_behind_another_stays_queued_with_its_line() {
+        let row = read(SendStage::Behind {
+            reason: None,
+            next_retry_at: Some(IN_30_MIN.into()),
+        });
+        assert_eq!(row["stage"], "behind");
+        assert_eq!(row["line"], "Goes right after the one above.");
+        assert_eq!(row["next_try"], IN_30_MIN);
+        assert!(row["reason"].is_null());
+    }
+
+    #[test]
+    fn a_slowed_down_return_reads_its_time() {
+        let row = read(SendStage::SlowedDown {
+            reason: "no connection".into(),
+            next_retry_at: Some(IN_30_MIN.into()),
+        });
+        assert_eq!(row["stage"], "slowed_down");
+        assert!(row.get("reason").is_none());
+        assert_eq!(row["next_try"], IN_30_MIN);
+        let line = row["line"].as_str().unwrap();
+        assert!(line.contains("Tries again in about 30 min."), "{line}");
+    }
+
+    #[test]
+    fn a_return_still_waiting_keeps_when_it_was_queued() {
+        let row = read(SendStage::StillWaiting {
+            since: "2026-10-30T00:00:00Z".into(),
+            reason: Some("no connection".into()),
+            next_retry_at: Some(IN_30_MIN.into()),
+        });
+        assert_eq!(row["stage"], "still_waiting");
+        assert_eq!(row["waiting_since"], "2026-10-30T00:00:00Z");
+        assert_eq!(
+            row["since"], "2026-10-30 08:00:00",
+            "the row's own time stays"
+        );
+        assert!(row.get("reason").is_none());
+        assert_eq!(row["next_try"], IN_30_MIN);
+        let line = row["line"].as_str().unwrap();
+        assert!(line.starts_with("Still waiting after 48 hours."), "{line}");
+    }
+
+    #[test]
+    fn a_return_that_needs_you_says_so_without_the_stored_reason() {
+        let row = read(SendStage::NeedsYou {
+            reason: "no connection".into(),
+        });
+        assert_eq!(row["stage"], "needs_you");
+        assert!(row.get("reason").is_none());
+        let line = row["line"].as_str().unwrap();
+        assert!(line.contains("press Retry"), "{line}");
+    }
+
+    #[test]
+    fn a_paused_queue_reads_paused() {
+        let row = read(SendStage::Paused);
+        assert_eq!(row["stage"], "paused");
+        assert_eq!(row["line"], PAUSED_LINE);
+        assert!(!PAUSED_LINE.contains("Auto"));
+        assert!(row.get("next_try").is_none());
+    }
+
+    #[test]
+    fn a_failed_send_carries_the_line_with_its_time() {
+        let row = read(SendStage::Failed {
+            reason: "no connection".into(),
+            attempts: 1,
+            next_retry_at: Some(IN_30_MIN.into()),
+        });
+        assert_eq!(row["stage"], "failed");
+        assert_eq!(row["next_try"], IN_30_MIN);
+        let line = row["line"].as_str().unwrap();
+        assert!(line.contains("Tries again in about 30 min."), "{line}");
+    }
+
+    #[test]
+    fn the_stages_with_words_of_their_own_have_no_line() {
+        for stage_in in [
+            SendStage::Sending,
+            SendStage::Queued {
+                next_retry_at: None,
+            },
+        ] {
+            let row = read(stage_in);
+            assert!(row.get("line").is_none(), "{row}");
         }
     }
 
@@ -887,6 +1019,7 @@ mod tests {
                 Some(&refused(code, message)),
                 &no_state(),
                 None,
+                NOW,
                 &mut row
             ));
             assert_eq!(row["stage"], "refused", "{code:?}");
@@ -909,6 +1042,7 @@ mod tests {
             Some(&refused(TinRefusal::NotActive, "x")),
             &gate,
             None,
+            NOW,
             &mut row
         ));
         assert_eq!(row["state"], "not_allowed");
@@ -934,6 +1068,7 @@ mod tests {
             )),
             &no_state(),
             None,
+            NOW,
             &mut row,
         );
         assert_eq!(row["stage"], "failed");
@@ -950,6 +1085,7 @@ mod tests {
             )),
             &no_state(),
             None,
+            NOW,
             &mut plain,
         );
         assert_eq!(plain["stage"], "failed");
@@ -970,6 +1106,7 @@ mod tests {
             Some(&refused(TinRefusal::Unverified, "x")),
             &active,
             None,
+            NOW,
             &mut row
         ));
         // a queued return that failed with a TIN code is asked again at once
@@ -982,6 +1119,7 @@ mod tests {
             }),
             &active,
             None,
+            NOW,
             &mut waiting
         ));
         assert_eq!(waiting["stage"], "queued");
@@ -994,10 +1132,10 @@ mod tests {
         let stored = refused(TinRefusal::Unverified, "x");
         // read at 1000: a refusal written at 2000 stands, one written at 500 is answered
         let mut row = json!({});
-        assert!(stage(Some(&stored), &active, Some(2_000), &mut row));
+        assert!(stage(Some(&stored), &active, Some(2_000), NOW, &mut row));
         assert_eq!(row["chip"], "Not verified", "{row}");
         let mut row = json!({});
-        assert!(!stage(Some(&stored), &active, Some(500), &mut row));
+        assert!(!stage(Some(&stored), &active, Some(500), NOW, &mut row));
     }
 
     #[test]
@@ -1010,6 +1148,7 @@ mod tests {
             Some(&refused(TinRefusal::Pending, "x")),
             &info,
             None,
+            NOW,
             &mut row
         ));
     }
@@ -1022,6 +1161,7 @@ mod tests {
             Some(&refused(TinRefusal::NotActive, "x")),
             &live,
             None,
+            NOW,
             &mut row
         ));
         assert_eq!(row["chip"], "Paused");
@@ -1043,7 +1183,7 @@ mod tests {
         );
         for gate in [&live, &no_state()] {
             let mut row = json!({});
-            stage(Some(&stored), gate, None, &mut row);
+            stage(Some(&stored), gate, None, NOW, &mut row);
             let text = row.to_string();
             assert!(
                 !text.contains("JUANA") && !text.contains("daylight"),
@@ -1058,7 +1198,7 @@ mod tests {
         // the assistant gets the plain sentence, from the list's row too: the
         // fixed reasons are for app screens
         let mut row = json!({});
-        stage(Some(&stored), &live, None, &mut row);
+        stage(Some(&stored), &live, None, NOW, &mut row);
         assert_eq!(row["line"], "Buwiz sent this TIN back for a fix.");
     }
 
@@ -1082,7 +1222,7 @@ mod tests {
             },
         ] {
             let mut row = json!({});
-            stage(Some(&stage_in), &live, None, &mut row);
+            stage(Some(&stage_in), &live, None, NOW, &mut row);
             assert!(!row.to_string().contains("MARIA"), "{row}");
             assert_eq!(row["line"], "Buwiz sent this TIN back for a fix.");
         }

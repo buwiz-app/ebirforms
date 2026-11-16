@@ -476,7 +476,20 @@ function stageOf(r: any): [string, Tone, string] {
   switch (r.stage) {
     case "sending":
       return ["Sending", "info", "Being sent to the BIR now"];
+    // a return the queue holds back is still queued: the server's line says why and when (it tries again by itself)
+    case "behind":
+      return ["Queued", "info", String(r.line || "")];
+    case "slowed_down":
+      return ["Slowed", "warn", String(r.line || "")];
+    case "still_waiting":
+      return ["Waiting", "warn", String(r.line || "")];
+    case "paused":
+      return ["Paused", "plain", String(r.line || "")];
+    case "needs_you":
+      return ["Needs you", "danger", String(r.line || "")];
     case "failed":
+      // the server's line carries the time of the next try; without one it still tries again by itself
+      if (r.line) return ["Retrying", "warn", String(r.line)];
       return ["Retrying", "warn", `Send failed${r.reason ? `: ${r.reason}` : ""} · it tries again by itself`];
     case "needs_attention":
       return ["Check", "danger", `The BIR may have it already${r.reason ? `: ${r.reason}` : ""} · open it in Forms`];
@@ -492,7 +505,8 @@ function stageOf(r: any): [string, Tone, string] {
     case "paid":
       return ["Paid", "ok", "Paid"];
     default:
-      return ["Waiting", "info", `Waiting to send since ${since}`];
+      // a queued return waiting a while for the queue-wide back-off has the time in its line
+      return ["Waiting", "info", r.line ? String(r.line) : `Waiting to send since ${since}`];
   }
 }
 

@@ -35,8 +35,9 @@ pub(crate) const PROTOCOL: &str = buwiz_plugin::manifest::PROTOCOL;
 pub const PLUGIN_ID: &str = "app.buwiz.ebirforms";
 pub(crate) const SHORT: &str = "ebirforms";
 /// This release of `app.buwiz.ebirforms` (0.3.0 was the first protocol 1.0
-/// release; 0.4.0 adds the TIN state tools and the account link).
-pub(crate) const VERSION: &str = "0.4.0";
+/// release; 0.4.0 adds the TIN state tools and the account link; 0.4.1
+/// follows the crates' smart queue: the waiting stages, no new tool).
+pub(crate) const VERSION: &str = "0.4.1";
 pub(crate) const MANIFEST_URI: &str = "buwiz://manifest";
 pub(crate) const MANIFEST_MIME: &str = "application/json";
 /// The signed manifest file this process serves.
@@ -687,6 +688,34 @@ mod tests {
         }
     }
 
+    /// Every stage word the crates name (`SendStage::name`) has a case in the
+    /// Sending queue card, with its chip; the Forms app reads the sentence the
+    /// host gives for a return the queue holds back.
+    #[test]
+    fn the_screens_read_every_queue_stage() {
+        for (word, chip) in [
+            ("behind", "Queued"),
+            ("slowed_down", "Slowed"),
+            ("still_waiting", "Waiting"),
+            ("paused", "Paused"),
+            ("needs_you", "Needs you"),
+        ] {
+            let case = format!("case \"{word}\":");
+            let at = CARD_DATES_SOURCE
+                .find(&case)
+                .unwrap_or_else(|| panic!("card-dates has no case for {word}"));
+            let next = CARD_DATES_SOURCE[at..].find("return [").unwrap();
+            assert!(
+                CARD_DATES_SOURCE[at + next..].starts_with(&format!("return [\"{chip}\"")),
+                "{word} reads the chip {chip}"
+            );
+        }
+        let forms = app_source("forms").expect("the Forms app");
+        for word in ["\"NeedsYou\"", "queue_line", "Cancel queue"] {
+            assert!(forms.contains(word), "forms has no {word}");
+        }
+    }
+
     /// The Sending queue card only reads: its only calls are its card's
     /// reads and the link a step opens, never one that queues, cancels or
     /// releases a return.
@@ -717,7 +746,11 @@ mod tests {
         let added: [(&str, &[&str], bool); 4] = [
             (
                 "forms",
-                &["ebirforms_account_tins", "ebirforms_account_tin_link"],
+                &[
+                    "ebirforms_account_tins",
+                    "ebirforms_account_tin_link",
+                    "ebirforms_app_retry_queued",
+                ],
                 true,
             ),
             (

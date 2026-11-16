@@ -10,7 +10,8 @@
 //! they come.
 
 use bir_app_core::{
-    BirApp, QueueGate, TinKey, TinRefusal, TinState, TinStatement, TinStep, TinTone,
+    BirApp, QueueGate, SendStage, TinKey, TinRefusal, TinState, TinStatement, TinStep, TinTone,
+    queue_line,
 };
 use bir_submit::{TinsError, TinsRead};
 use serde_json::{Map, Value, json};
@@ -53,6 +54,17 @@ pub(crate) fn assistant_fields(statement: &TinStatement, out: &mut Value) {
     out["step"] = step_json(statement.step);
 }
 
+/// What a paused queue reads in the Forms app: the crates' sentence names an
+/// Auto switch this app does not have.
+pub(crate) const PAUSED_LINE: &str =
+    "Your queue is paused. Nothing is sent until it is switched back on.";
+
+/// What a return still waiting reads in the Forms app: the crates' sentence
+/// counts the hours since it was queued, and the host's send state gives no
+/// time, so a count here could be false.
+pub(crate) const STILL_WAITING_LINE: &str =
+    "Still waiting. It keeps trying by itself; you can cancel it or file another way.";
+
 /// A return's send state (`queued_send_state`) for the Forms app: when it
 /// carries a TIN refusal's `step` (a kind), its `step_button` (`{kind, label}`
 /// as the account tools give it), and, for a return that is a draft again, the
@@ -69,6 +81,35 @@ pub(crate) fn with_button_and_note(mut state: Value) -> Value {
     }
     if state["stage"] == "Refused" {
         state["draft_note"] = json!(BirApp::DRAFT_NOTE);
+    }
+    // the sentence for a queued return the queue holds back, from the crates'
+    // own words (the host gives no time, so only the stages that need none)
+    // Paused is the one the crates word with a button this app lacks ("press
+    // Auto"): nothing here can pause the queue, so it says only what holds
+    if state["stage"] == "Paused" {
+        state["queue_line"] = json!(PAUSED_LINE);
+    }
+    // StillWaiting: the crates' line needs the time it was queued (not given)
+    if state["stage"] == "StillWaiting" {
+        state["queue_line"] = json!(STILL_WAITING_LINE);
+    }
+    let held = match (state["stage"].as_str(), state["reason"].as_str()) {
+        (Some("NeedsYou"), Some(reason)) => Some(SendStage::NeedsYou {
+            reason: reason.to_owned(),
+        }),
+        (Some("Behind"), reason) => Some(SendStage::Behind {
+            reason: reason.map(str::to_owned),
+            next_retry_at: None,
+        }),
+        // with no time given, the crates' line reads "It tries again by itself."
+        (Some("SlowedDown"), reason) => Some(SendStage::SlowedDown {
+            reason: reason.unwrap_or_default().to_owned(),
+            next_retry_at: None,
+        }),
+        _ => None,
+    };
+    if let Some(line) = held.and_then(|stage| queue_line(&stage, chrono::Utc::now())) {
+        state["queue_line"] = json!(line);
     }
     // the chip's tone, from the stored reason's code; the server's sentence
     // itself stays out of a screen (the line says it), whatever the stage
@@ -190,6 +231,33 @@ pub(crate) fn answer(read: &TinsRead, rows: Vec<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_back_send_state_carries_its_sentence() {
+        let needs = with_button_and_note(
+            json!({ "stage": "NeedsYou", "reason": "no connection", "line": null }),
+        );
+        let line = needs["queue_line"].as_str().unwrap();
+        assert!(line.contains("press Retry"), "{line}");
+        assert!(needs["line"].is_null(), "the TIN line stays the TIN's");
+        let paused = with_button_and_note(json!({ "stage": "Paused", "reason": null }));
+        assert_eq!(paused["queue_line"], PAUSED_LINE);
+        assert!(!PAUSED_LINE.contains("Auto"), "the app has no Auto switch");
+        let behind = with_button_and_note(json!({ "stage": "Behind", "reason": null }));
+        assert_eq!(behind["queue_line"], "Goes right after the one above.");
+        let slowed = with_button_and_note(json!({ "stage": "SlowedDown", "reason": "x" }));
+        assert_eq!(
+            slowed["queue_line"],
+            "Returns are getting in for others. The problem may be your own connection. It tries again by itself."
+        );
+        let waiting = with_button_and_note(json!({ "stage": "StillWaiting", "reason": null }));
+        assert_eq!(waiting["queue_line"], STILL_WAITING_LINE);
+        assert!(!STILL_WAITING_LINE.contains("hours"), "no time is known");
+        for stage in ["Queued", "Sending", "Failed", "Sent"] {
+            let plain = with_button_and_note(json!({ "stage": stage, "reason": "x" }));
+            assert!(plain.get("queue_line").is_none(), "{stage}");
+        }
+    }
 
     #[test]
     fn only_a_page_of_the_account_site_is_a_link() {

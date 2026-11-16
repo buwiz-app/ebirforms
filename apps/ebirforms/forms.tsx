@@ -108,6 +108,11 @@ const H = {
     const r: unknown = await bir<unknown>("queued_send_state", tin, code, year, slot);
     return r && typeof r === "object" && !Array.isArray(r) ? (r as SendState) : "unreadable";
   },
+  /** A person's Retry on a stopped return: `{ pressed, going, goes_at, press_again_at, words }`; `words` is shown as it comes. */
+  retryQueued: async (tin: string, code: string, year: number, slot: number | null) => {
+    if (!addressable(slot)) throw new Error("This return cannot be retried from here. Open the return.");
+    return bir<{ pressed: boolean; going: boolean; goes_at: string | null; press_again_at: string | null; words: string }>("retry_queued", tin, code, year, slot);
+  },
   releaseClaim: async (tin: string, code: string, year: number, slot: number | null, claim: string | null) => {
     if (!addressable(slot)) throw new Error("This return cannot be released from here. Open the return.");
     return bir<{ released: boolean; status: string | null }>("release_abandoned_claim", tin, code, year, slot, RELEASE_REASON, claim);
@@ -123,6 +128,8 @@ type SendState = {
   stage: string | null; reason: string | null; claim: string | null; releasable: boolean;
   /** A return Buwiz refused for its TIN, in BIR's words: the chip, its tone, the line, the step's button and, once it is a draft again, the draft note. */
   chip?: string | null; tone?: string | null; line?: string | null; step_button?: { kind: string; label: string } | null; draft_note?: string | null;
+  /** The sentence for a queued return the queue holds back (`NeedsYou`, `Paused`, `Behind`), from eBIRForms' own words; it is never a TIN's line. */
+  queue_line?: string | null;
 };
 /** One TIN's state on the Buwiz account as BIR words it: `chip`, `line` and `step.label` are shown as they come
  *  (null when the TIN is active or its state is not known); `can_queue` is false only for a state that cannot send. */
@@ -1570,7 +1577,7 @@ async function cancelQueue(s: FS) {
 }
 
 /**
- * The slot the host addresses a stored return by (`cancel_queued`, `queued_send_state`, `release_abandoned_claim`):
+ * The slot the host addresses a stored return by (`cancel_queued`, `queued_send_state`, `release_abandoned_claim`, `retry_queued`):
  * its stored key, which is not the page period for an entry-numbered or date-keyed form. The opened return's
  * `stored_period`, else the page period; the list row's `return_key`, else its `period`. A stored key is used as
  * given (0 is a real key, so `??`); only when there is none does the page period stand in, and there 0 means "no
@@ -1684,6 +1691,25 @@ async function releaseStuck(
     toast(r.released ? "Released. The return is an editable draft again." : "Nothing to release. The return was already updated.");
   } catch (e) {
     toast(errText(e), "danger");
+  }
+  settled();
+}
+
+/** The person's Retry on a stopped ("Needs you") return: one press, then its words as they came (going now, or when it may be pressed again). Never with "try anyway". */
+let retrying = false;
+async function pressRetry(at: { tin: string; code: string; year: number; slot: number | null }, settled: () => void) {
+  if (retrying) {
+    toast("Still working on the last Retry.", "info");
+    return;
+  }
+  retrying = true;
+  try {
+    const r = await H.retryQueued(at.tin, at.code, at.year, at.slot);
+    toast(r.words, r.pressed ? "success" : "info");
+  } catch (e) {
+    toast(errText(e), "danger");
+  } finally {
+    retrying = false;
   }
   settled();
 }
@@ -2858,11 +2884,11 @@ function SubmitConfirm(p: { s: FS }) {
 }
 
 /**
- * What a Queued return offers, from its send state: Cancel queue when nothing
- * has claimed it (or the state cannot be read), the armed Release when the
+ * What a Queued return offers, from its send state: Cancel queue (and Retry when it
+ * stopped, `NeedsYou`) when nothing has claimed it (or the state cannot be read), the armed Release when the
  * host says a release would go through, else a line saying why neither.
  */
-function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () => boolean; arm: (on: boolean) => void; cancel: () => void; release: (st: SendState) => void; ghost?: boolean }) {
+function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () => boolean; arm: (on: boolean) => void; cancel: () => void; release: (st: SendState) => void; retry: () => void; ghost?: boolean }) {
   const mode = () => {
     const st = p.st();
     if (st === undefined) return "loading";
@@ -2878,6 +2904,12 @@ function QueueActions(p: { st: () => SendRead; armed: () => boolean; busy: () =>
   return (
     <>
       <If when={mode() === "cancel"}>
+        <If when={Boolean(readable()?.queue_line)}>
+          <Text class={`text-xs ${readable()?.stage === "NeedsYou" ? C.danger : C.fg2}`}>{readable()?.queue_line || ""}</Text>
+        </If>
+        <If when={readable()?.stage === "NeedsYou"}>
+          <Btn label="Retry" variant={p.ghost ? "ghost" : undefined} onPress={p.retry} />
+        </If>
         <Btn label="Cancel queue" variant={p.ghost ? "ghost" : undefined} onPress={p.cancel} />
       </If>
       <If when={mode() === "release"}>
@@ -2970,6 +3002,7 @@ function FormBar(p: { s: FS }) {
           arm={(on) => { s.releaseArmed = on; bump(); }}
           cancel={() => cancelQueue(s)}
           release={() => releaseOpened(s)}
+          retry={() => pressRetry({ tin: s.tin, code: s.code, year: s.year, slot: openedSlot(s) }, () => reload(s))}
         />
       </If>
       <If when={(rev(), !s.filedOriginalView && !s.sample && s.status !== "Queued" && s.editable)}>
@@ -3388,6 +3421,7 @@ function FormsPicker() {
             const finish = () => (picker.releasing.set(null), picker.refresh());
             releaseStuck({ tin: r.tin, code: r.form_code, year: r.taxable_year, slot: rowSlot(r) }, st, finish);
           }}
+          retry={() => pressRetry({ tin: r.tin, code: r.form_code, year: r.taxable_year, slot: rowSlot(r) }, () => picker.refresh())}
         />
       </If>
       <Chip text={r.status} tone={statusTone(r.status)} />
