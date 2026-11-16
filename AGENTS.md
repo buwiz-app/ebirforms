@@ -12,7 +12,7 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 | `crates/ebirforms-mini-app/` | the binary: MCP server, manifest, signing, tickets, TIN scrubbing |
 | `apps/ebirforms/` | the app screens, TSX until each is ported to a native nsh Rust screen crate in this repo (option C: compiled into the Bot, pinned by rev); a TSX screen is deleted once its native port passes the same tests |
 | `tests/` | integration tests, wired in the crate's `Cargo.toml` with `[[test]] path = "../../tests/…"` |
-| `tools/` | `check-all.sh` (every gate), `conformance.sh`, `sdk-pin.sh`, `bot/host-test.sh`, `release/publish.sh` (a protocol 1.0 package release) |
+| `tools/` | `check-all.sh` (every gate), `conformance.sh`, `sdk-pin.sh`, `bot/host-test.sh` (the host test against a real broker), `release/publish.sh` (a protocol 1.0 package release) |
 | `legacy/` | the first mini app from `hexuria/buwiz-forms`, kept only as the porting reference; it does not build |
 
 ## Invariants
@@ -58,9 +58,9 @@ names the Bot's loader allows, `buwiz-bot app/src/mini_v1/load.rs` `SDK1_NSH`; a
 open it), the SDK links against the pin, `tools/conformance.sh` and `tools/bot/host-test.sh`. Conformance signs with
 a throwaway test key (`ebirforms-test-01`, never the release key) and runs the SDK's `buwiz-plugin-test`. It needs a
 `buwiz-sdk` checkout at the revision `tools/sdk-pin.sh` prints, with `bun install` run (`BUWIZ_SDK_DIR`); the gate
-stops at once if it is not. Only the host test still needs a Buwiz Bot checkout (`BUWIZ_BOT_DIR`) with its
-`server/node_modules`; never switch branches in it. The conformance runner and its test signer come from the SDK;
-a release is signed with the Bot's broker, `buwiz-broker sign-manifest`, through `BUWIZ_BROKER_BIN`.
+stops at once if it is not. The host test starts a `buwiz-broker` binary (`BUWIZ_BROKER_BIN`, required, executable) on a
+temporary data folder and drives it over loopback HTTP. The conformance runner comes from the SDK; a release is signed
+with the broker, `buwiz-broker sign-manifest`, through `BUWIZ_BROKER_BIN`.
 
 ## Do not
 

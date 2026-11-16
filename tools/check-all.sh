@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/check-all.sh — every gate a commit must pass, in order: rustfmt,
 # clippy with warnings denied, the Rust tests, the SDK links against the pin, and the SDK's conformance
-# runner (from the SDK) and the Bot's real-broker host test, plus the TSX setter guard and the SDK-1
+# runner (from the SDK) and the host test against a real broker, plus the TSX setter guard and the SDK-1
 # import gate (the Bot refuses to open an app importing outside its table).
 #
 # It prints one line per gate and a summary, keeps each gate's output in a
@@ -9,11 +9,9 @@
 #
 # Env: BUWIZ_SDK_DIR  a buwiz-sdk checkout at the pinned revision (tools/sdk-pin.sh)
 #                     with `bun install` run (required): the conformance step
-#      BUWIZ_BOT_DIR  a Buwiz Bot checkout holding BUWIZ_BOT_COMMIT, with
-#                     server/node_modules installed: only the host test needs
-#                     it (required unless SKIP_BOT=1)
-#      SKIP_BOT=1     skip the host test (no Bot checkout at hand); the
-#                     summary says so, and the run cannot pass
+#      BUWIZ_BROKER_BIN  a buwiz-broker binary (executable; required): the
+#                     host test starts it on a temporary data folder, and the
+#                     conformance step signs with its sign-manifest
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/ebirforms-gates.XXXXXX")"
@@ -24,13 +22,12 @@ if [ -z "${BUWIZ_SDK_DIR:-}" ] || [ ! -d "$BUWIZ_SDK_DIR" ]; then
   echo "check-all: set BUWIZ_SDK_DIR to a buwiz-sdk checkout (the SDK conformance step needs it): git clone https://github.com/buwiz-app/buwiz-sdk; cd buwiz-sdk; bun install" >&2
   exit 2
 fi
-if [ "${SKIP_BOT:-0}" != "1" ] && { [ -z "${BUWIZ_BOT_DIR:-}" ] || [ ! -d "$BUWIZ_BOT_DIR" ]; }; then
-  echo "check-all: set BUWIZ_BOT_DIR to a Buwiz Bot checkout (the Bot host test needs it), or SKIP_BOT=1" >&2
+if [ -z "${BUWIZ_BROKER_BIN:-}" ] || [ ! -f "$BUWIZ_BROKER_BIN" ] || [ ! -x "$BUWIZ_BROKER_BIN" ]; then
+  echo "check-all: set BUWIZ_BROKER_BIN to an executable buwiz-broker binary (the host test starts it)" >&2
   exit 2
 fi
 
 failed=0
-skipped=0
 gate() {
   local name="$1" log="$OUT/$2.log"
   shift 2
@@ -77,23 +74,14 @@ gate "No detached setters" detached-setters setters_total
 gate "SDK-1 nsh imports" nsh-imports nsh_imports_total
 gate "SDK pins agree" sdk-pin tools/sdk-pin.sh
 gate "SDK links follow the pin" sdk-links sdk_links_follow_the_pin
-# needs BUWIZ_SDK_DIR (a buwiz-sdk checkout), not a Bot
+# needs BUWIZ_SDK_DIR (a buwiz-sdk checkout)
 gate "SDK conformance" conformance bash tools/conformance.sh
-# needs BUWIZ_BOT_DIR (a Bot checkout at the commit the script pins)
-if [ "${SKIP_BOT:-0}" = "1" ]; then
-  printf 'SKIP  %-28s SKIP_BOT=1 (needs BUWIZ_BOT_DIR)\n' "Bot host test"
-  skipped=1
-else
-  gate "Bot host test" host-test bash tools/bot/host-test.sh
-fi
+# needs BUWIZ_BROKER_BIN (a buwiz-broker binary)
+gate "Broker host test" host-test bash tools/bot/host-test.sh
 
 echo "logs: $OUT"
 if [ "$failed" -gt 0 ]; then
   echo "$failed gate(s) failed"
-  exit 1
-fi
-if [ "$skipped" -gt 0 ]; then
-  echo "skipped gate(s): not a pass"
   exit 1
 fi
 echo "all gates passed"
