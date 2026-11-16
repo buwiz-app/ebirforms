@@ -4,7 +4,7 @@ Guidance for coding agents in this repo.
 
 ## What this repo is
 
-The eBIRForms mini app for the Buwiz Bot: plugin id `app.buwiz.ebirforms`, publisher `app.buwiz`, key `gc-2026-01`, protocol 1.0 (`buwiz-sdk` `docs/protocol-1.0.md`; 2.0 and 2.1 were its pre-release numbering, which a 1.0 Bot refuses).
+The eBIRForms mini app for the Buwiz Bot: plugin id `app.buwiz.ebirforms`, publisher `app.buwiz`, protocol 1.0 (`buwiz-sdk` `docs/protocol-1.0.md`).
 A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app` org (Books is the reference):
 
 | Path | What |
@@ -12,7 +12,7 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 | `crates/ebirforms-mini-app/` | the binary: MCP server, manifest, signing, tickets, TIN scrubbing |
 | `apps/ebirforms/` | the app screens, TSX until each is ported to a native nsh Rust screen crate in this repo (option C: compiled into the Bot, pinned by rev); a TSX screen is deleted once its native port passes the same tests |
 | `tests/` | integration tests, wired in the crate's `Cargo.toml` with `[[test]] path = "../../tests/…"` |
-| `tools/` | `check-all.sh` (every gate), `bot/conformance.sh`, `bot/host-test.sh`, `release/publish.sh` (a protocol 1.0 package release) |
+| `tools/` | `check-all.sh` (every gate), `conformance.sh`, `sdk-pin.sh`, `bot/host-test.sh`, `release/publish.sh` (a protocol 1.0 package release) |
 | `legacy/` | the first mini app from `hexuria/buwiz-forms`, kept only as the porting reference; it does not build |
 
 ## Invariants
@@ -55,13 +55,16 @@ A Rust MCP server on stdio. It is laid out like every mini app in the `buwiz-app
 `tools/check-all.sh` must pass before every commit: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test`, the SDK-1 import gate (`node tools/check-nsh-imports.mjs`: an app may import from `nsh` only the
 names the Bot's loader allows, `buwiz-bot app/src/mini_v1/load.rs` `SDK1_NSH`; anything else and the Bot refuses to
-open it), and `tools/bot/conformance.sh`. Conformance signs with a throwaway test key (`ebirforms-test-01`,
-never `gc-2026-01`) and runs the Bot's `buwiz-plugin-test`. It needs a Buwiz Bot checkout at protocol 1.0
-(`BUWIZ_BOT_DIR`) with its `server/node_modules`. Never switch branches in the Bot checkout itself.
+open it), the SDK links against the pin, `tools/conformance.sh` and `tools/bot/host-test.sh`. Conformance signs with
+a throwaway test key (`ebirforms-test-01`, never the release key) and runs the SDK's `buwiz-plugin-test`. It needs a
+`buwiz-sdk` checkout at the revision `tools/sdk-pin.sh` prints, with `bun install` run (`BUWIZ_SDK_DIR`); the gate
+stops at once if it is not. Only the host test still needs a Buwiz Bot checkout (`BUWIZ_BOT_DIR`) with its
+`server/node_modules`; never switch branches in it. The conformance runner and its test signer come from the SDK;
+a release is signed with the Bot's broker, `buwiz-broker sign-manifest`, through `BUWIZ_BROKER_BIN`.
 
 ## Do not
 
 - Edit eBIRForms (`eBIRForms/eBIRForms`), the Bot (`buwiz-bot/buwiz-bot`) or `hexuria/buwiz-forms` from here.
-- Sign with `gc-2026-01` or touch the login Keychain, unless the owner runs `tools/dev-install.sh --live` or a release
+- Sign with the release key or touch the login Keychain, unless the owner runs `tools/dev-install.sh --live` or a release
   by hand.
 - Commit, push or deploy unless the owner asks.
