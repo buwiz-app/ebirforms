@@ -884,32 +884,107 @@ fn the_bot_contract_over_a_scratch_database() {
             "{name}: {refused}"
         );
     }
-    // a generated widget is served nothing: not a write, not a taxpayer or a
-    // return, whatever app, open or press it carries
-    for caller in [
-        json!({ "origin": "widget", "widget": "w1" }),
-        json!({ "origin": "widget", "widget": "w1", "app": "forms", "open_id": open_id }),
-        json!({ "origin": "widget", "widget": "w1", "press": { "by": "ai", "who": "agent.broker" } }),
-    ] {
-        for (name, args) in [
-            (
-                "ebirforms_app_release_abandoned_claim",
-                release_args.clone(),
-            ),
-            ("ebirforms_form_dismiss", json!({})),
-            ("ebirforms_form_fill", json!({})),
-            ("ebirforms_taxpayers_list", json!({})),
-            ("ebirforms_ticket_subject", json!({ "ticket": ticket })),
-            ("ebirforms_queue_list", json!({})),
-        ] {
-            let refused = bot.call_as(caller.clone(), name, args);
-            assert_eq!(refused["isError"], true, "{name}: {refused}");
+    // eBIRForms serves only app, agent, routine and resolve callers. A generated
+    // widget, a mis-cased word, an origin it does not know and a call with no
+    // caller are refused for every tool, whatever app, open or press they carry.
+    // These tools are not app-only, so only this rule refuses them.
+    let ai_press = json!({ "by": "ai", "who": "agent.broker" });
+    let mut strangers = Vec::new();
+    for origin in ["widget", "Widget", "somebody", ""] {
+        strangers.push(json!({ "origin": origin, "widget": "w1" }));
+        strangers
+            .push(json!({ "origin": origin, "widget": "w1", "app": "forms", "open_id": open_id }));
+        strangers.push(json!({ "origin": origin, "widget": "w1", "press": ai_press }));
+    }
+    strangers.push(json!({}));
+    let not_app_only = [
+        ("ebirforms_form_dismiss", json!({})),
+        ("ebirforms_form_fill", json!({})),
+        ("ebirforms_form_open", json!({})),
+        ("ebirforms_form_save_draft", json!({})),
+        ("ebirforms_queue_list", json!({})),
+        ("ebirforms_status", json!({})),
+        ("ebirforms_profiles_list", json!({})),
+        ("ebirforms_drafts_list", json!({})),
+        ("ebirforms_calendar_get", json!({})),
+    ];
+    for caller in &strangers {
+        for (name, args) in &not_app_only {
+            let refused = bot.call_as(caller.clone(), name, args.clone());
+            assert_eq!(refused["isError"], true, "{name} {caller}: {refused}");
             assert_eq!(
                 refused["structuredContent"]["code"], "permission_denied",
-                "{name}: {refused}"
+                "{name} {caller}: {refused}"
             );
         }
     }
+    // a call with no `_meta` at all
+    for (name, args) in &not_app_only {
+        let reply = bot.send("tools/call", json!({ "name": name, "arguments": args }));
+        let refused = reply["result"].clone();
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {reply}"
+        );
+    }
+    // the reserved tools are the host's own calls and carry no caller, so no
+    // known origin is required there; a call that says it is a widget's is
+    // refused, and the open and the tickets are still there
+    let widget = json!({ "origin": "widget", "widget": "w1" });
+    for (name, args) in [
+        ("buwiz.uninstall", json!({})),
+        ("buwiz.session.close", json!({ "open_id": open_id })),
+        ("buwiz.ticket.resolve", json!({ "ticket": ticket })),
+    ] {
+        let refused = bot.call_as(widget.clone(), name, args);
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {refused}"
+        );
+    }
+    assert_eq!(
+        bot.call_as(
+            json!({}),
+            "buwiz.ticket.resolve",
+            json!({ "ticket": ticket })
+        )["structuredContent"]["valid"],
+        true
+    );
+    assert_ne!(
+        bot.call_as(
+            forms_app.clone(),
+            "ebirforms_ticket_subject",
+            json!({ "ticket": ticket })
+        )["structuredContent"]["code"],
+        "permission_denied",
+        "the open survived the widget's session close"
+    );
+    // a call that names an app or an open is checked whatever its origin: an
+    // open this process never certified, an app's open the tool is not listed
+    // for, an open with no app, and an app with no open
+    let fake_open = b64(&[9u8; 16]);
+    for (origin, extra) in [
+        ("agent", json!({ "app": "forms", "open_id": fake_open })),
+        ("agent", json!({ "app": "forms", "open_id": open_id })),
+        ("agent", json!({ "open_id": open_id })),
+        ("agent", json!({ "app": "forms" })),
+        ("routine", json!({ "app": "forms", "open_id": fake_open })),
+        ("resolve", json!({ "app": "forms", "open_id": open_id })),
+    ] {
+        let mut caller = json!({ "origin": origin });
+        for (k, v) in extra.as_object().unwrap() {
+            caller[k] = v.clone();
+        }
+        for name in ["ebirforms_status", "ebirforms_queue_list"] {
+            let refused = bot.call_as(caller.clone(), name, json!({}));
+            assert_eq!(
+                refused["structuredContent"]["code"], "permission_denied",
+                "{origin} {caller} {name}: {refused}"
+            );
+        }
+    }
+    // with no open named, the same reads still run for the assistant
+    assert_eq!(bot.agent("ebirforms_status", json!({}))["isError"], false);
     // a ticket for another taxpayer reaches neither tool
     for (name, args) in [
         (

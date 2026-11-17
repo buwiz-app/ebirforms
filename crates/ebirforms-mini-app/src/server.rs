@@ -315,7 +315,17 @@ impl Server {
             Some(Value::Object(arguments)) => arguments,
             Some(_) => return Ok(tool_error("arguments must be a JSON object".into())),
         };
+        // The host calls the reserved tools itself (never an app or the model)
+        // and sends no `buwiz/caller` on them (protocol 1.0 section 16.1 puts
+        // it on plugin tools), so no known origin can be required here. A call
+        // that says it is a widget's is refused all the same.
         if name.starts_with("buwiz.") {
+            if Caller::of(params).origin == Origin::Widget {
+                return Ok(protocol::fail(
+                    "permission_denied",
+                    "a reserved tool is not offered to widgets",
+                ));
+            }
             let app = self.app.as_deref().map_err(String::as_str);
             return match self.host.reserved(&self.manifest, app, name, arguments) {
                 None => Err((
@@ -372,9 +382,14 @@ impl Server {
     /// from an open this process certified, and resolve calls and routine
     /// queries never cause side effects.
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
-        // no tool is marked for widgets: a widget's call is refused whole
-        if caller.origin == Origin::Widget {
-            return Err(format!("{name} is not offered to widgets"));
+        // fail closed: only the origins eBIRForms serves run a tool. A widget
+        // (no tool is marked for widgets), an origin this build does not know
+        // and a call with no `buwiz/caller` are refused for every tool
+        if !matches!(
+            caller.origin,
+            Origin::App | Origin::Agent | Origin::Routine | Origin::Resolve
+        ) {
+            return Err(format!("{name} is not offered to this caller"));
         }
         if matches!(caller.origin, Origin::Resolve | Origin::Routine) && !read_only(name) {
             return Err(format!(
@@ -386,12 +401,14 @@ impl Server {
         if caller.press && !read_only(name) {
             return Err(format!("{name} needs the person's own click"));
         }
-        if caller.origin != Origin::App {
-            return if is_app_only(name) {
-                Err(format!("{name} is for the eBIRForms mini apps only"))
-            } else {
-                Ok(())
-            };
+        if caller.origin != Origin::App && is_app_only(name) {
+            return Err(format!("{name} is for the eBIRForms mini apps only"));
+        }
+        // any call that names an app or an open, whatever its origin, comes
+        // from an open this process certified and names a tool in that app's
+        // permissions
+        if caller.origin != Origin::App && caller.app.is_none() && caller.open_id.is_none() {
+            return Ok(());
         }
         let app = caller.app.as_deref().ok_or("an app call names no app")?;
         if self.host.provisioned()
