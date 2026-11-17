@@ -372,6 +372,10 @@ impl Server {
     /// from an open this process certified, and resolve calls and routine
     /// queries never cause side effects.
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
+        // no tool is marked for widgets: a widget's call is refused whole
+        if caller.origin == Origin::Widget {
+            return Err(format!("{name} is not offered to widgets"));
+        }
         if matches!(caller.origin, Origin::Resolve | Origin::Routine) && !read_only(name) {
             return Err(format!(
                 "{name} changes eBIRForms data, so it does not run for a resolve or routine call"

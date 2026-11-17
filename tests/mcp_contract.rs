@@ -884,6 +884,32 @@ fn the_bot_contract_over_a_scratch_database() {
             "{name}: {refused}"
         );
     }
+    // a generated widget is served nothing: not a write, not a taxpayer or a
+    // return, whatever app, open or press it carries
+    for caller in [
+        json!({ "origin": "widget", "widget": "w1" }),
+        json!({ "origin": "widget", "widget": "w1", "app": "forms", "open_id": open_id }),
+        json!({ "origin": "widget", "widget": "w1", "press": { "by": "ai", "who": "agent.broker" } }),
+    ] {
+        for (name, args) in [
+            (
+                "ebirforms_app_release_abandoned_claim",
+                release_args.clone(),
+            ),
+            ("ebirforms_form_dismiss", json!({})),
+            ("ebirforms_form_fill", json!({})),
+            ("ebirforms_taxpayers_list", json!({})),
+            ("ebirforms_ticket_subject", json!({ "ticket": ticket })),
+            ("ebirforms_queue_list", json!({})),
+        ] {
+            let refused = bot.call_as(caller.clone(), name, args);
+            assert_eq!(refused["isError"], true, "{name}: {refused}");
+            assert_eq!(
+                refused["structuredContent"]["code"], "permission_denied",
+                "{name}: {refused}"
+            );
+        }
+    }
     // a ticket for another taxpayer reaches neither tool
     for (name, args) in [
         (

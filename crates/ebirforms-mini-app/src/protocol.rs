@@ -31,6 +31,8 @@ pub(crate) enum Origin {
     Agent,
     Routine,
     Resolve,
+    /// A generated widget. eBIRForms offers no tool to widgets.
+    Widget,
     /// No `buwiz/caller` (tests, a plain MCP client).
     Unknown,
 }
@@ -61,6 +63,7 @@ impl Caller {
             Some("agent") => Origin::Agent,
             Some("routine") => Origin::Routine,
             Some("resolve") => Origin::Resolve,
+            Some("widget") => Origin::Widget,
             _ => Origin::Unknown,
         };
         Self {
