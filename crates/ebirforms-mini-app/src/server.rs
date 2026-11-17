@@ -315,15 +315,15 @@ impl Server {
             Some(Value::Object(arguments)) => arguments,
             Some(_) => return Ok(tool_error("arguments must be a JSON object".into())),
         };
-        // The host calls the reserved tools itself (never an app or the model)
-        // and sends no `buwiz/caller` on them (protocol 1.0 section 16.1 puts
-        // it on plugin tools), so no known origin can be required here. A call
-        // that says it is a widget's is refused all the same.
+        // The caller is read once, for the reserved branch and for `authorize`.
+        let caller = Caller::of(params);
+        // The host makes every reserved call itself with no `_meta`, so a reserved call that
+        // carries any `buwiz/caller`, whatever its origin, is not the host's: refused.
         if name.starts_with("buwiz.") {
-            if Caller::of(params).origin == Origin::Widget {
+            if caller.present {
                 return Ok(protocol::fail(
                     "permission_denied",
-                    "a reserved tool is not offered to widgets",
+                    "a reserved tool is the host's own call and carries no caller",
                 ));
             }
             let app = self.app.as_deref().map_err(String::as_str);
@@ -339,7 +339,6 @@ impl Server {
         if !self.host.ready() {
             return Err((INVALID_REQUEST, "buwiz.provision must come first".into()));
         }
-        let caller = Caller::of(params);
         if let Err(message) = self.authorize(name, &caller) {
             return Ok(protocol::fail("permission_denied", &message));
         }
@@ -371,7 +370,7 @@ impl Server {
             Scrubber::new(&app, today).result(&mut result);
         }
         // the assistant's answer carries its card; an app's own read does not
-        if matches!(caller.origin, Origin::Agent | Origin::Unknown) {
+        if caller.origin == Origin::Agent {
             cards::decorate(name, &sent, &mut result);
         }
         Ok(result)
@@ -382,9 +381,8 @@ impl Server {
     /// from an open this process certified, and resolve calls and routine
     /// queries never cause side effects.
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
-        // fail closed: only the origins eBIRForms serves run a tool. A widget
-        // (no tool is marked for widgets), an origin this build does not know
-        // and a call with no `buwiz/caller` are refused for every tool
+        // fail closed, reads included (the SDK lets an unknown caller read; a plugin
+        // that holds taxpayer data does not): only app, agent, routine and resolve run a tool
         if !matches!(
             caller.origin,
             Origin::App | Origin::Agent | Origin::Routine | Origin::Resolve
