@@ -315,7 +315,17 @@ impl Server {
             Some(Value::Object(arguments)) => arguments,
             Some(_) => return Ok(tool_error("arguments must be a JSON object".into())),
         };
+        // The caller is read once, for the reserved branch and for `authorize`.
+        let caller = Caller::of(params);
+        // The host makes every reserved call itself with no `_meta`, so a reserved call that
+        // carries any `buwiz/caller`, whatever its origin, is not the host's: refused.
         if name.starts_with("buwiz.") {
+            if caller.present {
+                return Ok(protocol::fail(
+                    "permission_denied",
+                    "a reserved tool is the host's own call and carries no caller",
+                ));
+            }
             let app = self.app.as_deref().map_err(String::as_str);
             return match self.host.reserved(&self.manifest, app, name, arguments) {
                 None => Err((
@@ -329,7 +339,6 @@ impl Server {
         if !self.host.ready() {
             return Err((INVALID_REQUEST, "buwiz.provision must come first".into()));
         }
-        let caller = Caller::of(params);
         if let Err(message) = self.authorize(name, &caller) {
             return Ok(protocol::fail("permission_denied", &message));
         }
@@ -361,7 +370,7 @@ impl Server {
             Scrubber::new(&app, today).result(&mut result);
         }
         // the assistant's answer carries its card; an app's own read does not
-        if matches!(caller.origin, Origin::Agent | Origin::Unknown) {
+        if caller.origin == Origin::Agent {
             cards::decorate(name, &sent, &mut result);
         }
         Ok(result)
@@ -372,6 +381,14 @@ impl Server {
     /// from an open this process certified, and resolve calls and routine
     /// queries never cause side effects.
     fn authorize(&self, name: &str, caller: &Caller) -> Result<(), String> {
+        // fail closed, reads included (the SDK lets an unknown caller read; a plugin
+        // that holds taxpayer data does not): only app, agent, routine and resolve run a tool
+        if !matches!(
+            caller.origin,
+            Origin::App | Origin::Agent | Origin::Routine | Origin::Resolve
+        ) {
+            return Err(format!("{name} is not offered to this caller"));
+        }
         if matches!(caller.origin, Origin::Resolve | Origin::Routine) && !read_only(name) {
             return Err(format!(
                 "{name} changes eBIRForms data, so it does not run for a resolve or routine call"
@@ -382,12 +399,14 @@ impl Server {
         if caller.press && !read_only(name) {
             return Err(format!("{name} needs the person's own click"));
         }
-        if caller.origin != Origin::App {
-            return if is_app_only(name) {
-                Err(format!("{name} is for the eBIRForms mini apps only"))
-            } else {
-                Ok(())
-            };
+        if caller.origin != Origin::App && is_app_only(name) {
+            return Err(format!("{name} is for the eBIRForms mini apps only"));
+        }
+        // any call that names an app or an open, whatever its origin, comes
+        // from an open this process certified and names a tool in that app's
+        // permissions
+        if caller.origin != Origin::App && caller.app.is_none() && caller.open_id.is_none() {
+            return Ok(());
         }
         let app = caller.app.as_deref().ok_or("an app call names no app")?;
         if self.host.provisioned()

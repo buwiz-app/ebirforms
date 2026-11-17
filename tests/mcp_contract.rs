@@ -33,10 +33,14 @@ impl Bot {
     }
 
     fn call_as(&mut self, caller: Value, name: &str, arguments: Value) -> Value {
-        let reply = self.send(
-            "tools/call",
-            json!({ "name": name, "arguments": arguments, "_meta": { "buwiz/caller": caller } }),
-        );
+        let reply = self.send("tools/call", {
+            // the host calls a reserved tool with no `_meta`
+            let mut params = json!({ "name": name, "arguments": arguments });
+            if !name.starts_with("buwiz.") {
+                params["_meta"] = json!({ "buwiz/caller": caller });
+            }
+            params
+        });
         reply
             .get("result")
             .cloned()
@@ -884,6 +888,147 @@ fn the_bot_contract_over_a_scratch_database() {
             "{name}: {refused}"
         );
     }
+    // eBIRForms serves only app, agent, routine and resolve callers. A generated
+    // widget, a mis-cased word, an origin it does not know and a call with no
+    // caller are refused for every tool, whatever app, open or press they carry.
+    // These tools are not app-only, so only this rule refuses them.
+    let ai_press = json!({ "by": "ai", "who": "agent.broker" });
+    let mut strangers = Vec::new();
+    for origin in ["widget", "Widget", "somebody", ""] {
+        strangers.push(json!({ "origin": origin, "widget": "w1" }));
+        strangers
+            .push(json!({ "origin": origin, "widget": "w1", "app": "forms", "open_id": open_id }));
+        strangers.push(json!({ "origin": origin, "widget": "w1", "press": ai_press }));
+    }
+    strangers.push(json!({}));
+    let not_app_only = [
+        ("ebirforms_form_dismiss", json!({})),
+        ("ebirforms_form_fill", json!({})),
+        ("ebirforms_form_open", json!({})),
+        ("ebirforms_form_save_draft", json!({})),
+        ("ebirforms_queue_list", json!({})),
+        ("ebirforms_status", json!({})),
+        ("ebirforms_profiles_list", json!({})),
+        ("ebirforms_drafts_list", json!({})),
+        ("ebirforms_calendar_get", json!({})),
+    ];
+    for caller in &strangers {
+        for (name, args) in &not_app_only {
+            let refused = bot.call_as(caller.clone(), name, args.clone());
+            assert_eq!(refused["isError"], true, "{name} {caller}: {refused}");
+            assert_eq!(
+                refused["structuredContent"]["code"], "permission_denied",
+                "{name} {caller}: {refused}"
+            );
+        }
+    }
+    // a call with no `_meta` at all
+    for (name, args) in &not_app_only {
+        let reply = bot.send("tools/call", json!({ "name": name, "arguments": args }));
+        let refused = reply["result"].clone();
+        assert_eq!(
+            refused["structuredContent"]["code"], "permission_denied",
+            "{name}: {reply}"
+        );
+    }
+    // The host makes every reserved call with no `_meta`. A reserved call that
+    // carries any caller, whatever its origin, is refused, and nothing it asked
+    // for happens: no session opens or closes, no ticket is forgotten.
+    let forged_open = b64(&[9u8; 16]);
+    let forged_args = json!({
+        "app": "forms", "open_id": forged_open, "ks_pub": b64(&[2u8; 32]),
+        "perms_sha256": perms, "not_after": not_after,
+    });
+    let reserved = [
+        (
+            "buwiz.provision",
+            json!({ "plugin": "app.buwiz.ebirforms" }),
+        ),
+        ("buwiz.session.open", forged_args.clone()),
+        ("buwiz.session.close", json!({ "open_id": open_id })),
+        ("buwiz.ticket.resolve", json!({ "ticket": ticket })),
+        ("buwiz.uninstall", json!({})),
+    ];
+    let mut carriers = vec![json!({})];
+    for origin in [
+        "agent", "app", "routine", "resolve", "widget", "Widget", "somebody", "",
+    ] {
+        carriers.push(json!({ "origin": origin, "app": "forms", "open_id": open_id }));
+    }
+    for (name, args) in &reserved {
+        for caller in &carriers {
+            // (call_as leaves the caller off a reserved call, as the host does; this puts it on)
+            let reply = bot.send(
+                "tools/call",
+                json!({ "name": name, "arguments": args, "_meta": { "buwiz/caller": caller } }),
+            );
+            assert_eq!(
+                reply["result"]["structuredContent"]["code"], "permission_denied",
+                "{name} {caller}: {reply}"
+            );
+        }
+    }
+    // the open still works, the ticket still resolves, and the forged open was never made
+    assert_ne!(
+        bot.call_as(
+            forms_app.clone(),
+            "ebirforms_ticket_subject",
+            json!({ "ticket": ticket })
+        )["structuredContent"]["code"],
+        "permission_denied",
+        "the certified open survived"
+    );
+    assert_eq!(
+        bot.call_as(
+            json!({}),
+            "buwiz.ticket.resolve",
+            json!({ "ticket": ticket })
+        )["structuredContent"]["valid"],
+        true
+    );
+    let forged_caller = json!({ "origin": "agent", "app": "forms", "open_id": forged_open });
+    assert_eq!(
+        bot.call_as(forged_caller.clone(), "ebirforms_status", json!({}))["structuredContent"]["code"],
+        "permission_denied"
+    );
+    // the host's own form (no `_meta`) still works
+    let host_open = bot.call_as(json!({}), "buwiz.session.open", forged_args);
+    assert_eq!(host_open["isError"], false, "{host_open}");
+    // a null caller is the same as none
+    let reply = bot.send(
+        "tools/call",
+        json!({ "name": "buwiz.ticket.resolve", "arguments": { "ticket": ticket }, "_meta": { "buwiz/caller": null } }),
+    );
+    assert_eq!(
+        reply["result"]["structuredContent"]["valid"], true,
+        "{reply}"
+    );
+    // a call that names an app or an open is checked whatever its origin: an
+    // open this process never certified, an app's open the tool is not listed
+    // for, an open with no app, and an app with no open
+    let fake_open = b64(&[9u8; 16]);
+    for (origin, extra) in [
+        ("agent", json!({ "app": "forms", "open_id": fake_open })),
+        ("agent", json!({ "app": "forms", "open_id": open_id })),
+        ("agent", json!({ "open_id": open_id })),
+        ("agent", json!({ "app": "forms" })),
+        ("routine", json!({ "app": "forms", "open_id": fake_open })),
+        ("resolve", json!({ "app": "forms", "open_id": open_id })),
+    ] {
+        let mut caller = json!({ "origin": origin });
+        for (k, v) in extra.as_object().unwrap() {
+            caller[k] = v.clone();
+        }
+        for name in ["ebirforms_status", "ebirforms_queue_list"] {
+            let refused = bot.call_as(caller.clone(), name, json!({}));
+            assert_eq!(
+                refused["structuredContent"]["code"], "permission_denied",
+                "{origin} {caller} {name}: {refused}"
+            );
+        }
+    }
+    // with no open named, the same reads still run for the assistant
+    assert_eq!(bot.agent("ebirforms_status", json!({}))["isError"], false);
     // a ticket for another taxpayer reaches neither tool
     for (name, args) in [
         (
@@ -1281,10 +1426,7 @@ fn the_bot_contract_over_a_scratch_database() {
     for name in ["buwiz.account.set", "buwiz.account.clear"] {
         let push =
             json!({ "account": "google", "label": "default", "access_token": "synthetic-token" });
-        let reply = bot.send(
-            "tools/call",
-            json!({ "name": name, "arguments": push, "_meta": { "buwiz/caller": {} } }),
-        );
+        let reply = bot.send("tools/call", json!({ "name": name, "arguments": push }));
         assert_eq!(reply["error"]["code"], -32601, "{name}: {reply}");
         assert!(
             !reply.to_string().contains("synthetic-token"),

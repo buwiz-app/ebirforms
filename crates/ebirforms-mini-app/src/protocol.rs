@@ -31,13 +31,17 @@ pub(crate) enum Origin {
     Agent,
     Routine,
     Resolve,
-    /// No `buwiz/caller` (tests, a plain MCP client).
+    /// A generated widget. eBIRForms offers no tool to widgets.
+    Widget,
+    /// No `buwiz/caller`, or an origin word this build does not know.
     Unknown,
 }
 
 /// `_meta["buwiz/caller"]`.
 #[derive(Debug, Clone)]
 pub(crate) struct Caller {
+    /// Whether the call carried a `buwiz/caller` at all (anything but absent or null).
+    pub present: bool,
     pub origin: Origin,
     pub app: Option<String>,
     pub open_id: Option<String>,
@@ -61,9 +65,11 @@ impl Caller {
             Some("agent") => Origin::Agent,
             Some("routine") => Origin::Routine,
             Some("resolve") => Origin::Resolve,
+            Some("widget") => Origin::Widget,
             _ => Origin::Unknown,
         };
         Self {
+            present: caller.is_some_and(|caller| !caller.is_null()),
             origin,
             app: text("app"),
             open_id: text("open_id"),

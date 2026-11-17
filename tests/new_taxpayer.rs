@@ -35,10 +35,14 @@ impl Bot {
     }
 
     fn call_as(&mut self, caller: &Value, name: &str, arguments: Value) -> Value {
-        let reply = self.send(
-            "tools/call",
-            json!({ "name": name, "arguments": arguments, "_meta": { "buwiz/caller": caller } }),
-        );
+        let reply = self.send("tools/call", {
+            // the host calls a reserved tool with no `_meta`
+            let mut params = json!({ "name": name, "arguments": arguments });
+            if !name.starts_with("buwiz.") {
+                params["_meta"] = json!({ "buwiz/caller": caller });
+            }
+            params
+        });
         reply
             .get("result")
             .cloned()

@@ -198,9 +198,14 @@ struct Bot {
 impl Bot {
     fn call_as(&mut self, caller: Value, name: &str, arguments: Value) -> Value {
         self.next += 1;
+        // the host calls a reserved tool with no `_meta`
+        let mut params = json!({ "name": name, "arguments": arguments });
+        if !name.starts_with("buwiz.") {
+            params["_meta"] = json!({ "buwiz/caller": caller });
+        }
         let line = json!({
             "jsonrpc": "2.0", "id": self.next, "method": "tools/call",
-            "params": { "name": name, "arguments": arguments, "_meta": { "buwiz/caller": caller } },
+            "params": params,
         })
         .to_string();
         let reply: Value =
