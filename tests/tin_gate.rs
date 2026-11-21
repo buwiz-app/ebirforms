@@ -59,6 +59,10 @@ fn tin_in(text: &str) -> Option<String> {
     let text = regex::Regex::new(r#""as_of":\s*[0-9]+"#)
         .unwrap()
         .replace_all(&text, "as_of");
+    // RFC3339 stamps (`next_try`, `since`) carry 9+ digit runs, also not TINs
+    let text = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+")
+        .unwrap()
+        .replace_all(&text, "stamp");
     for root in ROOTS {
         let dashed = format!("{}-{}-{}", &root[..3], &root[3..6], &root[6..]);
         for form in [

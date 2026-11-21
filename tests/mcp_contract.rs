@@ -1411,8 +1411,12 @@ fn the_bot_contract_over_a_scratch_database() {
         json!({ "kind": "verify", "label": "Verify it" })
     );
     let digits = regex::Regex::new(r"[0-9]{9}").unwrap();
+    // RFC3339 stamps (next_try, since) carry 9+ digit runs: strip them first
+    let stamps = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+").unwrap();
+    let list_json = list.to_string();
+    let list_text = stamps.replace_all(&list_json, "");
     assert!(
-        !digits.is_match(&list.to_string()),
+        !digits.is_match(&list_text),
         "no TIN in the queue answer: {list}"
     );
     assert!(
